@@ -235,7 +235,7 @@ func delete_world(world_id: String) -> bool:
 
 
 func _remote_available() -> bool:
-	return remote_adapter != null and OS.has_feature("web") and bool(remote_adapter.call("data_available"))
+	return remote_adapter != null and bool(remote_adapter.call("data_available"))
 
 
 func _load_file(path: String) -> Dictionary:
