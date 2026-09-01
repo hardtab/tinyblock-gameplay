@@ -127,7 +127,7 @@ func max_players() -> int:
 
 
 func set_session_max_players(limit: int) -> void:
-	_session_max_players = clampi(limit, 1, 16)
+	_session_max_players = maxi(limit, 1)
 
 
 func can_send_voice() -> bool:
