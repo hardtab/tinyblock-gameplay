@@ -7,7 +7,7 @@ signal transport_changed(mode: String)
 signal voice_packet_received(sender_player_id: String, sequence: int, audio: PackedByteArray)
 
 const PROTOCOL_VERSION := 2
-const DUEL_PROTOCOL_VERSION := 4
+const DUEL_PROTOCOL_VERSION := 3
 const MAX_PLAYERS := 4
 const HEARTBEAT_SECONDS := 15.0
 const RTC_CONNECT_TIMEOUT_SECONDS := 4.0
