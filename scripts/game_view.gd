@@ -11,6 +11,7 @@ signal player_defeated
 signal one_block_phase_changed(phase_number: int)
 signal remote_player_attacked(player_id: String)
 signal multiplayer_action_requested(action: String, payload: Dictionary)
+signal bow_shot_created(payload: Dictionary)
 signal block_mined(block_name: String)
 signal block_placed(block_name: String)
 signal harvest_blocked(block_name: String, required_tier: int, active_tier: int)
@@ -875,7 +876,7 @@ func bow_draw_progress() -> float:
 
 
 func _can_draw_bow() -> bool:
-	return not multiplayer_guest and sim.has_method("is_bow_equipped") and sim.is_bow_equipped() and sim.arrow_count() > 0
+	return sim.has_method("is_bow_equipped") and sim.is_bow_equipped() and sim.arrow_count() > 0
 
 
 func _fire_bow() -> bool:
@@ -883,9 +884,25 @@ func _fire_bow() -> bool:
 	if held_seconds < BOW_MIN_DRAW_SECONDS or not _can_draw_bow():
 		return false
 	var charge := clampf(held_seconds / BOW_FULL_DRAW_SECONDS, 0.0, 1.0)
-	if not sim.consume_arrow_and_damage_bow():
-		return false
 	var direction := bow_aim_direction.normalized()
+	if multiplayer_guest:
+		multiplayer_action_requested.emit("fire_bow", {
+			"direction_x": direction.x,
+			"direction_y": direction.y,
+			"charge": charge,
+		})
+		Sfx.attack()
+		return true
+	return not fire_authoritative_bow(direction, charge).is_empty()
+
+
+func fire_authoritative_bow(direction: Vector2, charge: float) -> Dictionary:
+	if direction.length() < 0.1 or not _can_draw_bow():
+		return {}
+	if not sim.consume_arrow_and_damage_bow():
+		return {}
+	direction = direction.normalized()
+	charge = clampf(charge, 0.0, 1.0)
 	var origin := Vector2(
 		float(sim.player.get("x", 0.0)) + float(sim.player.get("w", 20.0)) * 0.5,
 		float(sim.player.get("y", 0.0)) + float(sim.player.get("h", 28.0)) * 0.42,
@@ -894,15 +911,50 @@ func _fire_bow() -> bool:
 	var critical := charge >= 0.99 and randf() < 0.2
 	if critical:
 		damage = 4
+	var shot := {
+		"origin_x": origin.x,
+		"origin_y": origin.y,
+		"direction_x": direction.x,
+		"direction_y": direction.y,
+		"charge": charge,
+		"damage": damage,
+		"critical": critical,
+	}
+	_spawn_arrow(shot, true)
+	bow_shot_created.emit(shot)
+	Sfx.attack()
+	return shot
+
+
+func show_multiplayer_bow_shot(payload: Dictionary) -> bool:
+	var direction := Vector2(float(payload.get("direction_x", 0.0)), float(payload.get("direction_y", 0.0)))
+	var origin := Vector2(float(payload.get("origin_x", 0.0)), float(payload.get("origin_y", 0.0)))
+	var charge := float(payload.get("charge", 0.0))
+	if (
+		not is_finite(direction.x)
+		or not is_finite(direction.y)
+		or not is_finite(origin.x)
+		or not is_finite(origin.y)
+		or not is_finite(charge)
+		or direction.length() < 0.1
+	):
+		return false
+	_spawn_arrow(payload, false)
+	return true
+
+
+func _spawn_arrow(payload: Dictionary, authoritative: bool) -> void:
+	var direction := Vector2(float(payload.get("direction_x", 0.0)), float(payload.get("direction_y", 0.0))).normalized()
+	var origin := Vector2(float(payload.get("origin_x", 0.0)), float(payload.get("origin_y", 0.0)))
+	var charge := clampf(float(payload.get("charge", 0.0)), 0.0, 1.0)
 	arrows.append({
 		"position": origin + direction * 14.0,
 		"velocity": direction * lerpf(ARROW_MIN_SPEED, ARROW_MAX_SPEED, charge),
-		"damage": damage,
-		"critical": critical,
+		"damage": int(payload.get("damage", 1)),
+		"critical": bool(payload.get("critical", false)),
+		"authoritative": authoritative,
 		"age": 0.0,
 	})
-	Sfx.attack()
-	return true
 
 
 func _update_arrows(delta: float) -> void:
@@ -917,11 +969,13 @@ func _update_arrows(delta: float) -> void:
 		var position: Vector2 = arrow.get("position", Vector2.ZERO) + velocity * delta
 		arrow["velocity"] = velocity
 		arrow["position"] = position
+		var authoritative := bool(arrow.get("authoritative", true))
 		var tile := Vector2i(floori(position.x / BlockDefs.TILE), floori(position.y / BlockDefs.TILE))
 		if not sim.in_bounds(tile.x, tile.y) or sim.get_block(tile.x, tile.y).get("solid", false):
-			sim.give_to_inventory("arrow", 1)
-			sim.inventory_changed.emit()
-			sim.state_changed.emit()
+			if authoritative:
+				sim.give_to_inventory("arrow", 1)
+				sim.inventory_changed.emit()
+				sim.state_changed.emit()
 			arrows.remove_at(index)
 			continue
 		var hit_id := ""
@@ -932,8 +986,9 @@ func _update_arrows(delta: float) -> void:
 				hit_id = str(raw_id)
 				break
 		if not hit_id.is_empty():
-			show_creature_hit(hit_id)
-			sim.hit_creature(hit_id, int(arrow.get("damage", 1)))
+			if authoritative:
+				show_creature_hit(hit_id)
+				sim.hit_creature(hit_id, int(arrow.get("damage", 1)))
 			arrows.remove_at(index)
 			continue
 		arrows[index] = arrow
@@ -2521,12 +2576,22 @@ func _draw_equipment(px: float, y: float, scale_y: float, facing: int, equipment
 		draw_rect(Rect2(px + 13, boot_y + scale_y, 2, 2.0 * scale_y), feet_colors[2])
 	var hand_definition := _equipment_item_definition_for_name(str(equipment_slots.get("hand", "")), "hand")
 	var hand_shape := _equipment_shape_from_definition(hand_definition)
-	if hand_shape not in ["pickaxe", "hammer", "blade"]:
+	if hand_shape not in ["pickaxe", "hammer", "blade", "bow"]:
 		return
 	var hand_colors := _equipment_colors_from_definition(hand_definition)
 	# The held tool mirrors around the character so it always stays in the front hand.
 	var direction := 1.0 if facing >= 0 else -1.0
 	var hand := Vector2(px + (18.0 if direction > 0.0 else 2.0), y + 18.0 * scale_y)
+	if hand_shape == "bow":
+		var bow_center := hand + Vector2(direction * 7.0, -4.0 * scale_y)
+		var bow_top := bow_center + Vector2(-direction * 2.0, -11.0 * scale_y)
+		var bow_front := bow_center + Vector2(direction * 5.0, 0.0)
+		var bow_bottom := bow_center + Vector2(-direction * 2.0, 11.0 * scale_y)
+		draw_polyline(PackedVector2Array([bow_top, bow_front, bow_bottom]), hand_colors[0], 3.0, false)
+		draw_line(bow_top, bow_center, hand_colors[1], 1.5, false)
+		draw_line(bow_center, bow_bottom, hand_colors[1], 1.5, false)
+		draw_rect(Rect2(hand - Vector2.ONE, Vector2(3, 3)), hand_colors[2])
+		return
 	var handle_end := hand + Vector2(direction * 8.0, -14.0 * scale_y)
 	draw_line(hand, handle_end, hand_colors[0], 3.0, false)
 	var head_center := handle_end + Vector2(0.0, -1.0 * scale_y)
