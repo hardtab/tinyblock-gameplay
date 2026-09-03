@@ -1642,6 +1642,64 @@ func creature_morphology(definition: Dictionary, override: Dictionary = {}) -> D
 	return morphology if not morphology.is_empty() else legacy_creature_morphology(str(visual.get("body_shape", "round")))
 
 
+func creature_hitboxes(dest: Rect2, definition: Dictionary, facing: int = 1, hybrid_morphology: Dictionary = {}) -> Array[Rect2]:
+	var visual: Dictionary = definition.get("visual", {}) if definition.get("visual", {}) is Dictionary else {}
+	var morphology := creature_morphology(definition, hybrid_morphology)
+	if not morphology.is_empty() and (visual.has("morphology") or not hybrid_morphology.is_empty()):
+		var center := dest.get_center()
+		var w := dest.size.x
+		var h := dest.size.y
+		var side := 1.0 if facing >= 0 else -1.0
+		var body_plan := str(morphology.get("body_plan", "blob"))
+		var torso_shape := str(morphology.get("body_shape", "round"))
+		var proportions: Dictionary = morphology.get("proportions", {}) if morphology.get("proportions", {}) is Dictionary else {}
+		var body_scale := clampf(float(proportions.get("body", 1.0)), 0.6, 1.4)
+		var head_scale := clampf(float(proportions.get("head", 0.9)), 0.6, 1.4)
+		var body_w := w * (0.62 if torso_shape in ["compact", "round"] else (0.82 if torso_shape == "long" else 0.9)) * body_scale
+		var body_h := h * (0.46 if body_plan not in ["biped", "blob"] else 0.58) * body_scale
+		if body_plan == "plantlike":
+			body_h = h * 0.42 * body_scale
+		if torso_shape == "wide":
+			body_h *= 0.72
+		var body_center := center + Vector2(0, h * (0.06 if body_plan != "biped" else 0.04))
+		var head_center := body_center + (Vector2(side * body_w * 0.48, -body_h * 0.2) if body_plan in ["quadruped", "crawler", "serpentine", "fishlike"] else Vector2(0, -body_h * (0.72 if body_plan == "plantlike" else 0.48)))
+		var head_size := Vector2(w * 0.28, h * 0.3) * head_scale
+		return [
+			Rect2(body_center - Vector2(body_w, body_h) * 0.5, Vector2(body_w, body_h)),
+			Rect2(head_center - head_size * 0.5, head_size),
+		]
+
+	var center := dest.get_center()
+	var w := dest.size.x
+	var h := dest.size.y
+	var side := 1.0 if facing >= 0 else -1.0
+	match str(visual.get("body_shape", "round")):
+		"fox":
+			var head := center + Vector2(side * w * 0.27, -h * 0.13)
+			return [Rect2(center + Vector2(-w * 0.31, -h * 0.08), Vector2(w * 0.52, h * 0.34)), Rect2(head - Vector2(w * 0.15, h * 0.2), Vector2(w * 0.3, h * 0.4))]
+		"antlered":
+			var head := center + Vector2(side * w * 0.3, -h * 0.12)
+			return [Rect2(center + Vector2(-w * 0.32, -h * 0.03), Vector2(w * 0.56, h * 0.34)), Rect2(head - Vector2(w * 0.12, h * 0.17), Vector2(w * 0.24, h * 0.34))]
+		"penguin":
+			return [Rect2(center + Vector2(-w * 0.2, -h * 0.34), Vector2(w * 0.4, h * 0.72))]
+		"crab":
+			return [Rect2(center + Vector2(-w * 0.47, -h * 0.22), Vector2(w * 0.94, h * 0.46))]
+		"slug":
+			var head := center + Vector2(side * w * 0.25, -h * 0.04)
+			return [
+				Rect2(center + Vector2(-w * 0.35, h * 0.02), Vector2(w * 0.7, h * 0.24)),
+				Rect2(head - Vector2(w * 0.14, h * 0.15), Vector2(w * 0.28, h * 0.3)),
+				Rect2(center + Vector2(-side * w * 0.3 - w * 0.1, -h * 0.04), Vector2(w * 0.28, h * 0.2)),
+			]
+		"fish":
+			return [Rect2(center + Vector2(-w * 0.52, -h * 0.25), Vector2(w * 0.8, h * 0.5))]
+
+	var shape := str(visual.get("body_shape", "round"))
+	var body_w := dest.size.x * (0.72 if shape != "long" else 0.9)
+	var body_h := dest.size.y * (0.58 if shape != "crawler" else 0.38)
+	return [Rect2(center.x - body_w * 0.5, center.y - body_h * 0.35, body_w, body_h)]
+
+
 func _draw_creature_pattern(canvas: CanvasItem, center: Vector2, size: Vector2, pattern: String, accent: Color, detail: Color) -> void:
 	match pattern:
 		"patches":

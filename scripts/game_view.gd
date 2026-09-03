@@ -1008,8 +1008,11 @@ func _update_arrows(delta: float) -> void:
 		for raw_id in sim.creatures:
 			var creature: Dictionary = sim.creatures[raw_id]
 			var definition := sim._creature_definition(str(creature.get("block_name", "")))
-			if _creature_draw_rect(creature, definition).grow(3.0).has_point(position):
-				hit_id = str(raw_id)
+			for hitbox: Rect2 in _creature_hitboxes(creature, definition):
+				if hitbox.grow(1.5).has_point(position):
+					hit_id = str(raw_id)
+					break
+			if not hit_id.is_empty():
 				break
 		if not hit_id.is_empty():
 			_embed_arrow(hit_id, arrow, authoritative)
@@ -2422,6 +2425,17 @@ func _creature_draw_rect(creature: Dictionary, definition: Dictionary) -> Rect2:
 		# instead of leaving a size-dependent gap around its center.
 		origin.y = (floorf(pos.y) + 1.0) * BlockDefs.TILE - pixel_size.y
 	return Rect2(origin, pixel_size)
+
+
+func _creature_hitboxes(creature: Dictionary, definition: Dictionary) -> Array[Rect2]:
+	var traits: Dictionary = creature.get("traits", {}) if creature.get("traits", {}) is Dictionary else {}
+	var hybrid_morphology: Dictionary = traits.get("morphology", {}) if traits.get("morphology", {}) is Dictionary else {}
+	return BlockDefs.creature_hitboxes(
+		_creature_draw_rect(creature, definition),
+		definition,
+		int(creature.get("facing", 1)),
+		hybrid_morphology,
+	)
 
 
 func _draw_fire() -> void:
