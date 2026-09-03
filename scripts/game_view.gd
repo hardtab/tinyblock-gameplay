@@ -13,6 +13,7 @@ signal remote_player_attacked(player_id: String)
 signal multiplayer_action_requested(action: String, payload: Dictionary)
 signal bow_shot_created(payload: Dictionary)
 signal bow_arrow_embedded(payload: Dictionary)
+signal remote_player_hit_by_arrow(player_id: String, damage: int)
 signal block_mined(block_name: String)
 signal block_placed(block_name: String)
 signal harvest_blocked(block_name: String, required_tier: int, active_tier: int)
@@ -143,6 +144,7 @@ var _creature_hit_flash_expires_msec: Dictionary = {}
 var _remote_player_hit_flash_expires_msec: Dictionary = {}
 var tutorial_highlight_tile := NO_TILE
 var multiplayer_guest := false
+var local_multiplayer_player_id := ""
 var remote_players: Dictionary = {}
 var local_emoji_reaction: Dictionary = {}
 var remote_emoji_reactions: Dictionary = {}
@@ -901,7 +903,7 @@ func _fire_bow() -> bool:
 	return not fire_authoritative_bow(direction, charge).is_empty()
 
 
-func fire_authoritative_bow(direction: Vector2, charge: float) -> Dictionary:
+func fire_authoritative_bow(direction: Vector2, charge: float, owner_player_id: String = "") -> Dictionary:
 	if direction.length() < 0.1 or not _can_draw_bow():
 		return {}
 	if not sim.consume_arrow_and_damage_bow():
@@ -918,6 +920,7 @@ func fire_authoritative_bow(direction: Vector2, charge: float) -> Dictionary:
 		damage = 4
 	var shot := {
 		"shot_id": "%d:%d" % [Time.get_ticks_usec(), randi()],
+		"owner_player_id": owner_player_id,
 		"origin_x": origin.x,
 		"origin_y": origin.y,
 		"direction_x": direction.x,
@@ -955,6 +958,8 @@ func _spawn_arrow(payload: Dictionary, authoritative: bool) -> void:
 	var charge := clampf(float(payload.get("charge", 0.0)), 0.0, 1.0)
 	arrows.append({
 		"shot_id": str(payload.get("shot_id", "")),
+		"owner_player_id": str(payload.get("owner_player_id", "")),
+		"cleared_owner": false,
 		"position": origin + direction * 14.0,
 		"velocity": direction * lerpf(ARROW_MIN_SPEED, ARROW_MAX_SPEED, charge),
 		"damage": int(payload.get("damage", 1)),
@@ -977,6 +982,16 @@ func _update_arrows(delta: float) -> void:
 		arrow["velocity"] = velocity
 		arrow["position"] = position
 		var authoritative := bool(arrow.get("authoritative", true))
+		var owner_player_id := str(arrow.get("owner_player_id", ""))
+		var owner_rect := _arrow_owner_rect(owner_player_id)
+		if not owner_rect.has_point(position):
+			arrow["cleared_owner"] = true
+		elif bool(arrow.get("cleared_owner", false)):
+			_embed_player_arrow(owner_player_id, owner_rect, arrow, authoritative)
+			if authoritative:
+				_damage_arrow_owner(owner_player_id, int(arrow.get("damage", 1)))
+			arrows.remove_at(index)
+			continue
 		var tile := Vector2i(floori(position.x / BlockDefs.TILE), floori(position.y / BlockDefs.TILE))
 		if not sim.in_bounds(tile.x, tile.y):
 			arrows.remove_at(index)
@@ -1004,6 +1019,40 @@ func _update_arrows(delta: float) -> void:
 			arrows.remove_at(index)
 			continue
 		arrows[index] = arrow
+
+
+func set_arrow_owner(shot_id: String, player_id: String) -> void:
+	if shot_id.is_empty() or player_id.is_empty():
+		return
+	for arrow: Dictionary in arrows:
+		if str(arrow.get("shot_id", "")) == shot_id:
+			arrow["owner_player_id"] = player_id
+			return
+
+
+func _arrow_owner_rect(owner_player_id: String) -> Rect2:
+	if not owner_player_id.is_empty() and remote_players.has(owner_player_id):
+		var remote: Dictionary = remote_players[owner_player_id]
+		return Rect2(float(remote.get("x", 0.0)), float(remote.get("y", 0.0)), 20.0, 28.0).grow(1.0)
+	return Rect2(
+		float(sim.player.get("x", 0.0)),
+		float(sim.player.get("y", 0.0)),
+		float(sim.player.get("w", 20.0)),
+		float(sim.player.get("h", 28.0)),
+	).grow(1.0)
+
+
+func _damage_arrow_owner(owner_player_id: String, damage: int) -> void:
+	damage = maxi(1, damage)
+	if not owner_player_id.is_empty() and remote_players.has(owner_player_id):
+		remote_player_hit_by_arrow.emit(owner_player_id, damage)
+		return
+	sim.player["health"] = maxi(0, int(sim.player.get("health", WorldSim.MAX_PLAYER_HEALTH)) - damage)
+	show_local_player_hit()
+	Sfx.hurt()
+	sim.state_changed.emit()
+	if int(sim.player["health"]) <= 0:
+		sim.player_defeated.emit()
 
 
 func _embed_arrow(creature_id: String, arrow: Dictionary, authoritative: bool) -> void:
@@ -1046,6 +1095,24 @@ func _embed_world_arrow(arrow: Dictionary, authoritative: bool) -> void:
 		bow_arrow_embedded.emit(payload)
 
 
+func _embed_player_arrow(player_id: String, player_rect: Rect2, arrow: Dictionary, authoritative: bool) -> void:
+	var position: Vector2 = arrow.get("position", player_rect.get_center())
+	var direction: Vector2 = (arrow.get("velocity", Vector2.RIGHT) as Vector2).normalized()
+	var payload := {
+		"shot_id": str(arrow.get("shot_id", "")),
+		"target_kind": "player",
+		"player_id": player_id,
+		"offset_x": position.x - player_rect.get_center().x,
+		"offset_y": position.y - player_rect.get_center().y,
+		"direction_x": direction.x,
+		"direction_y": direction.y,
+		"critical": bool(arrow.get("critical", false)),
+	}
+	_store_embedded_arrow(payload)
+	if authoritative:
+		bow_arrow_embedded.emit(payload)
+
+
 func show_multiplayer_embedded_arrow(payload: Dictionary) -> bool:
 	var target_kind := str(payload.get("target_kind", "creature"))
 	var creature_id := str(payload.get("creature_id", ""))
@@ -1053,7 +1120,7 @@ func show_multiplayer_embedded_arrow(payload: Dictionary) -> bool:
 	var offset := Vector2(float(payload.get("offset_x", 0.0)), float(payload.get("offset_y", 0.0)))
 	var position := Vector2(float(payload.get("position_x", 0.0)), float(payload.get("position_y", 0.0)))
 	if (
-		target_kind not in ["creature", "world"]
+		target_kind not in ["creature", "player", "world"]
 		or not is_finite(direction.x)
 		or not is_finite(direction.y)
 		or direction.length() < 0.1
@@ -1062,6 +1129,12 @@ func show_multiplayer_embedded_arrow(payload: Dictionary) -> bool:
 	if target_kind == "creature" and (
 		creature_id.is_empty()
 		or not sim.creatures.has(creature_id)
+		or not is_finite(offset.x)
+		or not is_finite(offset.y)
+	):
+		return false
+	if target_kind == "player" and (
+		(str(payload.get("player_id", "")) != local_multiplayer_player_id and not remote_players.has(str(payload.get("player_id", ""))))
 		or not is_finite(offset.x)
 		or not is_finite(offset.y)
 	):
@@ -1096,6 +1169,11 @@ func _update_embedded_arrows(delta: float) -> void:
 			or (
 				str(embedded.get("target_kind", "creature")) == "creature"
 				and not sim.creatures.has(str(embedded.get("creature_id", "")))
+			)
+			or (
+				str(embedded.get("target_kind", "creature")) == "player"
+				and str(embedded.get("player_id", "")) != local_multiplayer_player_id
+				and not remote_players.has(str(embedded.get("player_id", "")))
 			)
 		):
 			embedded_arrows.remove_at(index)
@@ -2268,6 +2346,15 @@ func _draw_embedded_arrows(creature_id: String, dest: Rect2) -> void:
 		_draw_arrow_shape(position, direction, bool(embedded.get("critical", false)))
 
 
+func _draw_embedded_player_arrows(player_id: String, dest: Rect2) -> void:
+	for embedded: Dictionary in embedded_arrows:
+		if str(embedded.get("target_kind", "")) != "player" or str(embedded.get("player_id", "")) != player_id:
+			continue
+		var position := dest.get_center() + Vector2(float(embedded.get("offset_x", 0.0)), float(embedded.get("offset_y", 0.0)))
+		var direction := Vector2(float(embedded.get("direction_x", 1.0)), float(embedded.get("direction_y", 0.0))).normalized()
+		_draw_arrow_shape(position, direction, bool(embedded.get("critical", false)))
+
+
 func _draw_shagot_work_action(creature: Dictionary, definition: Dictionary, dest: Rect2) -> void:
 	if (
 		int(creature.get("work_action_ticks", 0)) <= 0
@@ -2389,6 +2476,7 @@ func _draw_player() -> void:
 	draw_rect(Rect2(px + 15, y + 12.0 * scale_y, 4, 8.0 * scale_y), shirt_dark)
 	_draw_selected_equipment(px, y, scale_y, facing)
 	_draw_hit_flash(self, Rect2(px, y, 20.0, body_h), _local_hit_flash_expires_msec)
+	_draw_embedded_player_arrows(local_multiplayer_player_id, Rect2(px, y, 20.0, body_h))
 	if _health_indicator_time_left > 0.0:
 		var indicator_alpha := clampf(_health_indicator_time_left / HEALTH_INDICATOR_FADE_SECONDS, 0.0, 1.0)
 		var indicator_x := health_indicator_left(px)
@@ -2435,6 +2523,7 @@ func _draw_remote_players() -> void:
 			remote.get("equipment_slots", {}) if remote.get("equipment_slots", {}) is Dictionary else {},
 		)
 		_draw_hit_flash(self, Rect2(px, py, 20.0, 28.0), int(_remote_player_hit_flash_expires_msec.get(player_id, 0)))
+		_draw_embedded_player_arrows(player_id, Rect2(px, py, 20.0, 28.0))
 		var indicator_x := health_indicator_left(px)
 		for heart in WorldSim.MAX_PLAYER_HEALTH:
 			var color := Color("#ef4b5a") if heart < int(remote.get("health", WorldSim.MAX_PLAYER_HEALTH)) else Color(0.2, 0.2, 0.24, 0.55)
