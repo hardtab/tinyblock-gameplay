@@ -42,6 +42,8 @@ const MAX_PLAYER_HEALTH := 4
 const MAX_NOURISHMENT := 100
 const COMBAT_REACH := BlockDefs.TILE * 2.0
 const COMBAT_ATTACK_COOLDOWN_MSEC := 500
+const FLINT_FROM_GRAVEL_CHANCE := 0.10
+const STRUCTURE_CHEST_BOW_CHANCE := 0.085
 const NOURISHMENT_DRAIN_SECONDS := 12.0
 const NOURISHMENT_RECOVERY_THRESHOLD := 60
 const NOURISHMENT_RECOVERY_SECONDS := 30.0
@@ -10442,6 +10444,17 @@ func hit_creature(creature_id: String, damage: int = 1) -> bool:
 		creatures.erase(creature_id)
 		if "sapient" not in (definition.get("tags", []) as Array):
 			give_to_inventory(block_name, 1)
+			var tags: Array = definition.get("tags", []) if definition.get("tags", []) is Array else []
+			var visual: Dictionary = definition.get("visual", {}) if definition.get("visual", {}) is Dictionary else {}
+			var locomotion: Dictionary = definition.get("locomotion", {}) if definition.get("locomotion", {}) is Dictionary else {}
+			if "spider" in tags or "skitter" in block_name:
+				var string_count := randi_range(0, 2)
+				if string_count > 0:
+					give_to_inventory("string", string_count)
+			if "bird" in tags or "penguin" in block_name or str(visual.get("shape", "")) == "winged" or str(locomotion.get("type", "")) == "flying":
+				var feather_count := randi_range(0, 2)
+				if feather_count > 0:
+					give_to_inventory("feather", feather_count)
 			inventory_changed.emit()
 	state_changed.emit()
 	return true
@@ -11457,6 +11470,23 @@ func active_weapon_damage() -> int:
 	return clampi(int(effects.get("creature_damage", 1)), 1, 5)
 
 
+func is_bow_equipped() -> bool:
+	return equipped_item_name("hand") == "bow"
+
+
+func arrow_count() -> int:
+	return maxi(0, int(inventory.get("arrow", 0)))
+
+
+func consume_arrow_and_damage_bow() -> bool:
+	if not is_bow_equipped() or arrow_count() <= 0:
+		return false
+	if not take_from_inventory("arrow"):
+		return false
+	damage_equipped_item("hand")
+	return true
+
+
 func active_movement_multiplier() -> float:
 	var definition := equipped_item_definition("feet")
 	if definition.is_empty():
@@ -11539,7 +11569,17 @@ func _generate_chest_loot(pos: Vector2i) -> void:
 		if not gear_pool.is_empty():
 			var gear_index := int(_structure_random("chest-gear:%s" % loot_key) * float(gear_pool.size())) % gear_pool.size()
 			contents[gear_pool[gear_index]] = 1
+	var durability: Dictionary = {}
+	# Preserve the single-item common-gear chest contract: 8.5% of gear rolls
+	# become a damaged bow instead of adding a second item.
+	if tier == "common_gear" and _structure_random("chest-bow:%s" % loot_key) < STRUCTURE_CHEST_BOW_CHANCE:
+		contents.clear()
+		contents["bow"] = 1
+		var bow_max := item_max_durability("bow")
+		var bow_remaining := 1 + int(_structure_random("chest-bow-durability:%s" % loot_key) * float(maxi(1, bow_max / 4)))
+		durability["bow"] = [clampi(bow_remaining, 1, bow_max)]
 	data["contents"] = contents
+	data["durability"] = durability
 	data["loot_generated"] = true
 	data["loot_tier"] = tier
 	containers[pos] = data
@@ -11769,6 +11809,8 @@ func finish_break(tx: int, ty: int) -> bool:
 		# creates a readable wood -> stone -> furnace progression without adding a
 		# second crafting UI or recipe shape system.
 		var drop_name := "cobblestone" if name == "stone" else name
+		if name == "gravel" and randf() < FLINT_FROM_GRAVEL_CHANCE:
+			drop_name = "flint"
 		give_to_inventory(drop_name, 1)
 		var forage_tags := _semantic_tags(name)
 		if "leaves" in forage_tags and "needles" not in forage_tags and randf() < 0.28:

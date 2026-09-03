@@ -58,6 +58,12 @@ const EMOJI_BUBBLE_SECONDS := 3.0
 const REMOTE_CREATURE_INTERPOLATION_SPEED := 14.0
 const REMOTE_CREATURE_TELEPORT_DISTANCE := 8.0
 const TIDEGLASS_REVEAL_GLOW_MSEC := 520
+const BOW_FULL_DRAW_SECONDS := 1.0
+const BOW_MIN_DRAW_SECONDS := 0.12
+const ARROW_MIN_SPEED := 250.0
+const ARROW_MAX_SPEED := 560.0
+const ARROW_GRAVITY := 310.0
+const ARROW_MAX_LIFETIME := 5.0
 
 var sim := WorldSim.new()
 var camera_pos := Vector2.ZERO
@@ -85,6 +91,10 @@ var keyboard_placing_held := false
 var virtual_left := false
 var virtual_right := false
 var virtual_jump_held := false
+var bow_aim_direction := Vector2.RIGHT
+var bow_drawing := false
+var bow_draw_started_msec := 0
+var arrows: Array[Dictionary] = []
 var _lighting_dirty := true
 var _lighting_texture: ImageTexture
 var _world_lod_texture: ImageTexture
@@ -274,6 +284,8 @@ func _finish_world_start() -> void:
 	_remote_player_render_revisions.clear()
 	remote_creature_targets.clear()
 	_tideglass_reveal_glow.clear()
+	arrows.clear()
+	bow_drawing = false
 	_invalidate_lighting()
 	_invalidate_world_render()
 	_last_sky_redraw_frame = -1000
@@ -300,6 +312,7 @@ func pause_world() -> void:
 	virtual_left = false
 	virtual_right = false
 	virtual_jump_held = false
+	bow_drawing = false
 	cancel_pointer_interaction()
 	keyboard_mining_held = false
 	keyboard_placing_held = false
@@ -317,6 +330,7 @@ func _process(_delta: float) -> void:
 	anim_frame = int(_animation_time * 60.0)
 	_update_remote_player_interpolation(_delta)
 	_update_remote_creature_interpolation(_delta)
+	_update_arrows(_delta)
 	_simulation_accumulator = minf(
 		_simulation_accumulator + _delta,
 		SIMULATION_STEP * float(MAX_SIMULATION_STEPS_PER_FRAME)
@@ -839,6 +853,92 @@ func set_virtual_jump(pressed: bool) -> void:
 	virtual_jump_held = pressed
 
 
+func set_bow_aim(direction: Vector2, active: bool, fire_on_release: bool = false) -> void:
+	if direction.length() >= 0.1:
+		bow_aim_direction = direction.normalized()
+		sim.player["facing"] = 1 if bow_aim_direction.x >= 0.0 else -1
+	if active:
+		if not bow_drawing and _can_draw_bow():
+			bow_drawing = true
+			bow_draw_started_msec = Time.get_ticks_msec()
+		return
+	var was_drawing := bow_drawing
+	bow_drawing = false
+	if fire_on_release and was_drawing:
+		_fire_bow()
+
+
+func bow_draw_progress() -> float:
+	if not bow_drawing:
+		return 0.0
+	return clampf(float(Time.get_ticks_msec() - bow_draw_started_msec) / 1000.0 / BOW_FULL_DRAW_SECONDS, 0.0, 1.0)
+
+
+func _can_draw_bow() -> bool:
+	return not multiplayer_guest and sim.has_method("is_bow_equipped") and sim.is_bow_equipped() and sim.arrow_count() > 0
+
+
+func _fire_bow() -> bool:
+	var held_seconds := float(Time.get_ticks_msec() - bow_draw_started_msec) / 1000.0
+	if held_seconds < BOW_MIN_DRAW_SECONDS or not _can_draw_bow():
+		return false
+	var charge := clampf(held_seconds / BOW_FULL_DRAW_SECONDS, 0.0, 1.0)
+	if not sim.consume_arrow_and_damage_bow():
+		return false
+	var direction := bow_aim_direction.normalized()
+	var origin := Vector2(
+		float(sim.player.get("x", 0.0)) + float(sim.player.get("w", 20.0)) * 0.5,
+		float(sim.player.get("y", 0.0)) + float(sim.player.get("h", 28.0)) * 0.42,
+	)
+	var damage := 1 if charge < 0.45 else (2 if charge < 0.95 else 3)
+	var critical := charge >= 0.99 and randf() < 0.2
+	if critical:
+		damage = 4
+	arrows.append({
+		"position": origin + direction * 14.0,
+		"velocity": direction * lerpf(ARROW_MIN_SPEED, ARROW_MAX_SPEED, charge),
+		"damage": damage,
+		"critical": critical,
+		"age": 0.0,
+	})
+	Sfx.attack()
+	return true
+
+
+func _update_arrows(delta: float) -> void:
+	for index in range(arrows.size() - 1, -1, -1):
+		var arrow: Dictionary = arrows[index]
+		arrow["age"] = float(arrow.get("age", 0.0)) + delta
+		if float(arrow["age"]) >= ARROW_MAX_LIFETIME:
+			arrows.remove_at(index)
+			continue
+		var velocity: Vector2 = arrow.get("velocity", Vector2.ZERO)
+		velocity.y += ARROW_GRAVITY * delta
+		var position: Vector2 = arrow.get("position", Vector2.ZERO) + velocity * delta
+		arrow["velocity"] = velocity
+		arrow["position"] = position
+		var tile := Vector2i(floori(position.x / BlockDefs.TILE), floori(position.y / BlockDefs.TILE))
+		if not sim.in_bounds(tile.x, tile.y) or sim.get_block(tile.x, tile.y).get("solid", false):
+			sim.give_to_inventory("arrow", 1)
+			sim.inventory_changed.emit()
+			sim.state_changed.emit()
+			arrows.remove_at(index)
+			continue
+		var hit_id := ""
+		for raw_id in sim.creatures:
+			var creature: Dictionary = sim.creatures[raw_id]
+			var definition := sim._creature_definition(str(creature.get("block_name", "")))
+			if _creature_draw_rect(creature, definition).grow(3.0).has_point(position):
+				hit_id = str(raw_id)
+				break
+		if not hit_id.is_empty():
+			show_creature_hit(hit_id)
+			sim.hit_creature(hit_id, int(arrow.get("damage", 1)))
+			arrows.remove_at(index)
+			continue
+		arrows[index] = arrow
+
+
 func get_zoom() -> float:
 	return zoom
 
@@ -1151,11 +1251,25 @@ func _draw() -> void:
 	_draw_fluids()
 	_draw_plants()
 	_draw_creatures()
+	_draw_arrows()
 	_draw_fire()
 	_draw_player()
 	_draw_mining_cracks()
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 	_draw_remote_player_indicators()
+
+
+func _draw_arrows() -> void:
+	for arrow: Dictionary in arrows:
+		var position: Vector2 = arrow.get("position", Vector2.ZERO)
+		var velocity: Vector2 = arrow.get("velocity", Vector2.RIGHT)
+		var direction := velocity.normalized()
+		var tail := position - direction * 12.0
+		draw_line(tail, position, Color("#d5a45d"), 2.0, false)
+		var wing := direction.orthogonal() * 3.0
+		draw_colored_polygon(PackedVector2Array([position + direction * 4.0, position - direction * 2.0 + wing, position - direction * 2.0 - wing]), Color("#d9dde5"))
+		if bool(arrow.get("critical", false)):
+			draw_circle(tail, 2.0, Color("#fff2a3"))
 
 
 func _draw_sky_layer() -> void:
@@ -2507,6 +2621,16 @@ func _jump_pressed() -> bool:
 
 
 func _draw_targeting(canvas: CanvasItem) -> void:
+	if bow_drawing:
+		var origin := Vector2(
+			float(sim.player.get("x", 0.0)) + float(sim.player.get("w", 20.0)) * 0.5,
+			float(sim.player.get("y", 0.0)) + float(sim.player.get("h", 28.0)) * 0.42,
+		)
+		var charge := bow_draw_progress()
+		var finish := origin + bow_aim_direction * lerpf(58.0, 94.0, charge)
+		var color := Color(1.0, 0.72 + charge * 0.24, 0.28, 0.55 + charge * 0.4)
+		canvas.draw_dashed_line(origin, finish, color, 1.5, 6.0)
+		canvas.draw_arc(finish, 5.0 + charge * 2.0, 0.0, TAU, 20, color, 2.0)
 	if tutorial_highlight_tile != NO_TILE:
 		var tutorial_alpha := 0.62 + sin(Time.get_ticks_msec() / 260.0) * 0.18
 		_draw_tile_highlight(

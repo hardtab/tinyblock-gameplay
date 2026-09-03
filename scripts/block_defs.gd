@@ -442,6 +442,36 @@ var BLOCKS := {
 		"hardness": 28, "harvest_tier": 4, "movement_speed_multiplier": 1.08, "friction": 0.5, "bounce": 0.92,
 		"definition": {"content_id": "core.choir_vent", "kind": "block", "schema_version": "1.0", "display": {"name": {"en": "Choir Vent"}, "description": {"en": "A resonant fossil vent whose pressure pulse launches anything that lands on it."}}},
 		"lighting": {"emission": 0.16, "color": "#c8fff0"}, "tags": ["bone", "vent", "resonant", "launch", "deep"],
+	},
+	"stick": {
+		"id": 64, "content_id": "core.item.stick", "solid": false, "fluid": false, "item": true, "hardness": 1,
+		"base": "#76502f", "light": "#d7a264", "dark": "#3f2a1a",
+		"definition": {"content_id": "core.item.stick", "kind": "item", "schema_version": "1.0", "display": {"name": {"en": "Stick"}, "description": {"en": "A straight wooden shaft used for tools and arrows."}}, "visual": {"shape": "stick", "pattern": "plain", "palette": ["#76502f", "#d7a264", "#efc486"]}, "category": "material", "rarity": "common", "tags": ["item", "wood", "material", "crafted"]},
+	},
+	"string": {
+		"id": 65, "content_id": "core.item.string", "solid": false, "fluid": false, "item": true, "hardness": 1,
+		"base": "#d8d5cb", "light": "#ffffff", "dark": "#85827a",
+		"definition": {"content_id": "core.item.string", "kind": "item", "schema_version": "1.0", "display": {"name": {"en": "String"}, "description": {"en": "Strong spider silk used to string a bow."}}, "visual": {"shape": "string", "pattern": "plain", "palette": ["#85827a", "#e8e5dc", "#ffffff"]}, "category": "material", "rarity": "common", "tags": ["item", "fiber", "spider", "material"]},
+	},
+	"flint": {
+		"id": 66, "content_id": "core.item.flint", "solid": false, "fluid": false, "item": true, "hardness": 1,
+		"base": "#4f5358", "light": "#b2b8bd", "dark": "#282b2e",
+		"definition": {"content_id": "core.item.flint", "kind": "item", "schema_version": "1.0", "display": {"name": {"en": "Flint"}, "description": {"en": "A sharp stone chip occasionally found while mining gravel."}}, "visual": {"shape": "flint", "pattern": "speckled", "palette": ["#303438", "#777d82", "#c0c5c9"]}, "category": "material", "rarity": "common", "tags": ["item", "stone", "sharp", "material"]},
+	},
+	"feather": {
+		"id": 67, "content_id": "core.item.feather", "solid": false, "fluid": false, "item": true, "hardness": 1,
+		"base": "#e8e5dc", "light": "#ffffff", "dark": "#8e929a",
+		"definition": {"content_id": "core.item.feather", "kind": "item", "schema_version": "1.0", "display": {"name": {"en": "Feather"}, "description": {"en": "A light flight feather used to steady arrows."}}, "visual": {"shape": "feather", "pattern": "plain", "palette": ["#767b82", "#e7e5df", "#ffffff"]}, "category": "material", "rarity": "common", "tags": ["item", "feather", "material"]},
+	},
+	"arrow": {
+		"id": 68, "content_id": "core.item.arrow", "solid": false, "fluid": false, "item": true, "hardness": 1,
+		"base": "#7b5230", "light": "#e7e5df", "dark": "#34383c",
+		"definition": {"content_id": "core.item.arrow", "kind": "item", "schema_version": "1.0", "display": {"name": {"en": "Arrow"}, "description": {"en": "Ammunition for a bow. Missed arrows can be recovered."}}, "visual": {"shape": "arrow", "pattern": "plain", "palette": ["#7b5230", "#d8d5cb", "#555b61"]}, "category": "ammunition", "rarity": "common", "tags": ["item", "ammunition", "projectile", "crafted"]},
+	},
+	"bow": {
+		"id": 69, "content_id": "core.item.bow", "solid": false, "fluid": false, "item": true, "hardness": 1,
+		"base": "#8a5a2e", "light": "#d8d5cb", "dark": "#442b18",
+		"definition": {"content_id": "core.item.bow", "kind": "item", "schema_version": "1.0", "display": {"name": {"en": "Bow"}, "description": {"en": "A ranged weapon. Hold the aim stick to draw, then release to fire."}}, "visual": {"shape": "bow", "pattern": "banded", "palette": ["#8a5a2e", "#d8d5cb", "#e9b86e"]}, "category": "weapon", "rarity": "common", "effects": {"mining_speed_multiplier": 1.0, "creature_damage": 1, "movement_speed_multiplier": 1.0, "jump_power_multiplier": 1.0}, "durability": {"max_uses": 384}, "tags": ["item", "weapon", "ranged", "bow", "crafted"], "mechanics": ["hotbar_active", "aim_and_release"]},
 	}
 }
 
@@ -463,6 +493,14 @@ const RECIPES: Array[Dictionary] = [
 ]
 
 const CONTENT_RECIPES: Array[Dictionary] = [
+	{"in": {"core.planks": 2}, "out": {"core.item.stick": 4}},
+	{"in": {"core.palm_planks": 2}, "out": {"core.item.stick": 4}},
+	{"in": {"core.pine_planks": 2}, "out": {"core.item.stick": 4}},
+	{"in": {"core.weeping_planks": 2}, "out": {"core.item.stick": 4}},
+	# Tiny Block's tactile crafting tray has four slots, so the Minecraft 3+3
+	# ratio is compressed to an equivalent 2 sticks + 2 string.
+	{"in": {"core.item.stick": 2, "core.item.string": 2}, "out": {"core.item.bow": 1}, "station": "workbench"},
+	{"in": {"core.item.flint": 1, "core.item.stick": 1, "core.item.feather": 1}, "out": {"core.item.arrow": 4}},
 	{"in": {"core.palm_wood": 1}, "out": {"core.palm_planks": 4}},
 	{"in": {"core.pine_wood": 1}, "out": {"core.pine_planks": 4}},
 	{"in": {"core.weeping_wood": 1}, "out": {"core.weeping_planks": 4}},
@@ -1921,10 +1959,26 @@ func draw_item(canvas: CanvasItem, dest: Rect2, definition: Dictionary) -> void:
 		canvas.draw_rect(Rect2(center + Vector2(-12, -4) * scale, Vector2(24, 4) * scale), detail)
 		canvas.draw_circle(center + Vector2(-4, -5) * scale, 4.0 * scale, head)
 		canvas.draw_circle(center + Vector2(4, -6) * scale, 4.5 * scale, head.lightened(0.12))
+	elif shape == "bow":
+		canvas.draw_arc(center + Vector2(-3, 0) * scale, 13.0 * scale, -PI * 0.48, PI * 0.48, 20, handle, maxf(2.0, 3.0 * scale))
+		canvas.draw_line(center + Vector2(-3, -13) * scale, center + Vector2(-3, 13) * scale, head, maxf(1.0, 1.5 * scale))
+	elif shape == "arrow":
+		canvas.draw_line(center + Vector2(-11, 8) * scale, center + Vector2(9, -8) * scale, handle, maxf(1.5, 2.0 * scale))
+		canvas.draw_colored_polygon(PackedVector2Array([center + Vector2(12, -11) * scale, center + Vector2(5, -8) * scale, center + Vector2(9, -3) * scale]), detail)
+	elif shape == "stick":
+		canvas.draw_line(center + Vector2(-8, 11) * scale, center + Vector2(8, -11) * scale, handle, maxf(2.0, 3.0 * scale))
+	elif shape == "string":
+		canvas.draw_arc(center, 10.0 * scale, -PI * 0.8, PI * 0.8, 20, head, maxf(1.0, 1.8 * scale))
+		canvas.draw_arc(center + Vector2(2, 0) * scale, 6.0 * scale, PI * 0.2, PI * 1.8, 16, detail, maxf(1.0, 1.4 * scale))
+	elif shape == "flint":
+		canvas.draw_colored_polygon(PackedVector2Array([center + Vector2(-9, 4) * scale, center + Vector2(-3, -10) * scale, center + Vector2(10, -5) * scale, center + Vector2(7, 8) * scale]), head)
+	elif shape == "feather":
+		canvas.draw_line(center + Vector2(-7, 11) * scale, center + Vector2(7, -11) * scale, handle, maxf(1.0, 1.6 * scale))
+		canvas.draw_colored_polygon(PackedVector2Array([center + Vector2(-5, 5) * scale, center + Vector2(7, -11) * scale, center + Vector2(4, 4) * scale]), head)
 	else:
 		canvas.draw_line(center + Vector2(-7, 10) * scale, center + Vector2(6, -8) * scale, handle, maxf(3.0, 4.0 * scale))
 	match shape:
-		"boots", "charm", "ingot", "berries", "meal": pass
+		"boots", "charm", "ingot", "berries", "meal", "bow", "arrow", "stick", "string", "flint", "feather": pass
 		"hammer": canvas.draw_rect(Rect2(center + Vector2(-5, -12) * scale, Vector2(15, 7) * scale), head)
 		"blade":
 			canvas.draw_colored_polygon(PackedVector2Array([center + Vector2(3, -12) * scale, center + Vector2(10, -16) * scale, center + Vector2(7, -5) * scale]), head)
