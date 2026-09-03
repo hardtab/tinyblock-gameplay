@@ -13,6 +13,7 @@ signal remote_player_attacked(player_id: String)
 signal multiplayer_action_requested(action: String, payload: Dictionary)
 signal bow_shot_created(payload: Dictionary)
 signal bow_arrow_embedded(payload: Dictionary)
+signal bow_arrow_collected(payload: Dictionary)
 signal remote_player_hit_by_arrow(player_id: String, damage: int)
 signal block_mined(block_name: String)
 signal block_placed(block_name: String)
@@ -68,6 +69,9 @@ const ARROW_MAX_SPEED := 560.0
 const ARROW_GRAVITY := 310.0
 const ARROW_MAX_LIFETIME := 5.0
 const EMBEDDED_ARROW_LIFETIME := 3.0
+const EMBEDDED_ARROW_PICKUP_DELAY := 0.35
+const EMBEDDED_ARROW_PICKUP_RADIUS := 6.0
+const EMBEDDED_ARROW_PICKUP_RETRY := 0.25
 
 var sim := WorldSim.new()
 var camera_pos := Vector2.ZERO
@@ -998,10 +1002,6 @@ func _update_arrows(delta: float) -> void:
 			continue
 		if sim.get_block(tile.x, tile.y).get("solid", false):
 			_embed_world_arrow(arrow, authoritative)
-			if authoritative:
-				sim.give_to_inventory("arrow", 1)
-				sim.inventory_changed.emit()
-				sim.state_changed.emit()
 			arrows.remove_at(index)
 			continue
 		var hit_id := ""
@@ -1152,6 +1152,17 @@ func show_multiplayer_embedded_arrow(payload: Dictionary) -> bool:
 	return true
 
 
+func show_multiplayer_collected_arrow(payload: Dictionary) -> bool:
+	var shot_id := str(payload.get("shot_id", ""))
+	if shot_id.is_empty():
+		return false
+	for index in range(embedded_arrows.size() - 1, -1, -1):
+		if str(embedded_arrows[index].get("shot_id", "")) == shot_id:
+			embedded_arrows.remove_at(index)
+			return true
+	return false
+
+
 func _store_embedded_arrow(payload: Dictionary) -> void:
 	var shot_id := str(payload.get("shot_id", ""))
 	if not shot_id.is_empty():
@@ -1167,6 +1178,7 @@ func _update_embedded_arrows(delta: float) -> void:
 	for index in range(embedded_arrows.size() - 1, -1, -1):
 		var embedded: Dictionary = embedded_arrows[index]
 		embedded["age"] = float(embedded.get("age", 0.0)) + delta
+		embedded["pickup_retry"] = maxf(0.0, float(embedded.get("pickup_retry", 0.0)) - delta)
 		if (
 			float(embedded["age"]) >= EMBEDDED_ARROW_LIFETIME
 			or (
@@ -1180,8 +1192,74 @@ func _update_embedded_arrows(delta: float) -> void:
 			)
 		):
 			embedded_arrows.remove_at(index)
-		else:
-			embedded_arrows[index] = embedded
+			continue
+		embedded_arrows[index] = embedded
+		if float(embedded["age"]) < EMBEDDED_ARROW_PICKUP_DELAY:
+			continue
+		var position := _embedded_arrow_position(embedded)
+		if not is_finite(position.x) or not is_finite(position.y):
+			continue
+		if not _arrow_owner_rect("").grow(EMBEDDED_ARROW_PICKUP_RADIUS).has_point(position):
+			continue
+		var shot_id := str(embedded.get("shot_id", ""))
+		if multiplayer_guest:
+			if not shot_id.is_empty() and float(embedded.get("pickup_retry", 0.0)) <= 0.0:
+				multiplayer_action_requested.emit("collect_embedded_arrow", {"shot_id": shot_id})
+				embedded["pickup_retry"] = EMBEDDED_ARROW_PICKUP_RETRY
+				embedded_arrows[index] = embedded
+			continue
+		collect_embedded_arrow(shot_id)
+
+
+func collect_embedded_arrow(shot_id: String, collector_player_id: String = "", known_position: Vector2 = Vector2(INF, INF)) -> bool:
+	if shot_id.is_empty():
+		return false
+	for index in range(embedded_arrows.size() - 1, -1, -1):
+		var embedded: Dictionary = embedded_arrows[index]
+		if str(embedded.get("shot_id", "")) != shot_id or float(embedded.get("age", 0.0)) < EMBEDDED_ARROW_PICKUP_DELAY:
+			continue
+		var position := known_position if is_finite(known_position.x) and is_finite(known_position.y) else _embedded_arrow_position(embedded)
+		if not is_finite(position.x) or not is_finite(position.y):
+			return false
+		if not _arrow_owner_rect("").grow(EMBEDDED_ARROW_PICKUP_RADIUS).has_point(position):
+			return false
+		embedded_arrows.remove_at(index)
+		sim.give_to_inventory("arrow", 1)
+		sim.inventory_changed.emit()
+		sim.state_changed.emit()
+		bow_arrow_collected.emit({
+			"shot_id": shot_id,
+			"player_id": collector_player_id if not collector_player_id.is_empty() else local_multiplayer_player_id,
+		})
+		return true
+	return false
+
+
+func embedded_arrow_position(shot_id: String) -> Vector2:
+	for embedded: Dictionary in embedded_arrows:
+		if str(embedded.get("shot_id", "")) == shot_id:
+			return _embedded_arrow_position(embedded)
+	return Vector2(INF, INF)
+
+
+func _embedded_arrow_position(embedded: Dictionary) -> Vector2:
+	var target_kind := str(embedded.get("target_kind", "creature"))
+	if target_kind == "world":
+		return Vector2(float(embedded.get("position_x", INF)), float(embedded.get("position_y", INF)))
+	if target_kind == "player":
+		return _arrow_owner_rect(str(embedded.get("player_id", ""))).get_center() + Vector2(
+			float(embedded.get("offset_x", 0.0)),
+			float(embedded.get("offset_y", 0.0)),
+		)
+	var creature_id := str(embedded.get("creature_id", ""))
+	if not sim.creatures.has(creature_id):
+		return Vector2(INF, INF)
+	var creature: Dictionary = sim.creatures[creature_id]
+	var definition := sim._creature_definition(str(creature.get("block_name", "")))
+	return _creature_draw_rect(creature, definition).get_center() + Vector2(
+		float(embedded.get("offset_x", 0.0)),
+		float(embedded.get("offset_y", 0.0)),
+	)
 
 
 func get_zoom() -> float:
