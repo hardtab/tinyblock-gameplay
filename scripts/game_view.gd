@@ -268,6 +268,8 @@ func start_new_world(mode: String = WorldSim.WORLD_MODE_SKYBLOCK, access_mode: S
 		sim.create_one_block_world()
 	elif mode == WorldSim.WORLD_MODE_CHALLENGE:
 		sim.create_challenge_world()
+	elif mode == WorldSim.WORLD_MODE_DUEL:
+		sim.create_duel_world()
 	else:
 		sim.create_island()
 	sim.access_mode = access_mode
@@ -996,6 +998,29 @@ func _update_arrows(delta: float) -> void:
 				_damage_arrow_owner(owner_player_id, int(arrow.get("damage", 1)))
 			arrows.remove_at(index)
 			continue
+		if authoritative and not local_multiplayer_player_id.is_empty():
+			var hit_player_id := ""
+			var hit_player_rect := Rect2()
+			if owner_player_id != local_multiplayer_player_id:
+				var local_rect := _arrow_owner_rect(local_multiplayer_player_id)
+				if local_rect.has_point(position):
+					hit_player_id = local_multiplayer_player_id
+					hit_player_rect = local_rect
+			if hit_player_id.is_empty():
+				for raw_player_id in remote_players:
+					var player_id := str(raw_player_id)
+					if player_id == owner_player_id:
+						continue
+					var remote_rect := _arrow_owner_rect(player_id)
+					if remote_rect.has_point(position):
+						hit_player_id = player_id
+						hit_player_rect = remote_rect
+						break
+			if not hit_player_id.is_empty():
+				_embed_player_arrow(hit_player_id, hit_player_rect, arrow, true)
+				_damage_arrow_owner(hit_player_id, int(arrow.get("damage", 1)))
+				arrows.remove_at(index)
+				continue
 		var tile := Vector2i(floori(position.x / BlockDefs.TILE), floori(position.y / BlockDefs.TILE))
 		if not sim.in_bounds(tile.x, tile.y):
 			arrows.remove_at(index)

@@ -6,10 +6,8 @@ signal message_received(message: Dictionary)
 signal transport_changed(mode: String)
 signal voice_packet_received(sender_player_id: String, sequence: int, audio: PackedByteArray)
 
-# Protocol 2 peers ignore the optional inventory_client_revision field and the
-# current client retains a legacy acknowledgement path. Keep this version stable
-# so 1.2.6 can join existing 1.2.3–1.2.5 worlds.
 const PROTOCOL_VERSION := 2
+const DUEL_PROTOCOL_VERSION := 3
 const MAX_PLAYERS := 4
 const HEARTBEAT_SECONDS := 15.0
 const RTC_CONNECT_TIMEOUT_SECONDS := 4.0
@@ -37,6 +35,7 @@ var session_id := ""
 var join_code := ""
 var transport_mode := "websocket"
 var websocket_fallback_enabled := false
+var session_protocol_version := PROTOCOL_VERSION
 var _session_max_players := MAX_PLAYERS
 var _dedicated_server_session := false
 var _session_classification := ""
@@ -156,11 +155,12 @@ func send_voice_frame(audio: PackedByteArray, sequence: int) -> bool:
 	return sent
 
 
-func connect_with_ticket(websocket_url: String, ticket: String, code: String = "", allow_websocket_fallback: bool = false) -> Error:
+func connect_with_ticket(websocket_url: String, ticket: String, code: String = "", allow_websocket_fallback: bool = false, protocol_version: int = PROTOCOL_VERSION) -> Error:
 	disconnect_from_session()
 	if websocket_url.is_empty() or ticket.is_empty():
 		return ERR_INVALID_PARAMETER
 	join_code = code
+	session_protocol_version = protocol_version
 	websocket_fallback_enabled = allow_websocket_fallback
 	socket = WebSocketPeer.new()
 	var separator := "&" if websocket_url.contains("?") else "?"
@@ -181,6 +181,7 @@ func disconnect_from_session() -> void:
 	player_id = ""
 	session_id = ""
 	join_code = ""
+	session_protocol_version = PROTOCOL_VERSION
 	_was_open = false
 	_heartbeat_left = HEARTBEAT_SECONDS
 	_known_players.clear()
@@ -252,7 +253,7 @@ func _poll_websocket(delta: float) -> void:
 	if state == WebSocketPeer.STATE_OPEN:
 		if not _was_open:
 			_was_open = true
-			_send_ws({"kind": "control", "type": "hello", "payload": {"protocol_version": PROTOCOL_VERSION}})
+			_send_ws({"kind": "control", "type": "hello", "payload": {"protocol_version": session_protocol_version}})
 		_heartbeat_left -= delta
 		if _heartbeat_left <= 0.0:
 			_heartbeat_left = HEARTBEAT_SECONDS

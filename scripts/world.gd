@@ -235,6 +235,7 @@ const WORLD_MODE_FLOATING_ISLANDS := "floating_islands"
 const WORLD_MODE_PROCEDURAL := "procedural"
 const WORLD_MODE_ONE_BLOCK := "one_block"
 const WORLD_MODE_CHALLENGE := "challenge_run"
+const WORLD_MODE_DUEL := "duel"
 const CHALLENGE_BASE_Y := ISLAND_CY
 const CHALLENGE_DEEP_FIRST_CHUNK := 32
 const CHALLENGE_DEEP_CHAPTER_INTERVAL := 16
@@ -666,6 +667,98 @@ func create_floating_islands_world(seed: int = 0) -> void:
 	static_tiles_changed.emit()
 	lighting_changed.emit()
 	state_changed.emit()
+
+
+func create_duel_world(seed: int = 0) -> void:
+	create_island()
+	_suspend_state_changed = true
+	world_mode = WORLD_MODE_DUEL
+	world_seed = seed if seed != 0 else maxi(1, randi())
+	keep_inventory_on_death = false
+	tiles.clear()
+	fluid_level.clear()
+	fluid_falling.clear()
+	tree_growth.clear()
+	plant_growth.clear()
+	plant_cells.clear()
+	creatures.clear()
+	containers.clear()
+	burning_tiles.clear()
+	generated_chunks.clear()
+	chunk_tiles.clear()
+	chunk_tiles_by_id.clear()
+	block_id_counts.clear()
+	block_count = 0
+	inventory.clear()
+	inv_order.clear()
+	hotbar_slots = ["", "", "", "", "", ""]
+	equipment_slots = {"hand": "", "feet": ""}
+	item_durability.clear()
+	selected = ""
+	multiplayer_player_states.clear()
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = world_seed
+	var biome_deck: Array = CORE_BIOME_IDS.duplicate()
+	_shuffle_with_rng(biome_deck, rng)
+	var shared_shape_seed := rng.randi_range(1, 2_000_000_000)
+	var left_center := Vector2i(-18, ISLAND_CY)
+	var right_center := Vector2i(18, ISLAND_CY)
+	floating_island_layout = [
+		{"center": left_center, "half_width": 6, "depth": 6, "biome": str(biome_deck[0]), "shape_seed": shared_shape_seed},
+		{"center": right_center, "half_width": 6, "depth": 6, "biome": str(biome_deck[1]), "shape_seed": shared_shape_seed},
+	]
+	for island: Dictionary in floating_island_layout:
+		_generate_floating_island(island)
+	var shared_contents := _duel_chest_contents(rng)
+	for island: Dictionary in floating_island_layout:
+		var center: Vector2i = island["center"]
+		var chest_pos := Vector2i(center.x, center.y - 1)
+		set_block(chest_pos.x, chest_pos.y, int(BlockDefs.BLOCKS.chest.id))
+		containers[chest_pos] = {
+			"contents": shared_contents.duplicate(true),
+			"durability": {},
+			"loot_generated": true,
+			"loot_key": "duel:%d" % world_seed,
+			"loot_tier": "duel",
+		}
+	default_spawn = duel_spawn_point(0)
+	custom_spawn_set = true
+	reset_player()
+	custom_spawn_set = false
+	player["facing"] = 1
+	_fluid_void_limit_y = _default_fluid_void_limit()
+	_suspend_state_changed = false
+	block_count = count_blocks()
+	block_count_changed.emit(block_count)
+	static_tiles_changed.emit()
+	lighting_changed.emit()
+	state_changed.emit()
+
+
+func duel_spawn_point(player_index: int) -> Vector2i:
+	if floating_island_layout.size() < 2:
+		return default_spawn
+	var island: Dictionary = floating_island_layout[clampi(player_index, 0, 1)]
+	var center: Vector2i = island["center"]
+	return Vector2i(center.x + (-3 if player_index == 0 else 3), center.y)
+
+
+func _duel_chest_contents(rng: RandomNumberGenerator) -> Dictionary:
+	var pickaxes: Array[String] = ["wooden_pickaxe", "stone_pickaxe", "copper_pickaxe"]
+	var weapons: Array[String] = ["stone_axe", "stone_sword", "bow"]
+	var footwear: Array[String] = ["trail_boots", "palm_sandals", "ice_boots"]
+	var weapon := weapons[rng.randi_range(0, weapons.size() - 1)]
+	var contents := {
+		pickaxes[rng.randi_range(0, pickaxes.size() - 1)]: 1,
+		weapon: 1,
+		footwear[rng.randi_range(0, footwear.size() - 1)]: 1,
+		"cobblestone": rng.randi_range(12, 24),
+		"prepared_meal": rng.randi_range(1, 3),
+	}
+	if weapon == "bow":
+		contents["arrow"] = rng.randi_range(12, 20)
+	return contents
 
 
 func _shuffle_with_rng(values: Array, rng: RandomNumberGenerator) -> void:
@@ -5234,7 +5327,7 @@ func repair_serialized_state(state: Dictionary) -> Dictionary:
 	rules["keep_inventory_on_death"] = bool(rules.get("keep_inventory_on_death", true))
 	repaired["rules"] = rules
 	var generation: Dictionary = repaired.get("generation", {}) if repaired.get("generation", {}) is Dictionary else {}
-	generation["mode"] = str(generation.get("mode", WORLD_MODE_SKYBLOCK)) if str(generation.get("mode", WORLD_MODE_SKYBLOCK)) in [WORLD_MODE_SKYBLOCK, WORLD_MODE_FLOATING_ISLANDS, WORLD_MODE_PROCEDURAL, WORLD_MODE_ONE_BLOCK, WORLD_MODE_CHALLENGE] else WORLD_MODE_SKYBLOCK
+	generation["mode"] = str(generation.get("mode", WORLD_MODE_SKYBLOCK)) if str(generation.get("mode", WORLD_MODE_SKYBLOCK)) in [WORLD_MODE_SKYBLOCK, WORLD_MODE_FLOATING_ISLANDS, WORLD_MODE_PROCEDURAL, WORLD_MODE_ONE_BLOCK, WORLD_MODE_CHALLENGE, WORLD_MODE_DUEL] else WORLD_MODE_SKYBLOCK
 	generation["seed"] = int(generation.get("seed", 0))
 	for key in ["catalog_revision", "structure_catalog_revision", "biome_catalog_revision"]:
 		generation[key] = maxi(0, int(generation.get(key, 0)))
@@ -5795,10 +5888,10 @@ func deserialize_state(state: Dictionary) -> bool:
 	var rules_data: Dictionary = state.get("rules", {}) if state.get("rules", {}) is Dictionary else {}
 	var loaded_keep_inventory := bool(rules_data.get("keep_inventory_on_death", true))
 	var loaded_world_mode := str(generation_data.get("mode", WORLD_MODE_SKYBLOCK))
-	if loaded_world_mode not in [WORLD_MODE_SKYBLOCK, WORLD_MODE_FLOATING_ISLANDS, WORLD_MODE_PROCEDURAL, WORLD_MODE_ONE_BLOCK, WORLD_MODE_CHALLENGE]:
+	if loaded_world_mode not in [WORLD_MODE_SKYBLOCK, WORLD_MODE_FLOATING_ISLANDS, WORLD_MODE_PROCEDURAL, WORLD_MODE_ONE_BLOCK, WORLD_MODE_CHALLENGE, WORLD_MODE_DUEL]:
 		loaded_world_mode = WORLD_MODE_SKYBLOCK
 	var loaded_floating_island_layout := _deserialize_floating_island_layout(generation_data.get("floating_islands", []))
-	if loaded_world_mode == WORLD_MODE_FLOATING_ISLANDS and loaded_floating_island_layout.is_empty():
+	if loaded_world_mode in [WORLD_MODE_FLOATING_ISLANDS, WORLD_MODE_DUEL] and loaded_floating_island_layout.is_empty():
 		loaded_floating_island_layout = LEGACY_FLOATING_ISLAND_LAYOUT.duplicate(true)
 	var one_block_data: Dictionary = state.get("one_block", {}) if state.get("one_block", {}) is Dictionary else {}
 	var loaded_one_block_position := Vector2i(
@@ -7059,7 +7152,7 @@ func in_bounds(x: int, y: int) -> bool:
 func _default_fluid_void_limit() -> int:
 	if _world_supports_resonant_deep():
 		return RESONANT_DEEP_BOTTOM_Y + FLUID_VOID_MARGIN
-	if world_mode == WORLD_MODE_FLOATING_ISLANDS:
+	if world_mode in [WORLD_MODE_FLOATING_ISLANDS, WORLD_MODE_DUEL]:
 		var deepest_island := ISLAND_CY
 		for island: Dictionary in floating_island_layout:
 			var center: Vector2i = island.get("center", Vector2i.ZERO)
@@ -8780,7 +8873,7 @@ func _prune_distant_natural_creatures() -> void:
 func _ecology_biome_at(pos: Vector2i) -> String:
 	if _world_supports_resonant_deep() and pos.y >= RESONANT_DEEP_TOP_Y:
 		return _resonant_biome_for_chunk(floori(float(pos.x) / float(CHUNK_WIDTH)))
-	if world_mode == WORLD_MODE_FLOATING_ISLANDS:
+	if world_mode in [WORLD_MODE_FLOATING_ISLANDS, WORLD_MODE_DUEL]:
 		var floating_biome := _floating_island_biome_at(pos)
 		if not floating_biome.is_empty():
 			return floating_biome
@@ -11168,7 +11261,12 @@ func move_player(move_left: bool, move_right: bool, jump: bool, delta: float = 1
 	var fall_reset_tile_y := RESONANT_DEEP_BOTTOM_Y + FALL_RESET_DEPTH if _world_supports_resonant_deep() else ISLAND_CY + FALL_RESET_DEPTH
 	if player["y"] > float(fall_reset_tile_y * BlockDefs.TILE):
 		Sfx.hurt()
-		reset_player()
+		if world_mode == WORLD_MODE_DUEL:
+			if int(player.get("health", MAX_PLAYER_HEALTH)) > 0:
+				player["health"] = 0
+				player_defeated.emit()
+		else:
+			reset_player()
 
 	if player["on_ground"]:
 		player["jump_coyote"] = 8.0

@@ -115,7 +115,7 @@ func get_world_generation_region(world_seed: int, region_x: int, biomes: Array) 
 	)
 
 
-func create_multiplayer_session(world_id: String, world_name: String, world_mode: String, access_mode: String, dedicated_server: bool = false, max_players: int = 0) -> Dictionary:
+func create_multiplayer_session(world_id: String, world_name: String, world_mode: String, access_mode: String, dedicated_server: bool = false, max_players: int = 0, protocol_version: int = MultiplayerClient.PROTOCOL_VERSION) -> Dictionary:
 	var auth := await ensure_session()
 	if not auth.get("ok", false):
 		return auth
@@ -124,7 +124,7 @@ func create_multiplayer_session(world_id: String, world_name: String, world_mode
 		"world_name": world_name,
 		"world_mode": world_mode,
 		"access_mode": access_mode,
-		"protocol_version": MultiplayerClient.PROTOCOL_VERSION,
+		"protocol_version": protocol_version,
 		"dedicated_server": dedicated_server,
 	}
 	if dedicated_server and max_players > 0:
@@ -149,7 +149,7 @@ func list_multiplayer_sessions(limit: int = 20) -> Dictionary:
 	)
 
 
-func join_multiplayer_session(session_id: String = "", join_code: String = "") -> Dictionary:
+func join_multiplayer_session(session_id: String = "", join_code: String = "", protocol_version: int = MultiplayerClient.PROTOCOL_VERSION) -> Dictionary:
 	var auth := await ensure_session()
 	if not auth.get("ok", false):
 		return auth
@@ -159,7 +159,7 @@ func join_multiplayer_session(session_id: String = "", join_code: String = "") -
 		{
 			"session_id": session_id,
 			"join_code": join_code,
-			"protocol_version": MultiplayerClient.PROTOCOL_VERSION,
+			"protocol_version": protocol_version,
 		},
 		true
 	)
