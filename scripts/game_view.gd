@@ -12,6 +12,7 @@ signal one_block_phase_changed(phase_number: int)
 signal remote_player_attacked(player_id: String)
 signal multiplayer_action_requested(action: String, payload: Dictionary)
 signal bow_shot_created(payload: Dictionary)
+signal bow_arrow_embedded(payload: Dictionary)
 signal block_mined(block_name: String)
 signal block_placed(block_name: String)
 signal harvest_blocked(block_name: String, required_tier: int, active_tier: int)
@@ -65,6 +66,7 @@ const ARROW_MIN_SPEED := 250.0
 const ARROW_MAX_SPEED := 560.0
 const ARROW_GRAVITY := 310.0
 const ARROW_MAX_LIFETIME := 5.0
+const EMBEDDED_ARROW_LIFETIME := 3.0
 
 var sim := WorldSim.new()
 var camera_pos := Vector2.ZERO
@@ -96,6 +98,7 @@ var bow_aim_direction := Vector2.RIGHT
 var bow_drawing := false
 var bow_draw_started_msec := 0
 var arrows: Array[Dictionary] = []
+var embedded_arrows: Array[Dictionary] = []
 var _lighting_dirty := true
 var _lighting_texture: ImageTexture
 var _world_lod_texture: ImageTexture
@@ -286,6 +289,7 @@ func _finish_world_start() -> void:
 	remote_creature_targets.clear()
 	_tideglass_reveal_glow.clear()
 	arrows.clear()
+	embedded_arrows.clear()
 	bow_drawing = false
 	_invalidate_lighting()
 	_invalidate_world_render()
@@ -332,6 +336,7 @@ func _process(_delta: float) -> void:
 	_update_remote_player_interpolation(_delta)
 	_update_remote_creature_interpolation(_delta)
 	_update_arrows(_delta)
+	_update_embedded_arrows(_delta)
 	_simulation_accumulator = minf(
 		_simulation_accumulator + _delta,
 		SIMULATION_STEP * float(MAX_SIMULATION_STEPS_PER_FRAME)
@@ -912,6 +917,7 @@ func fire_authoritative_bow(direction: Vector2, charge: float) -> Dictionary:
 	if critical:
 		damage = 4
 	var shot := {
+		"shot_id": "%d:%d" % [Time.get_ticks_usec(), randi()],
 		"origin_x": origin.x,
 		"origin_y": origin.y,
 		"direction_x": direction.x,
@@ -948,6 +954,7 @@ func _spawn_arrow(payload: Dictionary, authoritative: bool) -> void:
 	var origin := Vector2(float(payload.get("origin_x", 0.0)), float(payload.get("origin_y", 0.0)))
 	var charge := clampf(float(payload.get("charge", 0.0)), 0.0, 1.0)
 	arrows.append({
+		"shot_id": str(payload.get("shot_id", "")),
 		"position": origin + direction * 14.0,
 		"velocity": direction * lerpf(ARROW_MIN_SPEED, ARROW_MAX_SPEED, charge),
 		"damage": int(payload.get("damage", 1)),
@@ -986,12 +993,81 @@ func _update_arrows(delta: float) -> void:
 				hit_id = str(raw_id)
 				break
 		if not hit_id.is_empty():
+			_embed_arrow(hit_id, arrow, authoritative)
 			if authoritative:
 				show_creature_hit(hit_id)
 				sim.hit_creature(hit_id, int(arrow.get("damage", 1)))
 			arrows.remove_at(index)
 			continue
 		arrows[index] = arrow
+
+
+func _embed_arrow(creature_id: String, arrow: Dictionary, authoritative: bool) -> void:
+	if not sim.creatures.has(creature_id):
+		return
+	var creature: Dictionary = sim.creatures[creature_id]
+	var definition := sim._creature_definition(str(creature.get("block_name", "")))
+	var center := _creature_draw_rect(creature, definition).get_center()
+	var position: Vector2 = arrow.get("position", center)
+	var direction: Vector2 = (arrow.get("velocity", Vector2.RIGHT) as Vector2).normalized()
+	var payload := {
+		"shot_id": str(arrow.get("shot_id", "")),
+		"creature_id": creature_id,
+		"offset_x": position.x - center.x,
+		"offset_y": position.y - center.y,
+		"direction_x": direction.x,
+		"direction_y": direction.y,
+		"critical": bool(arrow.get("critical", false)),
+	}
+	_store_embedded_arrow(payload)
+	if authoritative:
+		bow_arrow_embedded.emit(payload)
+
+
+func show_multiplayer_embedded_arrow(payload: Dictionary) -> bool:
+	var creature_id := str(payload.get("creature_id", ""))
+	var direction := Vector2(float(payload.get("direction_x", 0.0)), float(payload.get("direction_y", 0.0)))
+	var offset := Vector2(float(payload.get("offset_x", 0.0)), float(payload.get("offset_y", 0.0)))
+	if (
+		creature_id.is_empty()
+		or not sim.creatures.has(creature_id)
+		or not is_finite(direction.x)
+		or not is_finite(direction.y)
+		or not is_finite(offset.x)
+		or not is_finite(offset.y)
+		or direction.length() < 0.1
+	):
+		return false
+	var shot_id := str(payload.get("shot_id", ""))
+	for index in range(arrows.size() - 1, -1, -1):
+		if not shot_id.is_empty() and str(arrows[index].get("shot_id", "")) == shot_id:
+			arrows.remove_at(index)
+	_store_embedded_arrow(payload)
+	return true
+
+
+func _store_embedded_arrow(payload: Dictionary) -> void:
+	var shot_id := str(payload.get("shot_id", ""))
+	if not shot_id.is_empty():
+		for index in range(embedded_arrows.size() - 1, -1, -1):
+			if str(embedded_arrows[index].get("shot_id", "")) == shot_id:
+				embedded_arrows.remove_at(index)
+	var embedded := payload.duplicate(true)
+	embedded["age"] = 0.0
+	embedded_arrows.append(embedded)
+
+
+func _update_embedded_arrows(delta: float) -> void:
+	for index in range(embedded_arrows.size() - 1, -1, -1):
+		var embedded: Dictionary = embedded_arrows[index]
+		embedded["age"] = float(embedded.get("age", 0.0)) + delta
+		if (
+			float(embedded["age"]) >= EMBEDDED_ARROW_LIFETIME
+			or not sim.creatures.has(str(embedded.get("creature_id", "")))
+		):
+			embedded_arrows.remove_at(index)
+		else:
+			embedded_arrows[index] = embedded
 
 
 func get_zoom() -> float:
@@ -1318,13 +1394,16 @@ func _draw_arrows() -> void:
 	for arrow: Dictionary in arrows:
 		var position: Vector2 = arrow.get("position", Vector2.ZERO)
 		var velocity: Vector2 = arrow.get("velocity", Vector2.RIGHT)
-		var direction := velocity.normalized()
-		var tail := position - direction * 12.0
-		draw_line(tail, position, Color("#d5a45d"), 2.0, false)
-		var wing := direction.orthogonal() * 3.0
-		draw_colored_polygon(PackedVector2Array([position + direction * 4.0, position - direction * 2.0 + wing, position - direction * 2.0 - wing]), Color("#d9dde5"))
-		if bool(arrow.get("critical", false)):
-			draw_circle(tail, 2.0, Color("#fff2a3"))
+		_draw_arrow_shape(position, velocity.normalized(), bool(arrow.get("critical", false)))
+
+
+func _draw_arrow_shape(position: Vector2, direction: Vector2, critical: bool) -> void:
+	var tail := position - direction * 12.0
+	draw_line(tail, position, Color("#d5a45d"), 2.0, false)
+	var wing := direction.orthogonal() * 3.0
+	draw_colored_polygon(PackedVector2Array([position + direction * 4.0, position - direction * 2.0 + wing, position - direction * 2.0 - wing]), Color("#d9dde5"))
+	if critical:
+		draw_circle(tail, 2.0, Color("#fff2a3"))
 
 
 func _draw_sky_layer() -> void:
@@ -2135,9 +2214,19 @@ func _draw_creatures() -> void:
 		_draw_shagot_cargo(creature, definition, dest)
 		_draw_shagot_work_action(creature, definition, dest)
 		_draw_hit_flash(self, dest.grow(1.0), int(_creature_hit_flash_expires_msec.get(creature_id, 0)))
+		_draw_embedded_arrows(creature_id, dest)
 		var breeding: Dictionary = definition.get("breeding", {})
 		if int(creature.get("active_nearby_ticks", 0)) >= int(breeding.get("active_nearby_seconds", 1800)) * 60 and int(creature.get("breeding_cooldown", 0)) == 0:
 			draw_string(ThemeDB.fallback_font, dest.position + Vector2(dest.size.x * 0.5 - 5, -3), "♥", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("#ff78a8"))
+
+
+func _draw_embedded_arrows(creature_id: String, dest: Rect2) -> void:
+	for embedded: Dictionary in embedded_arrows:
+		if str(embedded.get("creature_id", "")) != creature_id:
+			continue
+		var position := dest.get_center() + Vector2(float(embedded.get("offset_x", 0.0)), float(embedded.get("offset_y", 0.0)))
+		var direction := Vector2(float(embedded.get("direction_x", 1.0)), float(embedded.get("direction_y", 0.0))).normalized()
+		_draw_arrow_shape(position, direction, bool(embedded.get("critical", false)))
 
 
 func _draw_shagot_work_action(creature: Dictionary, definition: Dictionary, dest: Rect2) -> void:
@@ -2583,13 +2672,13 @@ func _draw_equipment(px: float, y: float, scale_y: float, facing: int, equipment
 	var direction := 1.0 if facing >= 0 else -1.0
 	var hand := Vector2(px + (18.0 if direction > 0.0 else 2.0), y + 18.0 * scale_y)
 	if hand_shape == "bow":
-		var bow_center := hand + Vector2(direction * 7.0, -4.0 * scale_y)
+		var bow_center := hand + Vector2(direction * 3.0, -3.0 * scale_y)
 		var bow_top := bow_center + Vector2(-direction * 2.0, -11.0 * scale_y)
 		var bow_front := bow_center + Vector2(direction * 5.0, 0.0)
 		var bow_bottom := bow_center + Vector2(-direction * 2.0, 11.0 * scale_y)
 		draw_polyline(PackedVector2Array([bow_top, bow_front, bow_bottom]), hand_colors[0], 3.0, false)
-		draw_line(bow_top, bow_center, hand_colors[1], 1.5, false)
-		draw_line(bow_center, bow_bottom, hand_colors[1], 1.5, false)
+		draw_line(bow_top, hand, hand_colors[1], 1.5, false)
+		draw_line(hand, bow_bottom, hand_colors[1], 1.5, false)
 		draw_rect(Rect2(hand - Vector2.ONE, Vector2(3, 3)), hand_colors[2])
 		return
 	var handle_end := hand + Vector2(direction * 8.0, -14.0 * scale_y)
