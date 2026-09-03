@@ -480,6 +480,7 @@ const RECIPES: Array[Dictionary] = [
 	{"in": {"cobblestone": 2, "gravel": 2}, "out": {"stone": 1}, "label": "2 булыжника + 2 гравия → камень"},
 	{"in": {"dirt": 2, "grass": 1}, "out": {"grass": 3}, "label": "2 земли + трава → 3 травы"},
 	{"in": {"leaves": 4}, "out": {"wood": 1}, "label": "4 листа → дерево"},
+	{"in": {"cobblestone": 1}, "out": {"gravel": 1}, "label": "Булыжник → гравий"},
 	{"in": {"stone": 1}, "out": {"gravel": 1}, "label": "Камень → гравий"},
 	{"in": {"gravel": 1}, "out": {"sand": 1}, "label": "Гравий → песок"},
 	{"in": {"sand": 1, "lava": 1}, "out": {"glass": 1}, "label": "Песок + лава → стекло"},
