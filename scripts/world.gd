@@ -710,10 +710,16 @@ func create_duel_world(seed: int = 0) -> void:
 	]
 	for island: Dictionary in floating_island_layout:
 		_generate_floating_island(island)
+		# Every Duel arena is still a complete skyblock start: each player gets
+		# a biome-appropriate tree plus renewable water and lava sources.
+		_decorate_floating_island(island, true)
 	var shared_contents := _duel_chest_contents(rng)
-	for island: Dictionary in floating_island_layout:
+	for island_index in floating_island_layout.size():
+		var island: Dictionary = floating_island_layout[island_index]
 		var center: Vector2i = island["center"]
-		var chest_pos := Vector2i(center.x, center.y - 1)
+		# Keep the chest beside the spawn and leave the island center free for
+		# the tree placed by _decorate_floating_island().
+		var chest_pos := Vector2i(center.x + (-4 if island_index == 0 else 4), center.y - 1)
 		set_block(chest_pos.x, chest_pos.y, int(BlockDefs.BLOCKS.chest.id))
 		containers[chest_pos] = {
 			"contents": shared_contents.duplicate(true),
@@ -746,18 +752,18 @@ func duel_spawn_point(player_index: int) -> Vector2i:
 
 func _duel_chest_contents(rng: RandomNumberGenerator) -> Dictionary:
 	var pickaxes: Array[String] = ["wooden_pickaxe", "stone_pickaxe", "copper_pickaxe"]
-	var weapons: Array[String] = ["stone_axe", "stone_sword", "bow"]
+	var weapons: Array[String] = ["stone_axe", "stone_sword"]
 	var footwear: Array[String] = ["trail_boots", "palm_sandals", "ice_boots"]
 	var weapon := weapons[rng.randi_range(0, weapons.size() - 1)]
 	var contents := {
 		pickaxes[rng.randi_range(0, pickaxes.size() - 1)]: 1,
 		weapon: 1,
+		"bow": 1,
+		"arrow": rng.randi_range(12, 20),
 		footwear[rng.randi_range(0, footwear.size() - 1)]: 1,
 		"cobblestone": rng.randi_range(12, 24),
 		"prepared_meal": rng.randi_range(1, 3),
 	}
-	if weapon == "bow":
-		contents["arrow"] = rng.randi_range(12, 20)
 	return contents
 
 
