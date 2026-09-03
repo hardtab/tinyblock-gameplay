@@ -978,7 +978,11 @@ func _update_arrows(delta: float) -> void:
 		arrow["position"] = position
 		var authoritative := bool(arrow.get("authoritative", true))
 		var tile := Vector2i(floori(position.x / BlockDefs.TILE), floori(position.y / BlockDefs.TILE))
-		if not sim.in_bounds(tile.x, tile.y) or sim.get_block(tile.x, tile.y).get("solid", false):
+		if not sim.in_bounds(tile.x, tile.y):
+			arrows.remove_at(index)
+			continue
+		if sim.get_block(tile.x, tile.y).get("solid", false):
+			_embed_world_arrow(arrow, authoritative)
 			if authoritative:
 				sim.give_to_inventory("arrow", 1)
 				sim.inventory_changed.emit()
@@ -1012,6 +1016,7 @@ func _embed_arrow(creature_id: String, arrow: Dictionary, authoritative: bool) -
 	var direction: Vector2 = (arrow.get("velocity", Vector2.RIGHT) as Vector2).normalized()
 	var payload := {
 		"shot_id": str(arrow.get("shot_id", "")),
+		"target_kind": "creature",
 		"creature_id": creature_id,
 		"offset_x": position.x - center.x,
 		"offset_y": position.y - center.y,
@@ -1024,19 +1029,44 @@ func _embed_arrow(creature_id: String, arrow: Dictionary, authoritative: bool) -
 		bow_arrow_embedded.emit(payload)
 
 
+func _embed_world_arrow(arrow: Dictionary, authoritative: bool) -> void:
+	var position: Vector2 = arrow.get("position", Vector2.ZERO)
+	var direction: Vector2 = (arrow.get("velocity", Vector2.RIGHT) as Vector2).normalized()
+	var payload := {
+		"shot_id": str(arrow.get("shot_id", "")),
+		"target_kind": "world",
+		"position_x": position.x,
+		"position_y": position.y,
+		"direction_x": direction.x,
+		"direction_y": direction.y,
+		"critical": bool(arrow.get("critical", false)),
+	}
+	_store_embedded_arrow(payload)
+	if authoritative:
+		bow_arrow_embedded.emit(payload)
+
+
 func show_multiplayer_embedded_arrow(payload: Dictionary) -> bool:
+	var target_kind := str(payload.get("target_kind", "creature"))
 	var creature_id := str(payload.get("creature_id", ""))
 	var direction := Vector2(float(payload.get("direction_x", 0.0)), float(payload.get("direction_y", 0.0)))
 	var offset := Vector2(float(payload.get("offset_x", 0.0)), float(payload.get("offset_y", 0.0)))
+	var position := Vector2(float(payload.get("position_x", 0.0)), float(payload.get("position_y", 0.0)))
 	if (
-		creature_id.is_empty()
-		or not sim.creatures.has(creature_id)
+		target_kind not in ["creature", "world"]
 		or not is_finite(direction.x)
 		or not is_finite(direction.y)
-		or not is_finite(offset.x)
-		or not is_finite(offset.y)
 		or direction.length() < 0.1
 	):
+		return false
+	if target_kind == "creature" and (
+		creature_id.is_empty()
+		or not sim.creatures.has(creature_id)
+		or not is_finite(offset.x)
+		or not is_finite(offset.y)
+	):
+		return false
+	if target_kind == "world" and (not is_finite(position.x) or not is_finite(position.y)):
 		return false
 	var shot_id := str(payload.get("shot_id", ""))
 	for index in range(arrows.size() - 1, -1, -1):
@@ -1063,7 +1093,10 @@ func _update_embedded_arrows(delta: float) -> void:
 		embedded["age"] = float(embedded.get("age", 0.0)) + delta
 		if (
 			float(embedded["age"]) >= EMBEDDED_ARROW_LIFETIME
-			or not sim.creatures.has(str(embedded.get("creature_id", "")))
+			or (
+				str(embedded.get("target_kind", "creature")) == "creature"
+				and not sim.creatures.has(str(embedded.get("creature_id", "")))
+			)
 		):
 			embedded_arrows.remove_at(index)
 		else:
@@ -1395,6 +1428,12 @@ func _draw_arrows() -> void:
 		var position: Vector2 = arrow.get("position", Vector2.ZERO)
 		var velocity: Vector2 = arrow.get("velocity", Vector2.RIGHT)
 		_draw_arrow_shape(position, velocity.normalized(), bool(arrow.get("critical", false)))
+	for embedded: Dictionary in embedded_arrows:
+		if str(embedded.get("target_kind", "creature")) != "world":
+			continue
+		var position := Vector2(float(embedded.get("position_x", 0.0)), float(embedded.get("position_y", 0.0)))
+		var direction := Vector2(float(embedded.get("direction_x", 1.0)), float(embedded.get("direction_y", 0.0))).normalized()
+		_draw_arrow_shape(position, direction, bool(embedded.get("critical", false)))
 
 
 func _draw_arrow_shape(position: Vector2, direction: Vector2, critical: bool) -> void:
