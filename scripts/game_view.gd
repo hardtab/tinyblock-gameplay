@@ -43,6 +43,7 @@ const CAMERA_FOLLOW_SPEED_Y_AIR := 7.67
 const CAMERA_FOLLOW_SPEED_Y_GROUND := 13.39
 const SIMULATION_STEP := 1.0 / 60.0
 const MAX_SIMULATION_STEPS_PER_FRAME := 4
+const VIRTUAL_JUMP_BUFFER_SECONDS := 0.16
 const WORLD_RENDER_MARGIN := 6
 const SKY_REDRAW_INTERVAL_FRAMES := 6
 const SUNLIGHT_REDRAW_INTERVAL_FRAMES := 4
@@ -99,6 +100,7 @@ var keyboard_placing_held := false
 var virtual_left := false
 var virtual_right := false
 var virtual_jump_held := false
+var _virtual_jump_buffer_remaining := 0.0
 var bow_aim_direction := Vector2.RIGHT
 var bow_drawing := false
 var bow_draw_started_msec := 0
@@ -325,6 +327,7 @@ func pause_world() -> void:
 	virtual_left = false
 	virtual_right = false
 	virtual_jump_held = false
+	_virtual_jump_buffer_remaining = 0.0
 	bow_drawing = false
 	cancel_pointer_interaction()
 	keyboard_mining_held = false
@@ -364,7 +367,8 @@ func _process(_delta: float) -> void:
 		simulation_steps += 1
 	var move_left := _move_left_pressed() or virtual_left
 	var move_right := _move_right_pressed() or virtual_right
-	var jump := _jump_pressed() or virtual_jump_held
+	var buffered_virtual_jump := _virtual_jump_buffer_remaining > 0.0
+	var jump := _jump_pressed() or virtual_jump_held or buffered_virtual_jump
 	if move_left or move_right or jump:
 		_cancel_pointer_for_move()
 	elif keyboard_mining_held and keyboard_mine_direction != Vector2i.ZERO:
@@ -373,7 +377,14 @@ func _process(_delta: float) -> void:
 	_update_mouse_mining()
 	_tick_mining(_delta)
 	sim.tick_player_needs(_delta, not multiplayer_guest)
+	var vertical_velocity_before_move := float(sim.player.get("vy", 0.0))
 	sim.move_player(move_left, move_right, jump, _delta)
+	if buffered_virtual_jump and float(sim.player.get("vy", 0.0)) < minf(-0.05, vertical_velocity_before_move):
+		# The buffered press produced a jump. Consume it so a short tap cannot
+		# trigger a second jump after an unusually quick landing.
+		_virtual_jump_buffer_remaining = 0.0
+	else:
+		_virtual_jump_buffer_remaining = maxf(0.0, _virtual_jump_buffer_remaining - _delta)
 	_sync_creature_lighting()
 	_update_health_indicator(_delta)
 	_update_camera(_delta)
@@ -864,7 +875,21 @@ func set_virtual_move(left: bool, right: bool) -> void:
 
 
 func set_virtual_jump(pressed: bool) -> void:
+	if pressed and not virtual_jump_held:
+		# Mobile GUI can deliver button_down and button_up between rendered frames,
+		# or just before the player lands. Remember the edge briefly so the physics
+		# step still sees the player's intent instead of dropping the tap.
+		_virtual_jump_buffer_remaining = VIRTUAL_JUMP_BUFFER_SECONDS
 	virtual_jump_held = pressed
+
+
+func cancel_virtual_jump() -> void:
+	virtual_jump_held = false
+	_virtual_jump_buffer_remaining = 0.0
+
+
+func has_buffered_virtual_jump() -> bool:
+	return _virtual_jump_buffer_remaining > 0.0
 
 
 func set_bow_aim(direction: Vector2, active: bool, fire_on_release: bool = false) -> void:
