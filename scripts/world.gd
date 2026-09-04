@@ -95,6 +95,7 @@ var weather_ticks_remaining: int = 0
 var weather_target := Vector2i.ZERO
 var weather_result: String = ""
 var weather_is_recovery: bool = false
+var weather_uses_local_player: bool = true
 var lightning_sfx_played := false
 var world_mode: String = "skyblock"
 var world_seed: int = 0
@@ -6450,33 +6451,69 @@ func _open_to_sky(x: int, y: int, top_y: int) -> bool:
 
 
 func _weather_player_tile() -> Vector2i:
-	return Vector2i(
-		floori((float(player["x"]) + float(player["w"]) * 0.5) / BlockDefs.TILE),
-		floori((float(player["y"]) + float(player["h"]) * 0.5) / BlockDefs.TILE)
-	)
+	var targets := _weather_player_tiles()
+	return targets[0] if not targets.is_empty() else default_spawn
+
+
+func _weather_player_tiles() -> Array[Vector2i]:
+	var targets: Array[Vector2i] = []
+	if weather_uses_local_player:
+		targets.append(Vector2i(
+			floori((float(player["x"]) + float(player["w"]) * 0.5) / BlockDefs.TILE),
+			floori((float(player["y"]) + float(player["h"]) * 0.5) / BlockDefs.TILE)
+		))
+	for raw_player_id in multiplayer_player_targets:
+		if not multiplayer_player_targets[raw_player_id] is Dictionary:
+			continue
+		var remote := multiplayer_player_targets[raw_player_id] as Dictionary
+		if int(remote.get("health", MAX_PLAYER_HEALTH)) <= 0:
+			continue
+		var tile := Vector2i(
+			floori((float(remote.get("x", 0.0)) + float(remote.get("w", 20.0)) * 0.5) / BlockDefs.TILE),
+			floori((float(remote.get("y", 0.0)) + float(remote.get("h", 28.0)) * 0.5) / BlockDefs.TILE)
+		)
+		if tile not in targets:
+			targets.append(tile)
+	return targets
 
 
 func _weather_disabled_for_player() -> bool:
-	return _world_supports_resonant_deep() and _weather_player_tile().y >= RESONANT_DEEP_TOP_Y
+	var targets := _weather_player_tiles()
+	if targets.is_empty():
+		return true
+	if not _world_supports_resonant_deep():
+		return false
+	for target in targets:
+		if target.y < RESONANT_DEEP_TOP_Y:
+			return false
+	return true
 
 
 func _weather_target_near_player(pos: Vector2i) -> bool:
-	return Vector2(pos - _weather_player_tile()).length() <= float(WEATHER_TARGET_RADIUS)
+	for target in _weather_player_tiles():
+		if Vector2(pos - target).length() <= float(WEATHER_TARGET_RADIUS):
+			return true
+	return false
 
 
 func _find_rain_target(randomize: bool = false) -> Variant:
-	var center := _weather_player_tile()
-	var sky_scan_top := center.y - WEATHER_SKY_SCAN_HEIGHT
-	var bounds := Rect2i(center - Vector2i.ONE * WEATHER_TARGET_RADIUS, Vector2i.ONE * (WEATHER_TARGET_RADIUS * 2 + 1))
+	var centers := _weather_player_tiles()
+	if centers.is_empty():
+		return null
 	var candidates: Array[Dictionary] = []
-	for y in range(bounds.position.y, bounds.end.y):
-		for x in range(bounds.position.x, bounds.end.x):
-			var pos := Vector2i(x, y)
-			if not _weather_target_near_player(pos) or block_id(x, y) != 0 or not has_solid_floor_in(x, y) or not _open_to_sky(x, y, sky_scan_top):
-				continue
-			var walls := int(get_block(x - 1, y).get("solid", false)) + int(get_block(x + 1, y).get("solid", false))
-			var distance := Vector2(pos - center).length()
-			candidates.append({"pos": pos, "walls": walls, "distance": distance})
+	var seen: Dictionary = {}
+	for center in centers:
+		var sky_scan_top := center.y - WEATHER_SKY_SCAN_HEIGHT
+		var bounds := Rect2i(center - Vector2i.ONE * WEATHER_TARGET_RADIUS, Vector2i.ONE * (WEATHER_TARGET_RADIUS * 2 + 1))
+		for y in range(bounds.position.y, bounds.end.y):
+			for x in range(bounds.position.x, bounds.end.x):
+				var pos := Vector2i(x, y)
+				if seen.has(pos) or Vector2(pos - center).length() > float(WEATHER_TARGET_RADIUS) or block_id(x, y) != 0 or not has_solid_floor_in(x, y) or not _open_to_sky(x, y, sky_scan_top):
+					continue
+				seen[pos] = true
+				var walls := int(get_block(x - 1, y).get("solid", false)) + int(get_block(x + 1, y).get("solid", false))
+				var distance := Vector2(pos - center).length()
+				candidates.append({"pos": pos, "walls": walls, "distance": distance})
 	if candidates.is_empty():
 		return null
 	if randomize:
@@ -6490,21 +6527,25 @@ func _find_rain_target(randomize: bool = false) -> Variant:
 
 
 func _find_lightning_target(randomize: bool = false) -> Variant:
-	var center := _weather_player_tile()
-	var sky_scan_top := center.y - WEATHER_SKY_SCAN_HEIGHT
+	var centers := _weather_player_tiles()
+	if centers.is_empty():
+		return null
 	var candidates: Array[Vector2i] = []
-	for y in range(center.y - WEATHER_TARGET_RADIUS, center.y + WEATHER_TARGET_RADIUS + 1):
-		for x in range(center.x - WEATHER_TARGET_RADIUS, center.x + WEATHER_TARGET_RADIUS + 1):
-			var pos := Vector2i(x, y)
-			if _weather_target_near_player(pos) and get_block(x, y).get("name", "") == "stone" and _open_to_sky(x, y, sky_scan_top):
-				candidates.append(pos)
+	for center in centers:
+		var sky_scan_top := center.y - WEATHER_SKY_SCAN_HEIGHT
+		for y in range(center.y - WEATHER_TARGET_RADIUS, center.y + WEATHER_TARGET_RADIUS + 1):
+			for x in range(center.x - WEATHER_TARGET_RADIUS, center.x + WEATHER_TARGET_RADIUS + 1):
+				var pos := Vector2i(x, y)
+				if pos not in candidates and Vector2(pos - center).length() <= float(WEATHER_TARGET_RADIUS) and get_block(x, y).get("name", "") == "stone" and _open_to_sky(x, y, sky_scan_top):
+					candidates.append(pos)
 	if candidates.is_empty():
 		return null
 	if randomize:
 		return candidates.pick_random()
+	var sort_center := centers[0]
 	candidates.sort_custom(func(a: Vector2i, b: Vector2i):
-		var da := Vector2(a - center).length_squared()
-		var db := Vector2(b - center).length_squared()
+		var da := Vector2(a - sort_center).length_squared()
+		var db := Vector2(b - sort_center).length_squared()
 		return da < db
 	)
 	return candidates[0]
