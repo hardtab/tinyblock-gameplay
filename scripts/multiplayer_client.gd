@@ -645,13 +645,18 @@ func _add_rtc_candidate(remote_id: String, candidate: Dictionary) -> void:
 
 
 func _handle_rtc_packet(remote_id: String, packet: PackedByteArray) -> void:
-	_rtc_last_seen_msec[remote_id] = Time.get_ticks_msec()
 	var parsed = JSON.parse_string(packet.get_string_from_utf8())
 	if not parsed is Dictionary:
 		return
 	var message := parsed as Dictionary
 	var kind := str(message.get("kind", ""))
 	var type := str(message.get("type", ""))
+	# A host must prove that its outbound path works. Guest commands and pings only
+	# prove the opposite direction, so only the pong to our own ping refreshes the
+	# host watchdog. A guest can use any valid inbound packet as proof that the
+	# authoritative host-to-guest path is alive.
+	if rtc_packet_refreshes_watchdog(is_guest(), kind, type):
+		_rtc_last_seen_msec[remote_id] = Time.get_ticks_msec()
 	if kind == "control" and type == "p2p_ping":
 		_send_rtc(remote_id, {"kind": "control", "type": "p2p_pong", "payload": message.get("payload", {})})
 		return
@@ -659,6 +664,10 @@ func _handle_rtc_packet(remote_id: String, packet: PackedByteArray) -> void:
 		return
 	message["sender_player_id"] = remote_id
 	message_received.emit(message)
+
+
+static func rtc_packet_refreshes_watchdog(guest_connection: bool, kind: String, type: String) -> bool:
+	return guest_connection or (kind == "control" and type == "p2p_pong")
 
 
 func _handle_rtc_voice_packet(remote_id: String, packet: PackedByteArray) -> void:
