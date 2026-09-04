@@ -15,6 +15,9 @@ const RTC_PING_SECONDS := 2.0
 const RTC_SILENCE_TIMEOUT_SECONDS := 7.0
 const RTC_RECONNECT_TIMEOUT_SECONDS := 6.0
 const RTC_MAX_RECONNECT_ATTEMPTS := 3
+const RTC_SILENCE_RECOVERY_WEBSOCKET := "websocket"
+const RTC_SILENCE_RECOVERY_RECONNECT := "reconnecting"
+const RTC_SILENCE_RECOVERY_DROP_PEER := "drop_peer"
 const RTC_CHANNEL_ID := 1
 const RTC_VOICE_CHANNEL_ID := 2
 const VOICE_PACKET_MAGIC := 0x56
@@ -284,6 +287,7 @@ func _poll_websocket(delta: float) -> void:
 
 func _poll_rtc(delta: float) -> void:
 	var now := Time.get_ticks_msec()
+	var open_game_peers: Array[String] = []
 	for raw_peer_id in _rtc_peers.keys():
 		var remote_id := str(raw_peer_id)
 		var peer: WebRTCPeerConnection = _rtc_peers[raw_peer_id]
@@ -300,6 +304,8 @@ func _poll_rtc(delta: float) -> void:
 					_emit_guest_connected_message()
 			while channel.get_available_packet_count() > 0:
 				_handle_rtc_packet(remote_id, channel.get_packet())
+			if _rtc_channel_open(remote_id):
+				open_game_peers.append(remote_id)
 		elif _rtc_ready_peers.has(remote_id):
 			_rtc_ready_peers.erase(remote_id)
 			print("Multiplayer P2P channel closed: %s" % remote_id)
@@ -320,14 +326,16 @@ func _poll_rtc(delta: float) -> void:
 				_emit_guest_connected_message()
 			else:
 				_schedule_rtc_reconnect("initial_connect_timeout")
-	if is_guest() and _rtc_channel_open(_guest_host_id):
+	if not open_game_peers.is_empty():
 		_rtc_ping_left -= delta
 		if _rtc_ping_left <= 0.0:
 			_rtc_ping_left = RTC_PING_SECONDS
-			_send_rtc(_guest_host_id, {"kind": "control", "type": "p2p_ping", "payload": {"sent_msec": now}})
-		var last_seen := int(_rtc_last_seen_msec.get(_guest_host_id, now))
-		if now - last_seen >= int(RTC_SILENCE_TIMEOUT_SECONDS * 1000.0):
-			_schedule_rtc_reconnect("game_channel_silent")
+			for ping_peer_id in open_game_peers:
+				_send_rtc(ping_peer_id, {"kind": "control", "type": "p2p_ping", "payload": {"sent_msec": now}})
+		for silent_peer_id in open_game_peers:
+			var last_seen := int(_rtc_last_seen_msec.get(silent_peer_id, now))
+			if now - last_seen >= int(RTC_SILENCE_TIMEOUT_SECONDS * 1000.0):
+				_recover_silent_rtc_peer(silent_peer_id)
 	_tick_rtc_reconnect(delta)
 
 
@@ -422,6 +430,27 @@ func _schedule_rtc_reconnect(reason: String = "retry_timeout") -> void:
 	_rtc_reconnect_left = rtc_reconnect_delay(_rtc_reconnect_attempt)
 	_set_transport_mode("reconnecting")
 	print("Multiplayer P2P reconnect scheduled: attempt %d, reason=%s" % [_rtc_reconnect_attempt, reason])
+
+
+static func rtc_silence_recovery_mode(guest_connection: bool, fallback_enabled: bool) -> String:
+	if not guest_connection:
+		return RTC_SILENCE_RECOVERY_DROP_PEER
+	if fallback_enabled:
+		return RTC_SILENCE_RECOVERY_WEBSOCKET
+	return RTC_SILENCE_RECOVERY_RECONNECT
+
+
+func _recover_silent_rtc_peer(remote_id: String) -> void:
+	var guest_connection := is_guest() and remote_id == _guest_host_id
+	var recovery_mode := rtc_silence_recovery_mode(guest_connection, websocket_fallback_enabled)
+	print("Multiplayer P2P channel silent: %s, recovery=%s" % [remote_id, recovery_mode])
+	_close_rtc_peer(remote_id)
+	match recovery_mode:
+		RTC_SILENCE_RECOVERY_WEBSOCKET:
+			_reset_rtc_reconnect_state()
+			_set_transport_mode("websocket")
+		RTC_SILENCE_RECOVERY_RECONNECT:
+			_schedule_rtc_reconnect("game_channel_silent")
 
 
 func _tick_rtc_reconnect(delta: float) -> void:
