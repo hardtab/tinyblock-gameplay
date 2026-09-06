@@ -95,6 +95,7 @@ var weather_ticks_remaining: int = 0
 var weather_target := Vector2i.ZERO
 var weather_result: String = ""
 var weather_is_recovery: bool = false
+var natural_creature_spawning_enabled: bool = true
 var weather_uses_local_player: bool = true
 var lightning_sfx_played := false
 var world_mode: String = "skyblock"
@@ -10332,15 +10333,16 @@ func tick_creatures() -> void:
 	_activate_nearby_challenge_encounter()
 	if creature_tick % 60 == 1:
 		_prune_excess_local_shagots()
+	if creature_tick % 60 == 1 and natural_creature_spawning_enabled:
 		_ensure_resonant_deep_population()
 	if creature_tick >= CREATURE_INITIAL_SPAWN_DELAY:
 		var spawn_tick := creature_tick - CREATURE_INITIAL_SPAWN_DELAY
-		if spawn_tick % FIREFLY_SPAWN_EVERY == 0:
+		if natural_creature_spawning_enabled and spawn_tick % FIREFLY_SPAWN_EVERY == 0:
 			_try_spawn_ambient_firefly()
-		if spawn_tick % CREATURE_HOSTILE_SPAWN_EVERY == 0:
+		if natural_creature_spawning_enabled and spawn_tick % CREATURE_HOSTILE_SPAWN_EVERY == 0:
 			_remove_distant_natural_hostiles()
 			_try_spawn_creatures("hostile")
-		if spawn_tick % CREATURE_PEACEFUL_SPAWN_EVERY == 0:
+		if natural_creature_spawning_enabled and spawn_tick % CREATURE_PEACEFUL_SPAWN_EVERY == 0:
 			_prune_distant_natural_creatures()
 			_try_spawn_creatures("peaceful")
 	for creature: Dictionary in creatures.values():
