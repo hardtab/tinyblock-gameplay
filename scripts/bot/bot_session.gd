@@ -78,6 +78,7 @@ var _physics_route_replan_msec := -1
 var _jump_active := false
 var _jump_velocity := 0.0
 var _jump_ground_y := 0.0
+var _jump_start_x := 0.0
 var _climb_active := false
 var _climb_column := 0
 var _climb_time_left_msec := 0
@@ -165,6 +166,7 @@ func join_session(record: Dictionary) -> void:
 	_jump_active = false
 	_jump_velocity = 0.0
 	_jump_ground_y = 0.0
+	_jump_start_x = 0.0
 	_climb_active = false
 	_climb_column = 0
 	_climb_time_left_msec = 0
@@ -428,7 +430,10 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	if _climb_active or hint == "climb":
 		_set_desired_input(signf(destination.x - origin.x) < 0.0, signf(destination.x - origin.x) > 0.0, true)
 		return _climb_step(self_state, destination, delta)
-	if _jump_active or hint == "jump":
+	if hint == "jump" and not _jump_active:
+		_jump_active = true
+		_jump_start_x = float(self_state.get("x", origin.x))
+	if _jump_active:
 		_set_desired_input(signf(destination.x - origin.x) < 0.0, signf(destination.x - origin.x) > 0.0, true)
 		return _jump_step(self_state, destination, delta)
 
@@ -444,6 +449,27 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	_set_desired_input(direction < 0.0, direction > 0.0, false)
 	_advance_local_physics(self_state, delta, false)
 	var next_position := Contract.target_position(self_state)
+	var horizontal_progress := absf(next_position.x - origin.x)
+	var blocked_ahead := (
+		bool(self_state.get("on_ground", false))
+		and not is_zero_approx(direction)
+		and horizontal_progress < 0.25
+		and not _local_collision(
+			float(self_state.get("x", origin.x)) + direction * 2.0,
+			float(self_state.get("y", origin.y)),
+			float(self_state.get("w", 20.0)),
+			float(self_state.get("h", 28.0)),
+		).is_empty()
+	)
+	if blocked_ahead:
+		# Never keep holding into a solid wall. Finish this movement action so the
+		# next behavior decision can choose a different target or interaction.
+		_physics_route.clear()
+		_physics_route_replan_msec = 0
+		_set_desired_input(false, false, false)
+		self_state["vx"] = 0.0
+		_world_snapshot["self"] = self_state
+		return {"done": true, "reason": "blocked_obstacle"}
 	var done := next_position.distance_to(destination) <= 8.0 and bool(self_state.get("on_ground", false))
 	if done:
 		_set_desired_input(false, false, false)
@@ -600,6 +626,9 @@ func _movement_hint(origin: Vector2, destination: Vector2) -> String:
 
 func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> Dictionary:
 	var origin := Contract.target_position(self_state)
+	if not _jump_active:
+		_jump_active = true
+		_jump_start_x = origin.x
 	var direction := signf(destination.x - origin.x)
 	_set_desired_input(direction < 0.0, direction > 0.0, true)
 	var was_airborne := not bool(self_state.get("on_ground", false))
@@ -609,6 +638,13 @@ func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> D
 		_jump_active = false
 	var next_x := float(self_state.get("x", origin.x))
 	_world_snapshot["self"] = self_state
+	if landed and absf(next_x - _jump_start_x) < 4.0 and absf(destination.x - next_x) > 8.0:
+		_physics_route.clear()
+		_physics_route_replan_msec = 0
+		_set_desired_input(false, false, false)
+		self_state["vx"] = 0.0
+		_world_snapshot["self"] = self_state
+		return {"done": true, "reason": "blocked_obstacle"}
 	return {"done": landed and absf(destination.x - next_x) <= 8.0, "reason": "jump_step"}
 
 
