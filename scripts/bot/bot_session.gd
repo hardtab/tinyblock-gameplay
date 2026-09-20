@@ -401,18 +401,14 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		_set_desired_input(false, false, false)
 		_jump_active = false
 		_climb_active = false
-		self_state["vx"] = 0.0
-		self_state["vy"] = 0.0
-		self_state["on_ground"] = true
+		_advance_local_physics(self_state, delta, false)
 		if target.x != origin.x:
 			self_state["facing"] = 1 if target.x > origin.x else -1
 		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "look_complete"}
 	if target == origin and not _jump_active and not _climb_active:
 		_set_desired_input(false, false, false)
-		self_state["vx"] = 0.0
-		self_state["vy"] = 0.0
-		self_state["on_ground"] = true
+		_advance_local_physics(self_state, delta, false)
 		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "already_at_target"}
 
@@ -436,25 +432,17 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		_set_desired_input(signf(destination.x - origin.x) < 0.0, signf(destination.x - origin.x) > 0.0, true)
 		return _jump_step(self_state, destination, delta)
 
-	var distance_to_destination := origin.distance_to(destination)
 	var direction := signf(destination.x - origin.x)
+	# Movement snapshots are still needed for older P2P hosts.  Run those
+	# snapshots through the same collision/gravity adapter as the dedicated
+	# host instead of teleporting x/y and claiming the player is grounded.
 	_set_desired_input(direction < 0.0, direction > 0.0, false)
-	var move_speed := lerpf(24.0, 72.0, clampf(distance_to_destination / 96.0, 0.0, 1.0))
-	var step_distance := maxf(1.0, move_speed * maxf(delta, 0.0))
-	var next_position := Navigator.step_towards(origin, destination, step_distance)
-	self_state["x"] = next_position.x
-	self_state["y"] = next_position.y
-	# Multiplayer rendering extrapolates velocity once per 60 Hz physics tick,
-	# not in pixels/second. Sending px/s here makes the remote avatar overshoot
-	# every target and visibly oscillate around real players.
-	self_state["vx"] = (next_position.x - origin.x) / maxf(delta * NETWORK_PHYSICS_TICKS_PER_SECOND, 0.001)
-	self_state["vy"] = (next_position.y - origin.y) / maxf(delta * NETWORK_PHYSICS_TICKS_PER_SECOND, 0.001)
-	self_state["facing"] = 1 if next_position.x >= origin.x else -1
-	self_state["on_ground"] = true
-	var done := next_position.distance_to(destination) <= 8.0
+	_advance_local_physics(self_state, delta, false)
+	var next_position := Contract.target_position(self_state)
+	var done := next_position.distance_to(destination) <= 8.0 and bool(self_state.get("on_ground", false))
 	if done:
+		_set_desired_input(false, false, false)
 		self_state["vx"] = 0.0
-		self_state["vy"] = 0.0
 	_world_snapshot["self"] = self_state
 	return {"done": done, "reason": "movement_step"}
 
@@ -607,30 +595,89 @@ func _movement_hint(origin: Vector2, destination: Vector2) -> String:
 
 func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> Dictionary:
 	var origin := Contract.target_position(self_state)
-	var step := clampf(maxf(delta, 0.0) * NETWORK_PHYSICS_TICKS_PER_SECOND, 0.25, 2.0)
-	if not _jump_active:
-		_jump_active = true
-		_jump_velocity = BlockDefs.JUMP
-		_jump_ground_y = origin.y
-	_jump_velocity += BlockDefs.GRAVITY * step
 	var direction := signf(destination.x - origin.x)
-	var distance := absf(destination.x - origin.x)
-	var move_speed := lerpf(24.0, 72.0, clampf(distance / 96.0, 0.0, 1.0))
-	var next_x := origin.x + direction * move_speed * maxf(delta, 0.0)
-	var next_y := origin.y + _jump_velocity * step
-	var landed := next_y >= _jump_ground_y and _jump_velocity >= 0.0
+	_set_desired_input(direction < 0.0, direction > 0.0, true)
+	var was_airborne := not bool(self_state.get("on_ground", false))
+	_advance_local_physics(self_state, delta, true)
+	var landed := was_airborne and bool(self_state.get("on_ground", false))
 	if landed:
-		next_y = _jump_ground_y
 		_jump_active = false
-		_jump_velocity = 0.0
-	self_state["x"] = next_x
-	self_state["y"] = next_y
-	self_state["vx"] = direction * move_speed / NETWORK_PHYSICS_TICKS_PER_SECOND
-	self_state["vy"] = _jump_velocity
-	self_state["facing"] = 1 if direction >= 0.0 else -1
-	self_state["on_ground"] = landed
+	var next_x := float(self_state.get("x", origin.x))
 	_world_snapshot["self"] = self_state
 	return {"done": landed and absf(destination.x - next_x) <= 8.0, "reason": "jump_step"}
+
+
+func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: bool) -> void:
+	"""Apply a small, deterministic copy of WorldSim player physics.
+
+	Older P2P hosts do not simulate guest input.  Their only view of the bot is
+	the player_snapshot stream, so that stream must contain collision-resolved
+	coordinates rather than a kinematic target position that can float over a
+	gap.  Dedicated hosts still correct these values from their own simulation.
+	"""
+	var step := clampf(maxf(delta, 0.0) * NETWORK_PHYSICS_TICKS_PER_SECOND, 0.25, 2.0)
+	var width := float(self_state.get("w", 20.0))
+	var height := float(self_state.get("h", 28.0))
+	var x := float(self_state.get("x", 0.0))
+	var y := float(self_state.get("y", 0.0))
+	var vx := float(self_state.get("vx", 0.0))
+	var vy := float(self_state.get("vy", 0.0))
+	var on_ground := bool(self_state.get("on_ground", false))
+	var direction := (-1.0 if bool(_desired_input.get("left", false)) else (1.0 if bool(_desired_input.get("right", false)) else 0.0))
+	var target_vx := direction * BlockDefs.MOVE
+	vx = lerpf(vx, target_vx, clampf(step, 0.0, 1.0)) if on_ground else target_vx
+	if jump_pressed and on_ground:
+		vy = BlockDefs.JUMP
+		on_ground = false
+	elif on_ground:
+		vy = 0.0
+	else:
+		vy += BlockDefs.GRAVITY * step
+
+	var substeps := maxi(1, int(ceil(maxf(absf(vx), absf(vy)) * step / 6.0)))
+	var substep := step / float(substeps)
+	for _index in substeps:
+		if not is_zero_approx(vx):
+			var next_x := x + vx * substep
+			var horizontal_hit := _local_collision(next_x, y, width, height)
+			if horizontal_hit.is_empty():
+				x = next_x
+			else:
+				x = float(horizontal_hit.get("bx", x)) - width if vx > 0.0 else float(horizontal_hit.get("bx", x)) + float(BlockDefs.TILE)
+				vx = 0.0
+		var next_y := y + vy * substep
+		var vertical_hit := _local_collision(x, next_y, width, height)
+		if vertical_hit.is_empty():
+			y = next_y
+			on_ground = is_zero_approx(vy) and not _local_collision(x, y + 1.5, width, height).is_empty()
+		else:
+			var hit_y := float(vertical_hit.get("by", y))
+			if vy >= 0.0:
+				y = hit_y - height
+				on_ground = true
+			else:
+				y = hit_y + float(BlockDefs.TILE)
+				on_ground = false
+			vy = 0.0
+
+	self_state["x"] = x
+	self_state["y"] = y
+	self_state["vx"] = vx
+	self_state["vy"] = vy
+	self_state["facing"] = -1 if direction < 0.0 else (1 if direction > 0.0 else int(self_state.get("facing", 1)))
+	self_state["on_ground"] = on_ground
+
+
+func _local_collision(px: float, py: float, width: float, height: float) -> Dictionary:
+	var left := floori(px / float(BlockDefs.TILE))
+	var right := floori((px + width - 0.001) / float(BlockDefs.TILE))
+	var top := floori(py / float(BlockDefs.TILE))
+	var bottom := floori((py + height - 0.001) / float(BlockDefs.TILE))
+	for tile_y in range(top, bottom + 1):
+		for tile_x in range(left, right + 1):
+			if _terrain_solid_at(tile_x, tile_y):
+				return {"bx": tile_x * BlockDefs.TILE, "by": tile_y * BlockDefs.TILE}
+	return {}
 
 
 func _climb_step(self_state: Dictionary, destination: Vector2, delta: float) -> Dictionary:
