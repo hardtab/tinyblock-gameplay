@@ -191,6 +191,15 @@ func handle_message(message: Dictionary) -> void:
 			_record_event("player_joined", {"player_id": joined_id})
 			_update_human_count()
 		return
+	# MultiplayerClient emits its connected signal as soon as the authenticated
+	# WebSocket handshake is complete, but the guest's WebRTC data channel is
+	# only usable a moment later.  The regular game requests the snapshot from
+	# this message path for exactly that reason.  Waiting here prevents the bot's
+	# first request from being dropped while the channel is still negotiating.
+	if kind == "control" and message_type == "connected":
+		if state in [STATE_JOINING, STATE_SYNCING] and network_client != null and network_client.has_method("send_command"):
+			network_client.call("send_command", "snapshot_request", {})
+		return
 	if kind == "control" and message_type == "player_left":
 		var left_id := str(message.get("player_id", ""))
 		_roster.erase(left_id)
@@ -269,8 +278,6 @@ func _on_network_connected(role: String, player_id: String, network_session_id: 
 	_set_state(STATE_SYNCING)
 	_sync_started_msec = Time.get_ticks_msec()
 	sync_started.emit(session_id)
-	if network_client != null and network_client.has_method("send_command"):
-		network_client.call("send_command", "snapshot_request", {})
 
 
 func _send_player_snapshot_if_due(now_msec: int) -> void:
