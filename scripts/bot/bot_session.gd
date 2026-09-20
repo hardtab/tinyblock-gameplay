@@ -68,6 +68,13 @@ var _social := Social.new()
 var _last_player_snapshot_msec := -1
 var _equipment_slots := {"hand": "", "feet": ""}
 var _pending_action_targets: Dictionary = {}
+var _terrain_tiles: Dictionary = {}
+var _jump_active := false
+var _jump_velocity := 0.0
+var _jump_ground_y := 0.0
+var _climb_active := false
+var _climb_column := 0
+var _climb_time_left_msec := 0
 var _host_player_id := ""
 var _craft_pending_output := ""
 var _craft_retry_after_msec := -1
@@ -141,6 +148,13 @@ func join_session(record: Dictionary) -> void:
 	_recent_events.clear()
 	_last_player_snapshot_msec = -1
 	_pending_action_targets.clear()
+	_terrain_tiles.clear()
+	_jump_active = false
+	_jump_velocity = 0.0
+	_jump_ground_y = 0.0
+	_climb_active = false
+	_climb_column = 0
+	_climb_time_left_msec = 0
 	_host_player_id = ""
 	_craft_pending_output = ""
 	_craft_retry_after_msec = -1
@@ -266,6 +280,10 @@ func handle_message(message: Dictionary) -> void:
 		_handle_action_result(payload)
 		_record_event(message_type, payload)
 		return
+	if message_type == "tile_batch":
+		_apply_tile_batch(payload)
+		_record_event(message_type, payload)
+		return
 	if message_type in ["emoji_reaction", "creatures_snapshot", "tile_batch", "plant_batch", "region_complete"]:
 		_record_event(message_type, payload)
 
@@ -347,6 +365,8 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 				break
 
 	if action == Contract.ACTION_LOOK_AT:
+		_jump_active = false
+		_climb_active = false
 		self_state["vx"] = 0.0
 		self_state["vy"] = 0.0
 		self_state["on_ground"] = true
@@ -354,7 +374,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 			self_state["facing"] = 1 if target.x > origin.x else -1
 		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "look_complete"}
-	if target == origin:
+	if target == origin and not _jump_active and not _climb_active:
 		self_state["vx"] = 0.0
 		self_state["vy"] = 0.0
 		self_state["on_ground"] = true
@@ -369,7 +389,15 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	else:
 		destination.y = origin.y
 
-	var step_distance := maxf(1.0, 72.0 * maxf(delta, 0.0))
+	var hint := _movement_hint(origin, destination)
+	if _climb_active or hint == "climb":
+		return _climb_step(self_state, destination, delta)
+	if _jump_active or hint == "jump":
+		return _jump_step(self_state, destination, delta)
+
+	var distance_to_destination := origin.distance_to(destination)
+	var move_speed := lerpf(24.0, 72.0, clampf(distance_to_destination / 96.0, 0.0, 1.0))
+	var step_distance := maxf(1.0, move_speed * maxf(delta, 0.0))
 	var next_position := Navigator.step_towards(origin, destination, step_distance)
 	self_state["x"] = next_position.x
 	self_state["y"] = next_position.y
@@ -386,6 +414,125 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		self_state["vy"] = 0.0
 	_world_snapshot["self"] = self_state
 	return {"done": done, "reason": "movement_step"}
+
+
+func _rebuild_terrain_index(raw_tiles: Variant) -> void:
+	_terrain_tiles.clear()
+	if not raw_tiles is Array:
+		return
+	for raw_tile in raw_tiles:
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		var name := _block_name_for_content_id(str(tile.get("content_id", "")))
+		if name.is_empty():
+			name = str(tile.get("block_name", ""))
+		if not name.is_empty():
+			_terrain_tiles["%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]] = name
+
+
+func _apply_tile_batch(payload: Dictionary) -> void:
+	var tiles: Array = payload.get("tiles", []) if payload.get("tiles", []) is Array else []
+	for raw_tile in tiles:
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		var key := "%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]
+		var name := _block_name_for_content_id(str(tile.get("content_id", "")))
+		if name.is_empty():
+			name = str(tile.get("block_name", ""))
+		if name.is_empty() and tile.has("block_id"):
+			var defs := get_node_or_null("/root/BlockDefs")
+			if defs != null and defs.has_method("get_block_name"):
+				name = str(defs.call("get_block_name", int(tile.get("block_id", 0))))
+		if int(tile.get("block_id", 1)) == 0 or name == "air":
+			_terrain_tiles.erase(key)
+		elif not name.is_empty():
+			_terrain_tiles[key] = name
+
+
+func _terrain_name_at(tx: int, ty: int) -> String:
+	return str(_terrain_tiles.get("%d:%d" % [tx, ty], ""))
+
+
+func _terrain_solid_at(tx: int, ty: int) -> bool:
+	var name := _terrain_name_at(tx, ty)
+	return not name.is_empty() and bool(_block_entry(name).get("solid", false))
+
+
+func _terrain_climbable_at(tx: int, ty: int) -> bool:
+	var name := _terrain_name_at(tx, ty)
+	return name in ["wood", "leaves", "shagot_scaffold"] or name.ends_with("_wood") or name.ends_with("_leaves")
+
+
+func _movement_hint(origin: Vector2, destination: Vector2) -> String:
+	var direction := signf(destination.x - origin.x)
+	if is_zero_approx(direction):
+		return ""
+	var center_x := origin.x + 10.0
+	var ground_tile_y := floori((origin.y + 28.0) / float(BlockDefs.TILE))
+	var next_tile_x := floori((center_x + direction * 18.0) / float(BlockDefs.TILE))
+	if _terrain_climbable_at(next_tile_x, ground_tile_y) or _terrain_climbable_at(next_tile_x, ground_tile_y - 1):
+		return "climb"
+	if _terrain_solid_at(next_tile_x, ground_tile_y - 1):
+		return "jump"
+	# A one-block drop ahead is a small pit. Short gaps are jumpable; wider gaps
+	# remain a reason to slow down rather than repeatedly launch into the void.
+	if not _terrain_solid_at(next_tile_x, ground_tile_y) and _terrain_solid_at(next_tile_x, ground_tile_y + 1):
+		return "jump"
+	return ""
+
+
+func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> Dictionary:
+	var origin := Contract.target_position(self_state)
+	var step := clampf(maxf(delta, 0.0) * NETWORK_PHYSICS_TICKS_PER_SECOND, 0.25, 2.0)
+	if not _jump_active:
+		_jump_active = true
+		_jump_velocity = BlockDefs.JUMP
+		_jump_ground_y = origin.y
+	_jump_velocity += BlockDefs.GRAVITY * step
+	var direction := signf(destination.x - origin.x)
+	var distance := absf(destination.x - origin.x)
+	var move_speed := lerpf(24.0, 72.0, clampf(distance / 96.0, 0.0, 1.0))
+	var next_x := origin.x + direction * move_speed * maxf(delta, 0.0)
+	var next_y := origin.y + _jump_velocity * step
+	var landed := next_y >= _jump_ground_y and _jump_velocity >= 0.0
+	if landed:
+		next_y = _jump_ground_y
+		_jump_active = false
+		_jump_velocity = 0.0
+	self_state["x"] = next_x
+	self_state["y"] = next_y
+	self_state["vx"] = direction * move_speed / NETWORK_PHYSICS_TICKS_PER_SECOND
+	self_state["vy"] = _jump_velocity
+	self_state["facing"] = 1 if direction >= 0.0 else -1
+	self_state["on_ground"] = landed
+	_world_snapshot["self"] = self_state
+	return {"done": landed and absf(destination.x - next_x) <= 8.0, "reason": "jump_step"}
+
+
+func _climb_step(self_state: Dictionary, destination: Vector2, delta: float) -> Dictionary:
+	var origin := Contract.target_position(self_state)
+	if not _climb_active:
+		var direction := signf(destination.x - origin.x)
+		_climb_column = floori((origin.x + 10.0 + direction * 18.0) / float(BlockDefs.TILE))
+		_climb_active = true
+		_climb_time_left_msec = 1_200
+	_climb_time_left_msec -= int(maxf(delta, 0.0) * 1000.0)
+	var climb_step := 3.2 * maxf(delta, 0.0) * NETWORK_PHYSICS_TICKS_PER_SECOND
+	var next_x := lerpf(origin.x, float(_climb_column * BlockDefs.TILE + 6), clampf(delta * 8.0, 0.0, 1.0))
+	var next_y := origin.y - climb_step
+	var still_on_tree := _terrain_climbable_at(_climb_column, floori((next_y + 14.0) / float(BlockDefs.TILE))) or _terrain_climbable_at(_climb_column, floori((next_y + 30.0) / float(BlockDefs.TILE)))
+	if _climb_time_left_msec <= 0 or not still_on_tree:
+		_climb_active = false
+	self_state["x"] = next_x
+	self_state["y"] = next_y if _climb_active else origin.y
+	self_state["vx"] = (next_x - origin.x) / NETWORK_PHYSICS_TICKS_PER_SECOND
+	self_state["vy"] = -3.2 if _climb_active else 0.0
+	self_state["facing"] = 1 if destination.x >= origin.x else -1
+	self_state["on_ground"] = false if _climb_active else true
+	_world_snapshot["self"] = self_state
+	return {"done": not _climb_active and absf(destination.x - next_x) <= 8.0, "reason": "climb_step"}
 
 
 func _on_network_disconnected(reason: String) -> void:
@@ -424,6 +571,7 @@ func _apply_snapshot_if_complete() -> void:
 
 func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_world_snapshot = snapshot.duplicate(true)
+	_rebuild_terrain_index(_world_snapshot.get("tiles", []))
 	world_id = str(snapshot.get("world_id", world_id))
 	var local_state: Dictionary = snapshot.get("player", {}) if snapshot.get("player", {}) is Dictionary else {}
 	var multiplayer_state: Dictionary = snapshot.get("multiplayer", {}) if snapshot.get("multiplayer", {}) is Dictionary else {}
