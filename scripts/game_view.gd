@@ -57,6 +57,7 @@ const HEALTH_INDICATOR_FADE_SECONDS := 0.5
 const HEALTH_INDICATOR_PIP_SIZE := 4.0
 const HEALTH_INDICATOR_PIP_GAP := 2.0
 const PLAYER_RENDER_WIDTH := 20.0
+const PLAYER_RENDER_HEIGHT := 28.0
 const ATTACK_COOLDOWN_MSEC := WorldSim.COMBAT_ATTACK_COOLDOWN_MSEC
 const HIT_FLASH_MSEC := 180
 const REMOTE_PLAYER_INTERPOLATION_SPEED := 18.0
@@ -2851,6 +2852,7 @@ func _update_remote_player_interpolation(delta: float) -> void:
 				float(remote.get("vy", 0.0)) * simulation_steps
 				+ 0.5 * BlockDefs.GRAVITY * simulation_steps * simulation_steps
 			)
+		target = _clamp_remote_player_ground(target, remote)
 		var revision := int(remote.get("respawn_revision", 0))
 		var current: Vector2 = _remote_player_render_positions.get(player_id, target)
 		var previous_revision := int(_remote_player_render_revisions.get(player_id, revision))
@@ -2858,8 +2860,28 @@ func _update_remote_player_interpolation(delta: float) -> void:
 			current = target
 		else:
 			current = current.lerp(target, blend)
+		current = _clamp_remote_player_ground(current, remote)
 		_remote_player_render_positions[player_id] = current
 		_remote_player_render_revisions[player_id] = revision
+
+
+func _clamp_remote_player_ground(position: Vector2, remote: Dictionary) -> Vector2:
+	"""Keep a delayed/extrapolated remote avatar above authoritative terrain.
+
+	The render stream is intentionally allowed to extrapolate between snapshots,
+	but a falling snapshot can arrive one frame before the host reports its landing.
+	Without a collision clamp that predicted position penetrates the floor and the
+	avatar appears to fall through it.  This is presentation-only; the host remains
+	the authority for the actual player state.
+	"""
+	if sim == null or not sim.has_method("collides"):
+		return position
+	var hit: Variant = sim.collides(position.x, position.y, PLAYER_RENDER_WIDTH, PLAYER_RENDER_HEIGHT, false)
+	if hit is Dictionary and float(remote.get("vy", 0.0)) >= 0.0:
+		var floor_y := float((hit as Dictionary).get("by", position.y + PLAYER_RENDER_HEIGHT)) - PLAYER_RENDER_HEIGHT
+		if position.y > floor_y:
+			return Vector2(position.x, floor_y)
+	return position
 
 
 func _remote_player_render_position(player_id: String, remote: Dictionary) -> Vector2:
