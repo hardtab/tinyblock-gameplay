@@ -155,6 +155,7 @@ func _create_session() -> void:
 	session.empty_world_ready.connect(_on_empty_world_ready)
 	session.session_left.connect(_on_session_left)
 	session.structured_log.connect(_on_session_log)
+	session.decision_logged.connect(_on_session_decision)
 
 
 func _on_session_sync_started(_session_id: String) -> void:
@@ -192,6 +193,13 @@ func _on_session_left(reason: String) -> void:
 
 func _on_session_log(event: Dictionary) -> void:
 	structured_log.emit(event.duplicate(true))
+
+
+func _on_session_decision(event: Dictionary) -> void:
+	var entry := {"event": "bot_decision"}
+	for key in event:
+		entry[key] = event[key]
+	structured_log.emit(entry)
 
 
 func _schedule_retry(reason: String) -> void:

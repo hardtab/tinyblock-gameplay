@@ -91,6 +91,13 @@ static func _normalize_entities(raw_entities: Variant, own_player_id: String, or
 			continue
 		var health := int(item.get("health", item.get("hp", 10)))
 		var max_health := maxi(1, int(item.get("max_health", 10)))
+		if not hostile_default:
+			var actor_kind := str(item.get("actor_kind", "")).to_lower()
+			var role := str(item.get("role", "")).to_lower()
+			if bool(item.get("is_bot", false)) or actor_kind == "bot" or role == "host" or role == "bot":
+				continue
+			if health <= 0 or (item.has("alive") and not bool(item.get("alive", false))):
+				continue
 		item["id"] = entity_id
 		item["position"] = [position.x, position.y]
 		item["relative_position"] = [position.x - origin.x, position.y - origin.y]

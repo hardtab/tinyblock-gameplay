@@ -67,6 +67,14 @@ var _movement_step_callable: Callable
 var _social := Social.new()
 var _last_player_snapshot_msec := -1
 const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
+const BOT_SKIN := {
+	"skin": "#8b5a3c",
+	"shirt": "#76b852",
+	"shirt_dark": "#4f7b36",
+	"accent": "#b5d96a",
+	"pants": "#294f2f",
+	"hair": "#55352b",
+}
 
 
 func _init() -> void:
@@ -297,6 +305,7 @@ func _send_player_snapshot_if_due(now_msec: int) -> void:
 		"health": clampi(int(local.get("health", 10)), 0, 10),
 		"nourishment": clampi(int(local.get("nourishment", 100)), 0, 100),
 		"respawn_revision": int(local.get("respawn_revision", 0)),
+		"skin": BOT_SKIN.duplicate(true),
 		"equipment_slots": local.get("equipment_slots", {"hand": "", "feet": ""}),
 	})
 
