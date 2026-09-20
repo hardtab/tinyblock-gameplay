@@ -4,6 +4,7 @@ extends Node
 const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
 const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 const Navigator = preload("res://gameplay/scripts/bot/bot_navigator.gd")
+const BlockDefs = preload("res://gameplay/scripts/block_defs.gd")
 const Social = preload("res://gameplay/scripts/bot/bot_social.gd")
 const BehaviorClass = preload("res://gameplay/scripts/bot/bot_behavior.gd")
 const RuleProviderClass = preload("res://gameplay/scripts/bot/bot_rule_provider.gd")
@@ -380,6 +381,8 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		player_state["alive"] = int(player_state.get("health", 10)) > 0
 		_roster[player_id] = player_state.duplicate(true)
 	_world_snapshot["self"] = local_state.duplicate(true)
+	_world_snapshot["visible_resources"] = _visible_resources_from_tiles(_world_snapshot.get("tiles", []), local_state)
+	_world_snapshot["threats"] = _threats_from_creatures(_world_snapshot.get("creatures", []))
 	sync_complete = true
 	_snapshot_transfer_id = ""
 	_snapshot_expected_chunks = 0
@@ -431,6 +434,51 @@ func _build_observation(now_msec: int) -> Dictionary:
 	else:
 		snapshot["social_emoji"] = ""
 	return Perception.build(snapshot, own_player_id, observation_radius, now_msec)
+
+
+func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -> Array:
+	var resources: Array = []
+	if not raw_tiles is Array:
+		return resources
+	var origin := Contract.target_position(self_state)
+	var max_distance := observation_radius + float(BlockDefs.TILE)
+	for raw_tile in raw_tiles:
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		var tile_x := int(tile.get("x", 0))
+		var tile_y := int(tile.get("y", 0))
+		var position := Vector2((float(tile_x) + 0.5) * BlockDefs.TILE, (float(tile_y) + 0.5) * BlockDefs.TILE)
+		if origin.distance_to(position) > max_distance:
+			continue
+		resources.append({
+			"id": "tile:%d:%d" % [tile_x, tile_y],
+			"x": tile_x,
+			"y": tile_y,
+			"content_id": str(tile.get("content_id", "")),
+			"position": [position.x, position.y],
+			"reachable": origin.distance_to(position) <= float(BlockDefs.TILE) * 2.5,
+		})
+		if resources.size() >= 256:
+			break
+	return resources
+
+
+func _threats_from_creatures(raw_creatures: Variant) -> Array:
+	var threats: Array = []
+	if not raw_creatures is Array:
+		return threats
+	for raw_creature in raw_creatures:
+		if not raw_creature is Dictionary:
+			continue
+		var creature := (raw_creature as Dictionary).duplicate(true)
+		if bool(creature.get("dead", false)):
+			continue
+		var position := Vector2((float(creature.get("x", 0.0)) + 0.5) * BlockDefs.TILE, (float(creature.get("y", 0.0)) + 0.5) * BlockDefs.TILE)
+		creature["position"] = [position.x, position.y]
+		creature["hostile"] = true
+		threats.append(creature)
+	return threats
 
 
 func _record_event(event_name: String, data: Dictionary) -> void:
