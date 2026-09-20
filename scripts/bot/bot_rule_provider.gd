@@ -75,15 +75,15 @@ func decide(observation: Dictionary) -> Dictionary:
 		if float(creature.get("distance", 9999.0)) <= float(observation.get("creature_attack_distance", 48.0)):
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_ATTACK_CREATURE, creature, 500, 0.78)
 
+	var build_target := _build_target(observation)
+	if not build_target.is_empty() and Contract.ACTION_PLACE in legal:
+		return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, build_target, 700, 0.61)
+
 	var resources: Array = _as_array(observation.get("visible_resources", []))
 	if not resources.is_empty() and Contract.ACTION_MINE in legal:
 		var resource := _first_dictionary(resources)
 		if bool(resource.get("reachable", false)):
 			return _decision(Contract.GOAL_GATHER, Contract.ACTION_MINE, resource, 1800, 0.67)
-
-	var build_target := _build_target(observation)
-	if not build_target.is_empty() and Contract.ACTION_PLACE in legal:
-		return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, build_target, 700, 0.61)
 
 	if Contract.ACTION_LOOK_AT in legal and not social_target_id.is_empty() and _rng.randf() < 0.28:
 		return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_LOOK_AT, social_target, 700, 0.51)
@@ -133,15 +133,16 @@ func _craftable_output(observation: Dictionary) -> String:
 		return ""
 	if int(observation.get("craft_retry_after_msec", -1)) > int(observation.get("observed_at_msec", 0)):
 		return ""
+	var blocked_outputs: Array = observation.get("craft_blocked_outputs", []) if observation.get("craft_blocked_outputs", []) is Array else []
 	var inventory := _inventory(observation)
 	var achievements: Dictionary = observation.get("achievements", {}) if observation.get("achievements", {}) is Dictionary else {}
 	var unlocked: Array = achievements.get("unlocked", []) if achievements.get("unlocked", []) is Array else []
 	var recipes: Array = observation.get("recipes", []) if observation.get("recipes", []) is Array else []
 	var priority := ["stone_pickaxe", "stone_axe", "trail_boots", "stone_sword"]
 	for wanted in priority:
-		if wanted in inventory or (wanted == "stone_pickaxe" and "stone_age" in unlocked):
+		if wanted in inventory or wanted in blocked_outputs or (wanted == "stone_pickaxe" and "stone_age" in unlocked):
 			continue
-		if _recipe_available(recipes, inventory, wanted):
+		if _recipe_available(recipes, inventory, wanted) and wanted not in blocked_outputs:
 			return wanted
 	# Do not repeatedly crush the same raw material merely because a server
 	# without the newer craft command has not acknowledged the request yet.
@@ -152,7 +153,7 @@ func _craftable_output(observation: Dictionary) -> String:
 		var output: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
 		for raw_name in output:
 			var name := str(raw_name)
-			if name in GENERIC_OUTPUTS and int(inventory.get(name, 0)) <= 0 and _recipe_inputs_available(recipe, inventory):
+			if name in GENERIC_OUTPUTS and name not in blocked_outputs and int(inventory.get(name, 0)) <= 0 and _recipe_inputs_available(recipe, inventory):
 				return name
 	return ""
 

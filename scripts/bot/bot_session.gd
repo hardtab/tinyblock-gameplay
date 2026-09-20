@@ -71,6 +71,8 @@ var _pending_action_targets: Dictionary = {}
 var _host_player_id := ""
 var _craft_pending_output := ""
 var _craft_retry_after_msec := -1
+var _craft_blocked_outputs: Dictionary = {}
+var _population_logged := false
 const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
@@ -141,6 +143,8 @@ func join_session(record: Dictionary) -> void:
 	_host_player_id = ""
 	_craft_pending_output = ""
 	_craft_retry_after_msec = -1
+	_craft_blocked_outputs.clear()
+	_population_logged = false
 	safety.reset_session()
 	_world_snapshot.clear()
 	world_id = str(record.get("world_id", ""))
@@ -273,6 +277,7 @@ func _process(delta: float) -> void:
 		return
 	if state != STATE_PLAYING:
 		return
+	_expire_craft_pending(now_msec)
 	var observation := _build_observation(now_msec)
 	_send_player_snapshot_if_due(now_msec)
 	behavior.tick(observation, delta, now_msec)
@@ -424,6 +429,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	_world_snapshot["craft_pending_output"] = _craft_pending_output
 	_world_snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
+	_world_snapshot["craft_blocked_outputs"] = _craft_blocked_outputs.keys()
 	_world_snapshot["visible_resources"] = _visible_resources_from_tiles(_world_snapshot.get("tiles", []), local_state)
 	_world_snapshot["threats"] = _threats_from_creatures(_world_snapshot.get("creatures", []))
 	sync_complete = true
@@ -562,13 +568,15 @@ func _apply_inventory_snapshot(payload: Dictionary) -> void:
 	_equipment_slots = payload.get("equipment_slots", _equipment_slots).duplicate(true) if payload.get("equipment_slots", _equipment_slots) is Dictionary else _equipment_slots
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	if not _craft_pending_output.is_empty() and int(inventory.get(_craft_pending_output, 0)) > 0:
+		_craft_blocked_outputs.erase(_craft_pending_output)
 		_craft_pending_output = ""
 		_craft_retry_after_msec = Time.get_ticks_msec() + CRAFT_RETRY_DELAY_MSEC
 
 
 func _update_human_count() -> void:
 	var next_count := Perception.count_live_humans(_roster, own_player_id, [_host_player_id], dedicated_server)
-	if next_count == human_player_count:
+	var changed := next_count != human_player_count
+	if not changed and _population_logged:
 		return
 	human_player_count = next_count
 	if sync_complete and human_player_count <= 0:
@@ -577,6 +585,16 @@ func _update_human_count() -> void:
 	else:
 		empty_since_msec = -1
 	human_player_count_changed.emit(human_player_count)
+	if changed or not _population_logged:
+		structured_log.emit({
+			"event": "player_population",
+			"human_player_count": next_count,
+			"roster_count": _roster.size(),
+			"host_player_id": _host_player_id,
+			"dedicated_server": dedicated_server,
+			"at_msec": Time.get_ticks_msec(),
+		})
+		_population_logged = true
 	var achievements := get_node_or_null("/root/Achievements")
 	if achievements != null and achievements.has_method("record_multiplayer_players"):
 		achievements.call("record_multiplayer_players", human_player_count + 1)
@@ -593,6 +611,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	snapshot["craft_pending_output"] = _craft_pending_output
 	snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
+	snapshot["craft_blocked_outputs"] = _craft_blocked_outputs.keys()
 	var achievements := get_node_or_null("/root/Achievements")
 	snapshot["achievements"] = {"unlocked": achievements.call("unlocked_ids") if achievements != null and achievements.has_method("unlocked_ids") else []}
 	if _welcome_emoji_pending and now_msec >= _welcome_emoji_due_msec:
@@ -702,6 +721,10 @@ func _handle_action_result(payload: Dictionary) -> void:
 		var craft: Dictionary = _pending_action_targets.get("craft", {}) if _pending_action_targets.get("craft", {}) is Dictionary else {}
 		var output := str(craft.get("output", payload.get("output", "")))
 		_craft_pending_output = ""
+		if not accepted and not output.is_empty():
+			_craft_blocked_outputs[output] = true
+		elif accepted:
+			_craft_blocked_outputs.erase(output)
 		_craft_retry_after_msec = Time.get_ticks_msec() + (CRAFT_RETRY_DELAY_MSEC if not accepted else 2_000)
 		_pending_action_targets.erase("craft")
 		var achievements := get_node_or_null("/root/Achievements")
@@ -735,6 +758,17 @@ func _host_id_from_network() -> String:
 	if network_client != null and network_client.has_method("host_player_id"):
 		return str(network_client.call("host_player_id"))
 	return ""
+
+
+func _expire_craft_pending(now_msec: int) -> void:
+	if _craft_pending_output.is_empty() or _craft_retry_after_msec < 0 or now_msec < _craft_retry_after_msec:
+		return
+	# Older community hosts may ignore the newer craft_recipe command. Mark the
+	# output unavailable for this session instead of retrying forever and
+	# starving the bot's mining/building goals.
+	_craft_blocked_outputs[_craft_pending_output] = true
+	_craft_pending_output = ""
+	_craft_retry_after_msec = -1
 
 
 func _set_state(next_state: String) -> void:
