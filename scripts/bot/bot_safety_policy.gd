@@ -96,6 +96,9 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 		Contract.ACTION_MINE:
 			if not _reachable_resource_exists(observation.get("visible_resources", []), target_id):
 				return _rejected(decision, "mine_target_not_reachable")
+		Contract.ACTION_OPEN_CONTAINER:
+			if not _reachable_container_exists(observation.get("visible_containers", []), target_id):
+				return _rejected(decision, "container_target_not_reachable")
 		Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW, Contract.ACTION_LOOK_AT:
 			if not _target_exists(observation.get("players", []), target_id):
 				return _rejected(decision, "player_target_not_visible")
@@ -155,6 +158,16 @@ func _target_exists(raw_targets: Variant, target_id: String) -> bool:
 
 
 func _reachable_resource_exists(raw_targets: Variant, target_id: String) -> bool:
+	for raw_target in _as_array(raw_targets):
+		if not raw_target is Dictionary:
+			continue
+		var target := raw_target as Dictionary
+		if str(target.get("id", "")) == target_id:
+			return bool(target.get("reachable", false))
+	return false
+
+
+func _reachable_container_exists(raw_targets: Variant, target_id: String) -> bool:
 	for raw_target in _as_array(raw_targets):
 		if not raw_target is Dictionary:
 			continue

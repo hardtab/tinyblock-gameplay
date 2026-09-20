@@ -875,6 +875,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_world_snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
 	_world_snapshot["craft_blocked_outputs"] = _craft_blocked_outputs.keys()
 	_world_snapshot["visible_resources"] = _visible_resources_from_tiles(_world_snapshot.get("tiles", []), local_state)
+	_world_snapshot["visible_containers"] = _visible_containers_from_snapshot(_world_snapshot, local_state)
 	_world_snapshot["threats"] = _threats_from_creatures(_world_snapshot.get("creatures", []))
 	sync_complete = true
 	_snapshot_transfer_id = ""
@@ -1071,6 +1072,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["craft_pending_output"] = _craft_pending_output
 	snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
 	snapshot["craft_blocked_outputs"] = _craft_blocked_outputs.keys()
+	snapshot["visible_containers"] = _visible_containers_from_snapshot(snapshot, snapshot["self"] as Dictionary)
 	var achievements := get_node_or_null("/root/Achievements")
 	snapshot["achievements"] = {"unlocked": achievements.call("unlocked_ids") if achievements != null and achievements.has_method("unlocked_ids") else []}
 	if _welcome_emoji_pending and now_msec >= _welcome_emoji_due_msec:
@@ -1106,6 +1108,49 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 		if resources.size() >= 256:
 			break
 	return resources
+
+
+func _visible_containers_from_snapshot(snapshot: Dictionary, self_state: Dictionary) -> Array:
+	var containers: Array = []
+	var raw_containers: Variant = snapshot.get("containers", [])
+	if not raw_containers is Array:
+		return containers
+	var origin := Contract.target_position(self_state)
+	var max_distance := observation_radius + float(BlockDefs.TILE)
+	for raw_entry in raw_containers:
+		if not raw_entry is Dictionary:
+			continue
+		var entry := raw_entry as Dictionary
+		var data: Dictionary = entry.get("data", {}) if entry.get("data", {}) is Dictionary else {}
+		var tile_x := int(entry.get("x", 0))
+		var tile_y := int(entry.get("y", 0))
+		var position := Vector2((float(tile_x) + 0.5) * BlockDefs.TILE, (float(tile_y) + 0.5) * BlockDefs.TILE)
+		if origin.distance_to(position) > max_distance:
+			continue
+		var death_cache := bool(data.get("death_cache", false))
+		var one_use_cache := bool(data.get("one_use_cache", false))
+		var contents: Dictionary = data.get("contents", {}) if data.get("contents", {}) is Dictionary else {}
+		var loot_generated := bool(data.get("loot_generated", true))
+		# An already-opened empty chest is not an activity target. Caches remain
+		# visible regardless of owner: multiplayer recovery intentionally allows a
+		# nearby player to pick up another player's death cache.
+		if not death_cache and not one_use_cache and loot_generated and contents.is_empty():
+			continue
+		var kind := "death_cache" if death_cache else ("one_use_cache" if one_use_cache else "chest")
+		containers.append({
+			"id": "container:%d:%d" % [tile_x, tile_y],
+			"x": tile_x,
+			"y": tile_y,
+			"position": [position.x, position.y],
+			"kind": kind,
+			"death_cache": death_cache,
+			"one_use_cache": one_use_cache,
+			"owner_player_id": str(data.get("owner_player_id", "")),
+			"reachable": origin.distance_to(position) <= float(BlockDefs.TILE) * 4.5,
+		})
+		if containers.size() >= 32:
+			break
+	return containers
 
 
 func _threats_from_creatures(raw_creatures: Variant) -> Array:
@@ -1161,6 +1206,10 @@ func _on_decision_started(decision: Dictionary) -> void:
 		_craft_pending_output = str(decision.get("target_id", ""))
 		_craft_retry_after_msec = now_msec + CRAFT_RESPONSE_TIMEOUT_MSEC
 		_pending_action_targets["craft"] = {"action": action, "output": _craft_pending_output}
+	elif action == Contract.ACTION_OPEN_CONTAINER:
+		var container_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+		var container_key := "%d:%d" % [int(container_target.get("x", 0)), int(container_target.get("y", 0))]
+		_pending_action_targets[container_key] = {"action": action}
 	if action == Contract.ACTION_SEND_EMOJI:
 		var emoji := str(decision.get("emoji", ""))
 		if _social.emoji_can_send(_last_emoji_sent_msec, now_msec, emoji, _previous_emoji, _social_last_sent_msec):
@@ -1175,6 +1224,12 @@ func _on_decision_started(decision: Dictionary) -> void:
 
 func _handle_action_result(payload: Dictionary) -> void:
 	var action := str(payload.get("action", ""))
+	if action == "open_container":
+		var container_key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
+		_pending_action_targets.erase(container_key)
+		_apply_tile_batch({"tiles": [payload]})
+		_update_snapshot_container(container_key, payload.get("container", null))
+		return
 	if action == "craft_recipe":
 		var accepted := bool(payload.get("accepted", false))
 		var craft: Dictionary = _pending_action_targets.get("craft", {}) if _pending_action_targets.get("craft", {}) is Dictionary else {}
@@ -1202,6 +1257,34 @@ func _handle_action_result(payload: Dictionary) -> void:
 		achievements.call("record_block_mined", _block_name_for_content_id(str(target.get("content_id", ""))))
 	elif action == "place_block" and achievements.has_method("record_block_placed"):
 		achievements.call("record_block_placed", str(target.get("block", "")))
+
+
+func _update_snapshot_container(key: String, raw_container: Variant) -> void:
+	var raw_containers: Variant = _world_snapshot.get("containers", [])
+	if not raw_containers is Array:
+		return
+	var parts := key.split(":")
+	if parts.size() != 2:
+		return
+	var wanted_x := int(parts[0])
+	var wanted_y := int(parts[1])
+	var containers: Array = raw_containers as Array
+	for index in range(containers.size() - 1, -1, -1):
+		if not containers[index] is Dictionary:
+			continue
+		var entry := containers[index] as Dictionary
+		if int(entry.get("x", 0)) != wanted_x or int(entry.get("y", 0)) != wanted_y:
+			continue
+		if raw_container is Dictionary:
+			entry["data"] = (raw_container as Dictionary).duplicate(true)
+			containers[index] = entry
+		else:
+			containers.remove_at(index)
+		_world_snapshot["containers"] = containers
+		return
+	if raw_container is Dictionary:
+		containers.append({"x": wanted_x, "y": wanted_y, "data": (raw_container as Dictionary).duplicate(true)})
+		_world_snapshot["containers"] = containers
 
 
 func _emit_left(reason: String) -> void:

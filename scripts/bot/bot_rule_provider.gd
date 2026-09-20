@@ -73,6 +73,12 @@ func decide(observation: Dictionary) -> Dictionary:
 		if bool(resource.get("reachable", false)):
 			return _decision(Contract.GOAL_GATHER, Contract.ACTION_MINE, resource, 1800, 0.67)
 
+	var containers: Array = _as_array(observation.get("visible_containers", []))
+	if not containers.is_empty() and Contract.ACTION_OPEN_CONTAINER in legal:
+		for raw_container in containers:
+			if raw_container is Dictionary and bool((raw_container as Dictionary).get("reachable", false)):
+				return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_OPEN_CONTAINER, raw_container, 900, 0.76)
+
 	# Social proximity is a context, not the bot's whole job.  Only follow after
 	# the nearby achievement, gathering, and building opportunities have been
 	# checked; otherwise a player standing beside the bot would starve all useful

@@ -26,6 +26,7 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 		"players": players,
 		"threats": threats,
 		"visible_resources": resources,
+		"visible_containers": _normalize_entities(snapshot.get("visible_containers", []), "", self_position, radius, false),
 		"inventory_summary": _dictionary(snapshot.get("inventory_summary", snapshot.get("inventory", {}))).duplicate(true),
 		"legal_actions": Contract.normalize_legal_actions(snapshot.get("legal_actions", Contract.ALL_ACTIONS)),
 		"current_goal": str(snapshot.get("current_goal", Contract.GOAL_IDLE)),
