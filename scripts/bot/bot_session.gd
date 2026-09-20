@@ -682,6 +682,12 @@ func _local_collision(px: float, py: float, width: float, height: float) -> Dict
 
 func _climb_step(self_state: Dictionary, destination: Vector2, delta: float) -> Dictionary:
 	var origin := Contract.target_position(self_state)
+	if not _local_climb_contact(self_state):
+		_climb_active = false
+		_set_desired_input(false, false, false)
+		_advance_local_physics(self_state, delta, false)
+		_world_snapshot["self"] = self_state
+		return {"done": false, "reason": "climb_contact_lost"}
 	if not _climb_active:
 		var direction := signf(destination.x - origin.x)
 		_climb_column = floori((origin.x + 10.0 + direction * 18.0) / float(BlockDefs.TILE))
@@ -694,14 +700,34 @@ func _climb_step(self_state: Dictionary, destination: Vector2, delta: float) -> 
 	var still_on_tree := _terrain_climbable_at(_climb_column, floori((next_y + 14.0) / float(BlockDefs.TILE))) or _terrain_climbable_at(_climb_column, floori((next_y + 30.0) / float(BlockDefs.TILE)))
 	if _climb_time_left_msec <= 0 or not still_on_tree:
 		_climb_active = false
-	self_state["x"] = next_x
-	self_state["y"] = next_y if _climb_active else origin.y
-	self_state["vx"] = (next_x - origin.x) / NETWORK_PHYSICS_TICKS_PER_SECOND
-	self_state["vy"] = -3.2 if _climb_active else 0.0
-	self_state["facing"] = 1 if destination.x >= origin.x else -1
-	self_state["on_ground"] = false if _climb_active else true
+	if _climb_active:
+		self_state["x"] = next_x
+		self_state["y"] = next_y
+		self_state["vx"] = (next_x - origin.x) / NETWORK_PHYSICS_TICKS_PER_SECOND
+		self_state["vy"] = -3.2
+		self_state["facing"] = 1 if destination.x >= origin.x else -1
+		self_state["on_ground"] = false
+	else:
+		_set_desired_input(false, false, false)
+		_advance_local_physics(self_state, delta, false)
 	_world_snapshot["self"] = self_state
 	return {"done": not _climb_active and absf(destination.x - next_x) <= 8.0, "reason": "climb_step"}
+
+
+func _local_climb_contact(self_state: Dictionary) -> bool:
+	var px := float(self_state.get("x", 0.0))
+	var py := float(self_state.get("y", 0.0))
+	var width := float(self_state.get("w", 20.0))
+	var height := float(self_state.get("h", 28.0))
+	var left := floori((px - 3.0) / float(BlockDefs.TILE))
+	var right := floori((px + width + 3.0 - 0.001) / float(BlockDefs.TILE))
+	var top := floori(py / float(BlockDefs.TILE))
+	var bottom := floori((py + height - 0.001) / float(BlockDefs.TILE))
+	for tile_y in range(top, bottom + 1):
+		for tile_x in range(left, right + 1):
+			if _terrain_climbable_at(tile_x, tile_y):
+				return true
+	return false
 
 
 func _on_network_disconnected(reason: String) -> void:
