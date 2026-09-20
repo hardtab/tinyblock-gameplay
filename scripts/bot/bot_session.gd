@@ -436,6 +436,11 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# Movement snapshots are still needed for older P2P hosts.  Run those
 	# snapshots through the same collision/gravity adapter as the dedicated
 	# host instead of teleporting x/y and claiming the player is grounded.
+	if bool(self_state.get("on_ground", false)) and _would_step_into_void(origin, destination):
+		_set_desired_input(false, false, false)
+		_advance_local_physics(self_state, delta, false)
+		_world_snapshot["self"] = self_state
+		return {"done": false, "reason": "edge_guard"}
 	_set_desired_input(direction < 0.0, direction > 0.0, false)
 	_advance_local_physics(self_state, delta, false)
 	var next_position := Contract.target_position(self_state)
@@ -678,6 +683,25 @@ func _local_collision(px: float, py: float, width: float, height: float) -> Dict
 			if _terrain_solid_at(tile_x, tile_y):
 				return {"bx": tile_x * BlockDefs.TILE, "by": tile_y * BlockDefs.TILE}
 	return {}
+
+
+func _would_step_into_void(origin: Vector2, destination: Vector2) -> bool:
+	if _terrain_tiles.is_empty():
+		return false
+	var direction := signf(destination.x - origin.x)
+	if is_zero_approx(direction):
+		return false
+	var support := _support_tile_for_position(origin)
+	if not _terrain_solid_at(support.x, support.y):
+		return false
+	var next_x := floori((origin.x + 10.0 + direction * 18.0) / float(BlockDefs.TILE))
+	# A solid neighbour or a one-block drop is handled by normal collision or
+	# the jump hint. Only stop when the next column has no known landing cell.
+	if _terrain_solid_at(next_x, support.y) or _terrain_solid_at(next_x, support.y - 1):
+		return false
+	if _terrain_solid_at(next_x, support.y + 1) or _terrain_solid_at(next_x, support.y + 2):
+		return false
+	return true
 
 
 func _climb_step(self_state: Dictionary, destination: Vector2, delta: float) -> Dictionary:
