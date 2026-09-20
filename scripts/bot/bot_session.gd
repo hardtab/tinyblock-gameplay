@@ -530,6 +530,9 @@ func _station_available(snapshot: Dictionary, station: String) -> bool:
 
 func _apply_players_snapshot(payload: Dictionary) -> void:
 	var players: Dictionary = payload.get("players", {}) if payload.get("players", {}) is Dictionary else {}
+	# The host sends the complete authoritative roster on every snapshot. Do not
+	# retain IDs from an earlier player_joined stream after those players leave.
+	_roster.clear()
 	for raw_id in players:
 		var player_id := str(raw_id)
 		if player_id == own_player_id or player_id == _host_player_id or not players[raw_id] is Dictionary:
