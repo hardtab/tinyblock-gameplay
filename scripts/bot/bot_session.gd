@@ -68,7 +68,12 @@ var _social := Social.new()
 var _last_player_snapshot_msec := -1
 var _equipment_slots := {"hand": "", "feet": ""}
 var _pending_action_targets: Dictionary = {}
+var _host_player_id := ""
+var _craft_pending_output := ""
+var _craft_retry_after_msec := -1
 const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
+const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
+const CRAFT_RETRY_DELAY_MSEC := 8_000
 const BOT_SKIN := {
 	"skin": "#8b5a3c",
 	"shirt": "#76b852",
@@ -133,6 +138,9 @@ func join_session(record: Dictionary) -> void:
 	_recent_events.clear()
 	_last_player_snapshot_msec = -1
 	_pending_action_targets.clear()
+	_host_player_id = ""
+	_craft_pending_output = ""
+	_craft_retry_after_msec = -1
 	safety.reset_session()
 	_world_snapshot.clear()
 	world_id = str(record.get("world_id", ""))
@@ -197,7 +205,7 @@ func handle_message(message: Dictionary) -> void:
 	var payload: Dictionary = message.get("payload", {}) if message.get("payload", {}) is Dictionary else {}
 	if kind == "control" and message_type == "player_joined":
 		var joined_id := str(message.get("player_id", ""))
-		if not joined_id.is_empty() and joined_id != own_player_id:
+		if not joined_id.is_empty() and joined_id != own_player_id and joined_id != _host_player_id:
 			_roster[joined_id] = {"id": joined_id, "health": 10, "alive": true, "role": str(message.get("role", "guest"))}
 			_record_event("player_joined", {"player_id": joined_id})
 			_update_human_count()
@@ -291,6 +299,7 @@ func _on_network_connected(role: String, player_id: String, network_session_id: 
 		_emit_left("unexpected_role")
 		return
 	own_player_id = player_id
+	_host_player_id = _host_id_from_network()
 	if not network_session_id.is_empty():
 		session_id = network_session_id
 	_set_state(STATE_SYNCING)
@@ -402,7 +411,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_roster.clear()
 	for raw_id in player_states:
 		var player_id := str(raw_id)
-		if player_id == own_player_id:
+		if player_id == own_player_id or player_id == _host_player_id:
 			continue
 		var player_state := player_states[raw_id] as Dictionary if player_states[raw_id] is Dictionary else {}
 		player_state["id"] = player_id
@@ -413,6 +422,8 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_world_snapshot["recipes"] = _recipe_catalog(snapshot)
 	_equipment_slots = _equipment_by_name(snapshot.get("equipment_slots", {}))
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+	_world_snapshot["craft_pending_output"] = _craft_pending_output
+	_world_snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
 	_world_snapshot["visible_resources"] = _visible_resources_from_tiles(_world_snapshot.get("tiles", []), local_state)
 	_world_snapshot["threats"] = _threats_from_creatures(_world_snapshot.get("creatures", []))
 	sync_complete = true
@@ -515,7 +526,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 	var players: Dictionary = payload.get("players", {}) if payload.get("players", {}) is Dictionary else {}
 	for raw_id in players:
 		var player_id := str(raw_id)
-		if player_id == own_player_id or not players[raw_id] is Dictionary:
+		if player_id == own_player_id or player_id == _host_player_id or not players[raw_id] is Dictionary:
 			continue
 		var entry := (players[raw_id] as Dictionary).duplicate(true)
 		entry["id"] = player_id
@@ -550,10 +561,13 @@ func _apply_inventory_snapshot(payload: Dictionary) -> void:
 	_world_snapshot["inventory_summary"] = inventory.duplicate(true)
 	_equipment_slots = payload.get("equipment_slots", _equipment_slots).duplicate(true) if payload.get("equipment_slots", _equipment_slots) is Dictionary else _equipment_slots
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+	if not _craft_pending_output.is_empty() and int(inventory.get(_craft_pending_output, 0)) > 0:
+		_craft_pending_output = ""
+		_craft_retry_after_msec = Time.get_ticks_msec() + CRAFT_RETRY_DELAY_MSEC
 
 
 func _update_human_count() -> void:
-	var next_count := Perception.count_live_humans(_roster, own_player_id, [], dedicated_server)
+	var next_count := Perception.count_live_humans(_roster, own_player_id, [_host_player_id], dedicated_server)
 	if next_count == human_player_count:
 		return
 	human_player_count = next_count
@@ -577,6 +591,8 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["legal_actions"] = Contract.ALL_ACTIONS
 	snapshot["self_defense"] = safety.observation_state(now_msec)
 	snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+	snapshot["craft_pending_output"] = _craft_pending_output
+	snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
 	var achievements := get_node_or_null("/root/Achievements")
 	snapshot["achievements"] = {"unlocked": achievements.call("unlocked_ids") if achievements != null and achievements.has_method("unlocked_ids") else []}
 	if _welcome_emoji_pending and now_msec >= _welcome_emoji_due_msec:
@@ -664,7 +680,9 @@ func _on_decision_started(decision: Dictionary) -> void:
 		var key := "%d:%d" % [int(target.get("x", 0)), int(target.get("y", 0))]
 		_pending_action_targets[key] = {"action": action, "block": str(decision.get("block", "")), "content_id": str(target.get("content_id", ""))}
 	elif action == Contract.ACTION_CRAFT:
-		_pending_action_targets["craft"] = {"action": action, "output": str(decision.get("target_id", ""))}
+		_craft_pending_output = str(decision.get("target_id", ""))
+		_craft_retry_after_msec = now_msec + CRAFT_RESPONSE_TIMEOUT_MSEC
+		_pending_action_targets["craft"] = {"action": action, "output": _craft_pending_output}
 	if action == Contract.ACTION_SEND_EMOJI:
 		var emoji := str(decision.get("emoji", ""))
 		if _social.emoji_can_send(_last_emoji_sent_msec, now_msec, emoji, _previous_emoji, _social_last_sent_msec):
@@ -678,16 +696,22 @@ func _on_decision_started(decision: Dictionary) -> void:
 
 
 func _handle_action_result(payload: Dictionary) -> void:
+	var action := str(payload.get("action", ""))
+	if action == "craft_recipe":
+		var accepted := bool(payload.get("accepted", false))
+		var craft: Dictionary = _pending_action_targets.get("craft", {}) if _pending_action_targets.get("craft", {}) is Dictionary else {}
+		var output := str(craft.get("output", payload.get("output", "")))
+		_craft_pending_output = ""
+		_craft_retry_after_msec = Time.get_ticks_msec() + (CRAFT_RETRY_DELAY_MSEC if not accepted else 2_000)
+		_pending_action_targets.erase("craft")
+		var achievements := get_node_or_null("/root/Achievements")
+		if accepted and achievements != null and achievements.has_method("record_craft"):
+			achievements.call("record_craft", output)
+		return
 	if not bool(payload.get("accepted", false)):
 		return
-	var action := str(payload.get("action", ""))
 	var achievements := get_node_or_null("/root/Achievements")
 	if achievements == null:
-		return
-	if action == "craft_recipe" and achievements.has_method("record_craft"):
-		var craft: Dictionary = _pending_action_targets.get("craft", {}) if _pending_action_targets.get("craft", {}) is Dictionary else {}
-		achievements.call("record_craft", str(craft.get("output", payload.get("output", ""))))
-		_pending_action_targets.erase("craft")
 		return
 	var key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
 	var target: Dictionary = _pending_action_targets.get(key, {}) if _pending_action_targets.get(key, {}) is Dictionary else {}
@@ -705,6 +729,12 @@ func _emit_left(reason: String) -> void:
 	_set_state(STATE_LEAVING)
 	structured_log.emit({"event": "session_left", "session_id": session_id, "reason": reason, "at_msec": Time.get_ticks_msec()})
 	session_left.emit(reason)
+
+
+func _host_id_from_network() -> String:
+	if network_client != null and network_client.has_method("host_player_id"):
+		return str(network_client.call("host_player_id"))
+	return ""
 
 
 func _set_state(next_state: String) -> void:

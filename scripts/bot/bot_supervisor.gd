@@ -234,7 +234,7 @@ func filter_public_sessions(sessions: Array, expected_protocol_version: int = DE
 		var world_id := str(entry.get("world_id", ""))
 		var access_mode := str(entry.get("access_mode", "public")).to_lower()
 		var world_mode := str(entry.get("world_mode", "")).to_lower()
-		var player_count := int(entry.get("player_count", entry.get("players", 0)))
+		var player_count := _display_player_count(entry)
 		var max_players := int(entry.get("max_players", 0))
 		var blacklist_until := int(entry.get("blacklisted_until_msec", blacklisted_sessions.get(session_id, 0)))
 		var recent_at := int(recently_visited_sessions.get(world_id, recently_visited_sessions.get(session_id, 0)))
@@ -264,7 +264,7 @@ func pick_session(sessions: Array, random_unit: float = 0.5) -> Dictionary:
 		if not raw_session is Dictionary:
 			continue
 		var entry := raw_session as Dictionary
-		var count := int(entry.get("player_count", 1))
+		var count := _display_player_count(entry)
 		var weight := 1.0 + (0.35 if count <= 3 else 0.0)
 		weighted.append({"entry": entry, "weight": weight})
 		total += weight
@@ -278,12 +278,22 @@ func pick_session(sessions: Array, random_unit: float = 0.5) -> Dictionary:
 	return (weighted.back()["entry"] as Dictionary).duplicate(true)
 
 
-func human_player_count(players: Variant, bot_player_id: String) -> int:
-	return Perception.count_live_humans(players, bot_player_id)
+func human_player_count(players: Variant, bot_player_id: String, dedicated_server: bool = false, host_player_id: String = "") -> int:
+	var excluded_ids: Array = []
+	if not host_player_id.is_empty():
+		excluded_ids.append(host_player_id)
+	return Perception.count_live_humans(players, bot_player_id, excluded_ids, dedicated_server)
 
 
-func count_human_players(players: Variant, bot_player_id: String) -> int:
-	return human_player_count(players, bot_player_id)
+func _display_player_count(entry: Dictionary) -> int:
+	var count := int(entry.get("player_count", entry.get("players", 0)))
+	if bool(entry.get("dedicated_server_includes_host", false)):
+		count -= 1
+	return maxi(0, count)
+
+
+func count_human_players(players: Variant, bot_player_id: String, dedicated_server: bool = false, host_player_id: String = "") -> int:
+	return human_player_count(players, bot_player_id, dedicated_server, host_player_id)
 
 
 func should_leave_empty_world(empty_since_msec: int, now_msec: int, grace_msec: int) -> bool:

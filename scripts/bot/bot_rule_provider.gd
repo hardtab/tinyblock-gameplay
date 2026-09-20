@@ -7,6 +7,7 @@ var _build_step := 0
 const PREFERRED_PLAYER_DISTANCE := 84.0
 const WANDER_RADIUS := 96.0
 const WANDER_COMMIT_MSEC := 1800
+const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stone", "cobblestone", "workbench", "chest", "furnace", "glass", "stone_bricks"]
 
 
 func _init(seed: int = 0) -> void:
@@ -128,6 +129,10 @@ func _inventory(observation: Dictionary) -> Dictionary:
 
 
 func _craftable_output(observation: Dictionary) -> String:
+	if not str(observation.get("craft_pending_output", "")).is_empty():
+		return ""
+	if int(observation.get("craft_retry_after_msec", -1)) > int(observation.get("observed_at_msec", 0)):
+		return ""
 	var inventory := _inventory(observation)
 	var achievements: Dictionary = observation.get("achievements", {}) if observation.get("achievements", {}) is Dictionary else {}
 	var unlocked: Array = achievements.get("unlocked", []) if achievements.get("unlocked", []) is Array else []
@@ -138,6 +143,8 @@ func _craftable_output(observation: Dictionary) -> String:
 			continue
 		if _recipe_available(recipes, inventory, wanted):
 			return wanted
+	# Do not repeatedly crush the same raw material merely because a server
+	# without the newer craft command has not acknowledged the request yet.
 	for raw_recipe in recipes:
 		if not raw_recipe is Dictionary:
 			continue
@@ -145,7 +152,7 @@ func _craftable_output(observation: Dictionary) -> String:
 		var output: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
 		for raw_name in output:
 			var name := str(raw_name)
-			if int(inventory.get(name, 0)) <= 0 and _recipe_inputs_available(recipe, inventory):
+			if name in GENERIC_OUTPUTS and int(inventory.get(name, 0)) <= 0 and _recipe_inputs_available(recipe, inventory):
 				return name
 	return ""
 

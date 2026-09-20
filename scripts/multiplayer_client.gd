@@ -82,6 +82,16 @@ func is_guest() -> bool:
 	return is_online() and role == "guest"
 
 
+func host_player_id() -> String:
+	"""Return the authoritative host id for the current guest session.
+
+	Dedicated sessions do not include the headless host in the player count shown
+	to users, but the host can still appear in the initial roster/control stream.
+	The bot uses this identity to avoid treating the server process as a human.
+	"""
+	return _guest_host_id if is_guest() else ""
+
+
 func is_p2p() -> bool:
 	if is_guest():
 		return _rtc_channel_open(_guest_host_id)
