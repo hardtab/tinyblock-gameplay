@@ -74,6 +74,7 @@ var _craft_retry_after_msec := -1
 var _craft_blocked_outputs: Dictionary = {}
 var _population_logged := false
 const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
+const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
 const BOT_SKIN := {
@@ -346,11 +347,18 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 				break
 
 	if action == Contract.ACTION_LOOK_AT:
+		self_state["vx"] = 0.0
+		self_state["vy"] = 0.0
+		self_state["on_ground"] = true
 		if target.x != origin.x:
 			self_state["facing"] = 1 if target.x > origin.x else -1
 		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "look_complete"}
 	if target == origin:
+		self_state["vx"] = 0.0
+		self_state["vy"] = 0.0
+		self_state["on_ground"] = true
+		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "already_at_target"}
 
 	var destination := target
@@ -365,12 +373,19 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	var next_position := Navigator.step_towards(origin, destination, step_distance)
 	self_state["x"] = next_position.x
 	self_state["y"] = next_position.y
-	self_state["vx"] = (next_position.x - origin.x) / maxf(delta, 0.001)
-	self_state["vy"] = (next_position.y - origin.y) / maxf(delta, 0.001)
+	# Multiplayer rendering extrapolates velocity once per 60 Hz physics tick,
+	# not in pixels/second. Sending px/s here makes the remote avatar overshoot
+	# every target and visibly oscillate around real players.
+	self_state["vx"] = (next_position.x - origin.x) / maxf(delta * NETWORK_PHYSICS_TICKS_PER_SECOND, 0.001)
+	self_state["vy"] = (next_position.y - origin.y) / maxf(delta * NETWORK_PHYSICS_TICKS_PER_SECOND, 0.001)
 	self_state["facing"] = 1 if next_position.x >= origin.x else -1
 	self_state["on_ground"] = true
+	var done := next_position.distance_to(destination) <= 8.0
+	if done:
+		self_state["vx"] = 0.0
+		self_state["vy"] = 0.0
 	_world_snapshot["self"] = self_state
-	return {"done": next_position.distance_to(destination) <= 8.0, "reason": "movement_step"}
+	return {"done": done, "reason": "movement_step"}
 
 
 func _on_network_disconnected(reason: String) -> void:
