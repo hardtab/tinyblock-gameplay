@@ -15,6 +15,10 @@ signal bow_shot_created(payload: Dictionary)
 signal bow_arrow_embedded(payload: Dictionary)
 signal bow_arrow_collected(payload: Dictionary)
 signal remote_player_hit_by_arrow(player_id: String, damage: int)
+# Emitted only by an authoritative simulation.  Keep the legacy two-argument
+# remote_player_hit_by_arrow signal above for older scene/test handlers, while
+# this signal carries the shooter identity needed by the host protocol.
+signal authoritative_player_hit_by_arrow(target_player_id: String, attacker_player_id: String, damage: int)
 signal block_mined(block_name: String)
 signal block_placed(block_name: String)
 signal harvest_blocked(block_name: String, required_tier: int, active_tier: int)
@@ -1020,13 +1024,13 @@ func _update_arrows(delta: float) -> void:
 		elif bool(arrow.get("cleared_owner", false)):
 			_embed_player_arrow(owner_player_id, owner_rect, arrow, authoritative)
 			if authoritative:
-				_damage_arrow_owner(owner_player_id, int(arrow.get("damage", 1)))
+				_damage_arrow_owner(owner_player_id, int(arrow.get("damage", 1)), owner_player_id)
 			arrows.remove_at(index)
 			continue
-		if authoritative and not local_multiplayer_player_id.is_empty():
+		if authoritative:
 			var hit_player_id := ""
 			var hit_player_rect := Rect2()
-			if owner_player_id != local_multiplayer_player_id:
+			if not local_multiplayer_player_id.is_empty() and owner_player_id != local_multiplayer_player_id:
 				var local_rect := _arrow_owner_rect(local_multiplayer_player_id)
 				if local_rect.has_point(position):
 					hit_player_id = local_multiplayer_player_id
@@ -1043,7 +1047,7 @@ func _update_arrows(delta: float) -> void:
 						break
 			if not hit_player_id.is_empty():
 				_embed_player_arrow(hit_player_id, hit_player_rect, arrow, true)
-				_damage_arrow_owner(hit_player_id, int(arrow.get("damage", 1)))
+				_damage_arrow_owner(hit_player_id, int(arrow.get("damage", 1)), owner_player_id)
 				arrows.remove_at(index)
 				continue
 		var tile := Vector2i(floori(position.x / BlockDefs.TILE), floori(position.y / BlockDefs.TILE))
@@ -1095,15 +1099,21 @@ func _arrow_owner_rect(owner_player_id: String) -> Rect2:
 	).grow(1.0)
 
 
-func _damage_arrow_owner(owner_player_id: String, damage: int) -> void:
+func _damage_arrow_owner(target_player_id: String, damage: int, attacker_player_id: String = "") -> void:
 	damage = maxi(1, damage)
-	if not owner_player_id.is_empty() and remote_players.has(owner_player_id):
-		remote_player_hit_by_arrow.emit(owner_player_id, damage)
+	if not target_player_id.is_empty() and remote_players.has(target_player_id):
+		# Preserve the old UI-facing signal contract for existing clients and
+		# tests.  The authoritative signal below is the protocol source of truth.
+		remote_player_hit_by_arrow.emit(target_player_id, damage)
+		if not attacker_player_id.is_empty():
+			authoritative_player_hit_by_arrow.emit(target_player_id, attacker_player_id, damage)
 		return
 	sim.player["health"] = maxi(0, int(sim.player.get("health", WorldSim.MAX_PLAYER_HEALTH)) - damage)
 	show_local_player_hit()
 	Sfx.hurt()
 	sim.state_changed.emit()
+	if not target_player_id.is_empty() and not attacker_player_id.is_empty():
+		authoritative_player_hit_by_arrow.emit(target_player_id, attacker_player_id, damage)
 	if int(sim.player["health"]) <= 0:
 		sim.player_defeated.emit()
 
