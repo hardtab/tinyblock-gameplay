@@ -58,18 +58,6 @@ func decide(observation: Dictionary) -> Dictionary:
 	var equip_target := _equipable_tool(observation)
 	if not equip_target.is_empty() and Contract.ACTION_EQUIP in legal:
 		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_EQUIP, {"id": equip_target}, 350, 0.86)
-	if not social_target_id.is_empty() and social_distance > preferred_distance:
-		if Contract.ACTION_MOVE_NEAR_PLAYER in legal:
-			return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_MOVE_NEAR_PLAYER, social_target, 2400, 0.72)
-		if Contract.ACTION_FOLLOW in legal:
-			return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_FOLLOW, social_target, 2400, 0.72)
-
-	# Do not freeze once the bot has reached the comfortable social distance.
-	# Small, non-combat wander steps make the avatar feel alive while keeping it
-	# separate from real players and away from unsolicited PvP.
-	if Contract.ACTION_MOVE_TO in legal and _rng.randf() < 0.32:
-		return _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, _wander_target(self_state), WANDER_COMMIT_MSEC, 0.48)
-
 	if not threats.is_empty() and Contract.ACTION_ATTACK_CREATURE in legal:
 		var creature := _first_dictionary(threats)
 		if float(creature.get("distance", 9999.0)) <= float(observation.get("creature_attack_distance", 48.0)):
@@ -84,6 +72,24 @@ func decide(observation: Dictionary) -> Dictionary:
 		var resource := _first_dictionary(resources)
 		if bool(resource.get("reachable", false)):
 			return _decision(Contract.GOAL_GATHER, Contract.ACTION_MINE, resource, 1800, 0.67)
+
+	# Social proximity is a context, not the bot's whole job.  Only follow after
+	# the nearby achievement, gathering, and building opportunities have been
+	# checked; otherwise a player standing beside the bot would starve all useful
+	# actions and leave the avatar idling at their shoulder.
+	if not social_target_id.is_empty() and social_distance > preferred_distance:
+		if Contract.ACTION_MOVE_NEAR_PLAYER in legal:
+			return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_MOVE_NEAR_PLAYER, social_target, 2400, 0.58)
+		if Contract.ACTION_FOLLOW in legal:
+			return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_FOLLOW, social_target, 2400, 0.58)
+
+	# Do not freeze once the bot has reached the comfortable social distance.
+	# Small, non-combat wander steps make the avatar feel alive while keeping it
+	# separate from real players and away from unsolicited PvP.  A high but not
+	# guaranteed probability gives the next decision a chance to pick up a newly
+	# visible resource or recipe instead of repeating a patrol forever.
+	if Contract.ACTION_MOVE_TO in legal and _rng.randf() < 0.72:
+		return _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, _wander_target(self_state), WANDER_COMMIT_MSEC, 0.55)
 
 	if Contract.ACTION_LOOK_AT in legal and not social_target_id.is_empty() and _rng.randf() < 0.28:
 		return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_LOOK_AT, social_target, 700, 0.51)
