@@ -64,11 +64,17 @@ var _social_last_sent_msec := -1
 var _welcome_emoji_due_msec := -1
 var _welcome_emoji_pending := false
 var _movement_step_callable: Callable
+var _desired_input := {"left": false, "right": false, "jump": false}
+var _last_player_input_msec := -1
 var _social := Social.new()
 var _last_player_snapshot_msec := -1
 var _equipment_slots := {"hand": "", "feet": ""}
 var _pending_action_targets: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
+var _physics_route: Array[Dictionary] = []
+var _physics_route_target := Vector2i(2147483647, 2147483647)
+var _physics_route_target_id := ""
+var _physics_route_replan_msec := -1
 var _jump_active := false
 var _jump_velocity := 0.0
 var _jump_ground_y := 0.0
@@ -81,6 +87,7 @@ var _craft_retry_after_msec := -1
 var _craft_blocked_outputs: Dictionary = {}
 var _population_logged := false
 const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
+const PLAYER_INPUT_INTERVAL_MSEC := 50
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
@@ -147,8 +154,14 @@ func join_session(record: Dictionary) -> void:
 	_roster.clear()
 	_recent_events.clear()
 	_last_player_snapshot_msec = -1
+	_last_player_input_msec = -1
+	_desired_input = {"left": false, "right": false, "jump": false}
 	_pending_action_targets.clear()
 	_terrain_tiles.clear()
+	_physics_route.clear()
+	_physics_route_target = Vector2i(2147483647, 2147483647)
+	_physics_route_target_id = ""
+	_physics_route_replan_msec = -1
 	_jump_active = false
 	_jump_velocity = 0.0
 	_jump_ground_y = 0.0
@@ -298,8 +311,15 @@ func _process(delta: float) -> void:
 		return
 	_expire_craft_pending(now_msec)
 	var observation := _build_observation(now_msec)
-	_send_player_snapshot_if_due(now_msec)
+	# The brain may run at a much lower cadence than physics. Reset the held
+	# controls every frame; a movement executor reasserts them for this frame.
+	_desired_input = {"left": false, "right": false, "jump": false}
 	behavior.tick(observation, delta, now_msec)
+	_send_player_input_if_due(now_msec)
+	# Keep the legacy snapshot during rollout. New hosts ignore its coordinates
+	# after the first player_input packet, while old hosts can still display the
+	# bot until they receive the new protocol.
+	_send_player_snapshot_if_due(now_msec)
 	if not _empty_emitted and Perception.empty_world_should_leave(sync_complete, human_player_count, empty_since_msec, now_msec, empty_grace_msec):
 		_empty_emitted = true
 		empty_world_ready.emit()
@@ -353,6 +373,19 @@ func _send_player_snapshot_if_due(now_msec: int) -> void:
 	})
 
 
+func _send_player_input_if_due(now_msec: int) -> void:
+	if network_client == null or not network_client.has_method("send_command") or own_player_id.is_empty():
+		return
+	if _last_player_input_msec >= 0 and now_msec - _last_player_input_msec < PLAYER_INPUT_INTERVAL_MSEC:
+		return
+	_last_player_input_msec = now_msec
+	network_client.call("send_command", "player_input", {
+		"left": bool(_desired_input.get("left", false)),
+		"right": bool(_desired_input.get("right", false)),
+		"jump": bool(_desired_input.get("jump", false)),
+	})
+
+
 func _default_movement_step(action: String, decision: Dictionary, observation: Dictionary, delta: float) -> Dictionary:
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	var origin := Contract.target_position(self_state)
@@ -365,6 +398,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 				break
 
 	if action == Contract.ACTION_LOOK_AT:
+		_set_desired_input(false, false, false)
 		_jump_active = false
 		_climb_active = false
 		self_state["vx"] = 0.0
@@ -375,6 +409,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "look_complete"}
 	if target == origin and not _jump_active and not _climb_active:
+		_set_desired_input(false, false, false)
 		self_state["vx"] = 0.0
 		self_state["vy"] = 0.0
 		self_state["on_ground"] = true
@@ -389,13 +424,21 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	else:
 		destination.y = origin.y
 
-	var hint := _movement_hint(origin, destination)
+	var route_step := _physics_route_step(origin, destination, target_id)
+	var route_kind := str(route_step.get("kind", ""))
+	if not route_step.is_empty():
+		destination = route_step.get("position", destination)
+	var hint := route_kind if route_kind in ["jump", "climb"] else _movement_hint(origin, destination)
 	if _climb_active or hint == "climb":
+		_set_desired_input(signf(destination.x - origin.x) < 0.0, signf(destination.x - origin.x) > 0.0, true)
 		return _climb_step(self_state, destination, delta)
 	if _jump_active or hint == "jump":
+		_set_desired_input(signf(destination.x - origin.x) < 0.0, signf(destination.x - origin.x) > 0.0, true)
 		return _jump_step(self_state, destination, delta)
 
 	var distance_to_destination := origin.distance_to(destination)
+	var direction := signf(destination.x - origin.x)
+	_set_desired_input(direction < 0.0, direction > 0.0, false)
 	var move_speed := lerpf(24.0, 72.0, clampf(distance_to_destination / 96.0, 0.0, 1.0))
 	var step_distance := maxf(1.0, move_speed * maxf(delta, 0.0))
 	var next_position := Navigator.step_towards(origin, destination, step_distance)
@@ -416,6 +459,83 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	return {"done": done, "reason": "movement_step"}
 
 
+func _set_desired_input(move_left: bool, move_right: bool, jump: bool) -> void:
+	# Never hold both horizontal buttons. This mirrors the mobile/desktop input
+	# resolver and keeps a target exactly on the bot's x-axis from oscillating.
+	_desired_input = {
+		"left": move_left and not move_right,
+		"right": move_right and not move_left,
+		"jump": jump,
+	}
+
+
+func _physics_route_step(origin: Vector2, destination: Vector2, target_id: String) -> Dictionary:
+	if _terrain_tiles.is_empty():
+		return {}
+	var origin_tile := _support_tile_for_position(origin)
+	var target_tile := _support_tile_for_position(destination)
+	var now := Time.get_ticks_msec()
+	var needs_replan := (
+		_physics_route.is_empty()
+		or _physics_route_target != target_tile
+		or _physics_route_target_id != target_id
+		or _physics_route_replan_msec < 0
+		or now >= _physics_route_replan_msec
+	)
+	if needs_replan:
+		_physics_route = Navigator.physics_route(
+			origin_tile,
+			target_tile,
+			Callable(self, "_terrain_standable_tile"),
+			Callable(self, "_terrain_climbable_tile"),
+		)
+		_physics_route_target = target_tile
+		_physics_route_target_id = target_id
+		_physics_route_replan_msec = now + 450
+	if _physics_route.size() <= 1:
+		return {}
+	while _physics_route.size() > 1:
+		var next_tile: Vector2i = _physics_route[1].get("tile", origin_tile)
+		var next_position := _world_position_for_support_tile(next_tile)
+		if origin.distance_to(next_position) > 12.0:
+			return {
+				"position": next_position,
+				"kind": str(_physics_route[1].get("kind", "walk")),
+			}
+		_physics_route.pop_front()
+	return {}
+
+
+func _support_tile_for_position(position: Vector2) -> Vector2i:
+	return Vector2i(
+		floori((position.x + 10.0) / float(BlockDefs.TILE)),
+		floori((position.y + 28.0) / float(BlockDefs.TILE)),
+	)
+
+
+func _world_position_for_support_tile(tile: Vector2i) -> Vector2:
+	return Vector2(
+		(float(tile.x) + 0.5) * float(BlockDefs.TILE) - 10.0,
+		float(tile.y * BlockDefs.TILE) - 28.0,
+	)
+
+
+func _terrain_standable_tile(tile: Vector2i) -> bool:
+	return (
+		_terrain_solid_at(tile.x, tile.y)
+		and not _terrain_solid_at(tile.x, tile.y - 1)
+		and not _terrain_solid_at(tile.x, tile.y - 2)
+	)
+
+
+func _terrain_climbable_tile(tile: Vector2i) -> bool:
+	return (
+		_terrain_climbable_at(tile.x, tile.y)
+		or _terrain_climbable_at(tile.x, tile.y - 1)
+		or _terrain_climbable_at(tile.x, tile.y + 1)
+	)
+
+
 func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 	_terrain_tiles.clear()
 	if not raw_tiles is Array:
@@ -429,6 +549,7 @@ func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 			name = str(tile.get("block_name", ""))
 		if not name.is_empty():
 			_terrain_tiles["%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]] = name
+	_physics_route_replan_msec = 0
 
 
 func _apply_tile_batch(payload: Dictionary) -> void:
@@ -449,6 +570,7 @@ func _apply_tile_batch(payload: Dictionary) -> void:
 			_terrain_tiles.erase(key)
 		elif not name.is_empty():
 			_terrain_tiles[key] = name
+	_physics_route_replan_msec = 0
 
 
 func _terrain_name_at(tx: int, ty: int) -> String:
@@ -698,9 +820,21 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 	_roster.clear()
 	for raw_id in players:
 		var player_id := str(raw_id)
-		if player_id == own_player_id or player_id == _host_player_id or not players[raw_id] is Dictionary:
+		if not players[raw_id] is Dictionary:
 			continue
 		var entry := (players[raw_id] as Dictionary).duplicate(true)
+		if player_id == own_player_id:
+			# Input-driven hosts are authoritative for the bot's position. Keep the
+			# collision dimensions from the initial snapshot, but reconcile movement
+			# and physics state from the server at the normal snapshot cadence.
+			var local_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+			for field in ["x", "y", "facing", "vx", "vy", "on_ground", "health", "nourishment", "respawn_revision", "tree_ghost", "climbing", "climb_col"]:
+				if entry.has(field):
+					local_state[field] = entry[field]
+			_world_snapshot["self"] = local_state
+			continue
+		if player_id == _host_player_id:
+			continue
 		entry["id"] = player_id
 		entry["alive"] = int(entry.get("health", 10)) > 0
 		_roster[player_id] = entry
