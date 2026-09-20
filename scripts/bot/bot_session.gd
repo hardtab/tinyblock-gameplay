@@ -429,10 +429,22 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 
 
 func _block_name_for_content_id(content_id: String) -> String:
-	for block_name: String in BlockDefs.BLOCKS:
-		if str(BlockDefs.BLOCKS[block_name].get("content_id", "core.%s" % block_name)) == content_id:
+	var defs := get_node_or_null("/root/BlockDefs")
+	if defs != null and defs.has_method("name_for_content_id"):
+		var resolved := str(defs.call("name_for_content_id", content_id))
+		if not resolved.is_empty():
+			return resolved
+	var blocks: Dictionary = defs.get("BLOCKS") if defs != null and defs.get("BLOCKS") is Dictionary else {}
+	for block_name: String in blocks:
+		if str(blocks[block_name].get("content_id", "core.%s" % block_name)) == content_id:
 			return block_name
 	return ""
+
+
+func _block_entry(block_name: String) -> Dictionary:
+	var defs := get_node_or_null("/root/BlockDefs")
+	var blocks: Dictionary = defs.get("BLOCKS") if defs != null and defs.get("BLOCKS") is Dictionary else {}
+	return blocks.get(block_name, {}) if blocks.get(block_name, {}) is Dictionary else {}
 
 
 func _inventory_by_name(raw_inventory: Variant) -> Dictionary:
@@ -475,7 +487,8 @@ func _resolve_content_recipe(raw_recipe: Dictionary) -> Dictionary:
 	for side in ["in", "out"]:
 		var values: Dictionary = raw_recipe.get(side, {}) if raw_recipe.get(side, {}) is Dictionary else {}
 		for raw_id in values:
-			var name := _block_name_for_content_id(str(raw_id))
+			var raw_name := str(raw_id)
+			var name := raw_name if not _block_entry(raw_name).is_empty() else _block_name_for_content_id(raw_name)
 			if name.is_empty():
 				return {}
 			resolved[side][name] = int(values[raw_id])
@@ -493,7 +506,7 @@ func _station_available(snapshot: Dictionary, station: String) -> bool:
 		if not raw_tile is Dictionary:
 			continue
 		var name := _block_name_for_content_id(str((raw_tile as Dictionary).get("content_id", "")))
-		if not name.is_empty() and str(BlockDefs.BLOCKS[name].get("station", "")) == station:
+		if not name.is_empty() and str(_block_entry(name).get("station", "")) == station:
 			return true
 	return false
 
