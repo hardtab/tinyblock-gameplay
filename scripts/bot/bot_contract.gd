@@ -30,6 +30,7 @@ const GOAL_CRAFT := "CRAFT"
 const GOAL_ACHIEVEMENT := "ACHIEVEMENT"
 const GOAL_SURVIVE := "SURVIVE"
 const GOAL_SELF_DEFENSE := "SELF_DEFENSE"
+const MIN_SUPPORTED_CLIENT_VERSION := "1.4.2"
 
 const ALL_ACTIONS: PackedStringArray = [
 	ACTION_WAIT,
@@ -98,3 +99,26 @@ static func target_position(raw: Variant) -> Vector2:
 
 static func distance_between(a: Variant, b: Variant) -> float:
 	return target_position(a).distance_to(target_position(b))
+
+
+static func client_version_at_least(version: String, minimum: String = MIN_SUPPORTED_CLIENT_VERSION) -> bool:
+	var actual := _version_parts(version)
+	var required := _version_parts(minimum)
+	if actual.is_empty() or required.is_empty():
+		return false
+	for index in range(maxi(actual.size(), required.size())):
+		var actual_part := int(actual[index]) if index < actual.size() else 0
+		var required_part := int(required[index]) if index < required.size() else 0
+		if actual_part != required_part:
+			return actual_part > required_part
+	return true
+
+
+static func _version_parts(version: String) -> Array[int]:
+	var normalized := version.strip_edges().split("-", false, 1)[0]
+	var parts: Array[int] = []
+	for raw_part in normalized.split("."):
+		if raw_part.is_empty() or not raw_part.is_valid_int():
+			return []
+		parts.append(int(raw_part))
+	return parts if parts.size() >= 2 else []

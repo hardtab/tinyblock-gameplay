@@ -239,7 +239,18 @@ func filter_public_sessions(sessions: Array, expected_protocol_version: int = DE
 		var blacklist_until := int(entry.get("blacklisted_until_msec", blacklisted_sessions.get(session_id, 0)))
 		var recent_at := int(recently_visited_sessions.get(world_id, recently_visited_sessions.get(session_id, 0)))
 		var current_now := now_msec if now_msec > 0 else Time.get_ticks_msec()
+		var official := bool(entry.get("official", entry.get("is_official", false)))
 		if session_id.is_empty() or access_mode != "public" or world_mode == "duel":
+			continue
+		# The bot speaks the dedicated-server protocol only. Never put it in a
+		# legacy/P2P world, and never join the first-party official worlds.
+		if not bool(entry.get("dedicated_server", false)) or official:
+			continue
+		var minimum_client_version := str(entry.get("minimum_client_version", entry.get("min_client_version", "")))
+		if not minimum_client_version.is_empty() and not Contract.client_version_at_least(
+			minimum_client_version,
+			Contract.MIN_SUPPORTED_CLIENT_VERSION,
+		):
 			continue
 		if int(entry.get("protocol_version", -1)) != expected_protocol_version:
 			continue

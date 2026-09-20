@@ -8,6 +8,7 @@ signal voice_packet_received(sender_player_id: String, sequence: int, audio: Pac
 
 const PROTOCOL_VERSION := 2
 const DUEL_PROTOCOL_VERSION := 3
+const CLIENT_VERSION_SETTING := "application/config/version"
 const MAX_PLAYERS := 4
 const HEARTBEAT_SECONDS := 15.0
 const RTC_CONNECT_TIMEOUT_SECONDS := 4.0
@@ -62,6 +63,10 @@ var _rtc_reconnect_attempt := 0
 var _rtc_reconnect_left := -1.0
 var _rtc_reconnect_connect_left := 0.0
 var _rtc_reconnecting := false
+
+
+func client_version() -> String:
+	return str(ProjectSettings.get_setting(CLIENT_VERSION_SETTING, "0.0.0"))
 
 
 func _ready() -> void:
@@ -266,7 +271,14 @@ func _poll_websocket(delta: float) -> void:
 	if state == WebSocketPeer.STATE_OPEN:
 		if not _was_open:
 			_was_open = true
-			_send_ws({"kind": "control", "type": "hello", "payload": {"protocol_version": session_protocol_version}})
+			_send_ws({
+				"kind": "control",
+				"type": "hello",
+				"payload": {
+					"protocol_version": session_protocol_version,
+					"client_version": client_version(),
+				},
+			})
 		_heartbeat_left -= delta
 		if _heartbeat_left <= 0.0:
 			_heartbeat_left = HEARTBEAT_SECONDS

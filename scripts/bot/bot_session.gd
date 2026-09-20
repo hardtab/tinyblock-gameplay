@@ -239,6 +239,9 @@ func handle_message(message: Dictionary) -> void:
 	var payload: Dictionary = message.get("payload", {}) if message.get("payload", {}) is Dictionary else {}
 	if kind == "control" and message_type == "player_joined":
 		var joined_id := str(message.get("player_id", ""))
+		if not _peer_client_version_supported(message):
+			leave("legacy_client")
+			return
 		if sync_complete and not joined_id.is_empty() and joined_id != own_player_id and joined_id != _host_player_id:
 			_roster[joined_id] = {"id": joined_id, "health": 10, "alive": true, "role": str(message.get("role", "guest"))}
 			_record_event("player_joined", {"player_id": joined_id})
@@ -250,6 +253,9 @@ func handle_message(message: Dictionary) -> void:
 	# this message path for exactly that reason.  Waiting here prevents the bot's
 	# first request from being dropped while the channel is still negotiating.
 	if kind == "control" and message_type == "connected":
+		if not _connected_peers_supported(message.get("players", [])):
+			leave("legacy_client")
+			return
 		if state in [STATE_JOINING, STATE_SYNCING] and network_client != null and network_client.has_method("send_command"):
 			network_client.call("send_command", "snapshot_request", {})
 		return
@@ -798,6 +804,26 @@ func _on_network_disconnected(reason: String) -> void:
 
 func _on_network_message(message: Dictionary) -> void:
 	handle_message(message)
+
+
+func _connected_peers_supported(raw_players: Variant) -> bool:
+	if not raw_players is Array:
+		return true
+	for raw_player in raw_players:
+		if raw_player is Dictionary and not _peer_client_version_supported(raw_player as Dictionary):
+			return false
+	return true
+
+
+func _peer_client_version_supported(entry: Dictionary) -> bool:
+	var player_id := str(entry.get("player_id", entry.get("id", "")))
+	var role := str(entry.get("role", "")).to_lower()
+	if player_id.is_empty() or player_id == own_player_id or player_id == _host_player_id or role == "host":
+		return true
+	return Contract.client_version_at_least(
+		str(entry.get("client_version", "")),
+		Contract.MIN_SUPPORTED_CLIENT_VERSION,
+	)
 
 
 func _prepare_snapshot(payload: Dictionary) -> void:
