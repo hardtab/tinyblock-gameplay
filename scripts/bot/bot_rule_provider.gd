@@ -2,6 +2,7 @@ class_name BotRuleProvider
 extends BotDecisionProvider
 
 var _rng := RandomNumberGenerator.new()
+var _build_step := 0
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 const WANDER_RADIUS := 96.0
@@ -49,6 +50,13 @@ func decide(observation: Dictionary) -> Dictionary:
 	var welcome_emoji := str(observation.get("social_emoji", ""))
 	if not welcome_emoji.is_empty() and Contract.ACTION_SEND_EMOJI in legal:
 		return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_SEND_EMOJI, {"id": social_target_id, "emoji": welcome_emoji}, 500, 0.78)
+
+	var craft_target := _craftable_output(observation)
+	if not craft_target.is_empty() and Contract.ACTION_CRAFT in legal:
+		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_CRAFT, {"id": craft_target}, 700, 0.9)
+	var equip_target := _equipable_tool(observation)
+	if not equip_target.is_empty() and Contract.ACTION_EQUIP in legal:
+		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_EQUIP, {"id": equip_target}, 350, 0.86)
 	if not social_target_id.is_empty() and social_distance > preferred_distance:
 		if Contract.ACTION_MOVE_NEAR_PLAYER in legal:
 			return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_MOVE_NEAR_PLAYER, social_target, 2400, 0.72)
@@ -72,6 +80,10 @@ func decide(observation: Dictionary) -> Dictionary:
 		if bool(resource.get("reachable", false)):
 			return _decision(Contract.GOAL_GATHER, Contract.ACTION_MINE, resource, 1800, 0.67)
 
+	var build_target := _build_target(observation)
+	if not build_target.is_empty() and Contract.ACTION_PLACE in legal:
+		return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, build_target, 700, 0.61)
+
 	if Contract.ACTION_LOOK_AT in legal and not social_target_id.is_empty() and _rng.randf() < 0.28:
 		return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_LOOK_AT, social_target, 700, 0.51)
 	if Contract.ACTION_WAIT in legal:
@@ -89,6 +101,8 @@ func _decision(goal: String, action: String, target: Dictionary, commit_for_ms: 
 		"commit_for_ms": commit_for_ms,
 		"confidence": confidence,
 	}
+	if target.has("block"):
+		decision["block"] = str(target.get("block", ""))
 	return Contract.normalize_decision(decision)
 
 
@@ -107,3 +121,79 @@ func _wander_target(self_state: Dictionary) -> Dictionary:
 	var origin := Contract.target_position(self_state)
 	var direction := -1.0 if _rng.randf() < 0.5 else 1.0
 	return {"position": [origin.x + direction * WANDER_RADIUS, origin.y]}
+
+
+func _inventory(observation: Dictionary) -> Dictionary:
+	return observation.get("inventory_summary", {}) as Dictionary if observation.get("inventory_summary", {}) is Dictionary else {}
+
+
+func _craftable_output(observation: Dictionary) -> String:
+	var inventory := _inventory(observation)
+	var achievements: Dictionary = observation.get("achievements", {}) if observation.get("achievements", {}) is Dictionary else {}
+	var unlocked: Array = achievements.get("unlocked", []) if achievements.get("unlocked", []) is Array else []
+	var recipes: Array = observation.get("recipes", []) if observation.get("recipes", []) is Array else []
+	var priority := ["stone_pickaxe", "stone_axe", "trail_boots", "stone_sword"]
+	for wanted in priority:
+		if wanted in inventory or (wanted == "stone_pickaxe" and "stone_age" in unlocked):
+			continue
+		if _recipe_available(recipes, inventory, wanted):
+			return wanted
+	for raw_recipe in recipes:
+		if not raw_recipe is Dictionary:
+			continue
+		var recipe := raw_recipe as Dictionary
+		var output: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
+		for raw_name in output:
+			var name := str(raw_name)
+			if int(inventory.get(name, 0)) <= 0 and _recipe_inputs_available(recipe, inventory):
+				return name
+	return ""
+
+
+func _recipe_available(recipes: Array, inventory: Dictionary, output_name: String) -> bool:
+	for raw_recipe in recipes:
+		if not raw_recipe is Dictionary:
+			continue
+		var recipe := raw_recipe as Dictionary
+		var output: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
+		if output.has(output_name) and _recipe_inputs_available(recipe, inventory):
+			return true
+	return false
+
+
+func _recipe_inputs_available(recipe: Dictionary, inventory: Dictionary) -> bool:
+	var inputs: Dictionary = recipe.get("in", {}) if recipe.get("in", {}) is Dictionary else {}
+	if inputs.is_empty() or recipe.has("station_available") and not bool(recipe.get("station_available", false)):
+		return false
+	for raw_name in inputs:
+		if int(inventory.get(str(raw_name), 0)) < int(inputs[raw_name]):
+			return false
+	return true
+
+
+func _equipable_tool(observation: Dictionary) -> String:
+	var inventory := _inventory(observation)
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	var current := str(equipment.get("hand", ""))
+	for preferred in ["stone_pickaxe", "copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "resonance_pickaxe", "stone_axe", "stone_sword"]:
+		if int(inventory.get(preferred, 0)) > 0 and current != preferred:
+			return preferred
+	return ""
+
+
+func _build_target(observation: Dictionary) -> Dictionary:
+	var inventory := _inventory(observation)
+	var block_name := ""
+	for preferred in ["planks", "palm_planks", "pine_planks", "weeping_planks", "stone_bricks", "cobblestone", "stone", "dirt"]:
+		if int(inventory.get(preferred, 0)) > 0:
+			block_name = preferred
+			break
+	if block_name.is_empty():
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var tile_x := floori(float(self_state.get("x", 0.0)) / 32.0)
+	var tile_y := floori((float(self_state.get("y", 0.0)) + 28.0) / 32.0)
+	var offsets := [Vector2i(1, 0), Vector2i(2, 0), Vector2i(1, -1), Vector2i(2, -1), Vector2i(0, -1), Vector2i(3, 0)]
+	var offset: Vector2i = offsets[_build_step % offsets.size()]
+	_build_step += 1
+	return {"id": "build:%d" % _build_step, "block": block_name, "x": tile_x + offset.x, "y": tile_y + offset.y}

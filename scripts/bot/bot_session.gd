@@ -66,6 +66,8 @@ var _welcome_emoji_pending := false
 var _movement_step_callable: Callable
 var _social := Social.new()
 var _last_player_snapshot_msec := -1
+var _equipment_slots := {"hand": "", "feet": ""}
+var _pending_action_targets: Dictionary = {}
 const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
 const BOT_SKIN := {
 	"skin": "#8b5a3c",
@@ -130,6 +132,7 @@ func join_session(record: Dictionary) -> void:
 	_roster.clear()
 	_recent_events.clear()
 	_last_player_snapshot_msec = -1
+	_pending_action_targets.clear()
 	safety.reset_session()
 	_world_snapshot.clear()
 	world_id = str(record.get("world_id", ""))
@@ -236,6 +239,9 @@ func handle_message(message: Dictionary) -> void:
 	if message_type == "players_snapshot":
 		_apply_players_snapshot(payload)
 		return
+	if message_type == "player_inventory":
+		_apply_inventory_snapshot(payload)
+		return
 	if message_type == "player_hit":
 		if safety.record_player_hit(payload, own_player_id, Time.get_ticks_msec()):
 			_record_event("player_hit", {"attacker_player_id": safety.attacker_player_id(), "damage": int(payload.get("damage", 0))})
@@ -243,7 +249,11 @@ func handle_message(message: Dictionary) -> void:
 			_record_event("player_hit_unattributed", {"target_player_id": str(payload.get("target_player_id", ""))})
 		behavior.request_decision(Time.get_ticks_msec())
 		return
-	if message_type in ["action_result", "emoji_reaction", "creatures_snapshot", "tile_batch", "plant_batch", "region_complete"]:
+	if message_type == "action_result":
+		_handle_action_result(payload)
+		_record_event(message_type, payload)
+		return
+	if message_type in ["emoji_reaction", "creatures_snapshot", "tile_batch", "plant_batch", "region_complete"]:
 		_record_event(message_type, payload)
 
 
@@ -306,7 +316,7 @@ func _send_player_snapshot_if_due(now_msec: int) -> void:
 		"nourishment": clampi(int(local.get("nourishment", 100)), 0, 100),
 		"respawn_revision": int(local.get("respawn_revision", 0)),
 		"skin": BOT_SKIN.duplicate(true),
-		"equipment_slots": local.get("equipment_slots", {"hand": "", "feet": ""}),
+		"equipment_slots": _equipment_slots.duplicate(true),
 	})
 
 
@@ -331,9 +341,11 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 
 	var destination := target
 	if action in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW]:
-		destination = Navigator.preferred_follow_target(target, origin, float(observation.get("preferred_player_distance", 84.0)))
+		destination = Navigator.preferred_follow_target(Vector2(target.x, origin.y), origin, float(observation.get("preferred_player_distance", 84.0)))
 	elif action == Contract.ACTION_FLEE_FROM:
-		destination = Navigator.step_away_from(origin, target, 120.0)
+		destination = Navigator.step_away_from(origin, Vector2(target.x, origin.y), 120.0)
+	else:
+		destination.y = origin.y
 
 	var step_distance := maxf(1.0, 72.0 * maxf(delta, 0.0))
 	var next_position := Navigator.step_towards(origin, destination, step_distance)
@@ -397,6 +409,10 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		player_state["alive"] = int(player_state.get("health", 10)) > 0
 		_roster[player_id] = player_state.duplicate(true)
 	_world_snapshot["self"] = local_state.duplicate(true)
+	_world_snapshot["inventory_summary"] = _inventory_by_name(snapshot.get("inventory", {}))
+	_world_snapshot["recipes"] = _recipe_catalog(snapshot)
+	_equipment_slots = _equipment_by_name(snapshot.get("equipment_slots", {}))
+	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	_world_snapshot["visible_resources"] = _visible_resources_from_tiles(_world_snapshot.get("tiles", []), local_state)
 	_world_snapshot["threats"] = _threats_from_creatures(_world_snapshot.get("creatures", []))
 	sync_complete = true
@@ -405,10 +421,81 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_snapshot_chunks.clear()
 	_update_human_count()
 	_set_state(STATE_PLAYING)
+	_send_inventory_snapshot()
 	_welcome_emoji_pending = human_player_count > 0
 	_welcome_emoji_due_msec = Time.get_ticks_msec() + 900 if _welcome_emoji_pending else -1
 	behavior.request_decision(Time.get_ticks_msec())
 	session_ready.emit(session_id, own_player_id)
+
+
+func _block_name_for_content_id(content_id: String) -> String:
+	for block_name: String in BlockDefs.BLOCKS:
+		if str(BlockDefs.BLOCKS[block_name].get("content_id", "core.%s" % block_name)) == content_id:
+			return block_name
+	return ""
+
+
+func _inventory_by_name(raw_inventory: Variant) -> Dictionary:
+	var result := {}
+	if not raw_inventory is Dictionary:
+		return result
+	for raw_id in raw_inventory:
+		var name := _block_name_for_content_id(str(raw_id))
+		if not name.is_empty():
+			result[name] = int((raw_inventory as Dictionary)[raw_id])
+	return result
+
+
+func _equipment_by_name(raw_equipment: Variant) -> Dictionary:
+	var result := {"hand": "", "feet": ""}
+	if not raw_equipment is Dictionary:
+		return result
+	for slot_name in result:
+		result[slot_name] = _block_name_for_content_id(str((raw_equipment as Dictionary).get(slot_name, "")))
+	return result
+
+
+func _recipe_catalog(snapshot: Dictionary) -> Array:
+	var result: Array = []
+	for raw_recipe in BlockDefs.RECIPES:
+		var recipe := _resolve_content_recipe(raw_recipe)
+		if not recipe.is_empty():
+			recipe["station_available"] = _station_available(snapshot, str(recipe.get("station", "")))
+			result.append(recipe)
+	for raw_recipe in BlockDefs.CONTENT_RECIPES:
+		var recipe := _resolve_content_recipe(raw_recipe)
+		if not recipe.is_empty():
+			recipe["station_available"] = _station_available(snapshot, str(recipe.get("station", "")))
+			result.append(recipe)
+	return result
+
+
+func _resolve_content_recipe(raw_recipe: Dictionary) -> Dictionary:
+	var resolved := {"in": {}, "out": {}}
+	for side in ["in", "out"]:
+		var values: Dictionary = raw_recipe.get(side, {}) if raw_recipe.get(side, {}) is Dictionary else {}
+		for raw_id in values:
+			var name := _block_name_for_content_id(str(raw_id))
+			if name.is_empty():
+				return {}
+			resolved[side][name] = int(values[raw_id])
+	var station := str(raw_recipe.get("station", ""))
+	if not station.is_empty():
+		resolved["station"] = station
+	return resolved
+
+
+func _station_available(snapshot: Dictionary, station: String) -> bool:
+	if station.is_empty():
+		return true
+	var tiles: Array = snapshot.get("tiles", []) if snapshot.get("tiles", []) is Array else []
+	for raw_tile in tiles:
+		if not raw_tile is Dictionary:
+			continue
+		var name := _block_name_for_content_id(str((raw_tile as Dictionary).get("content_id", "")))
+		if not name.is_empty() and str(BlockDefs.BLOCKS[name].get("station", "")) == station:
+			return true
+	return false
 
 
 func _apply_players_snapshot(payload: Dictionary) -> void:
@@ -424,6 +511,34 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 	_update_human_count()
 
 
+func _send_inventory_snapshot() -> void:
+	if network_client == null or not network_client.has_method("send_command"):
+		return
+	var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+	network_client.call("send_command", "inventory_snapshot", {
+		"inventory_host_revision": 0,
+		"inventory_client_revision": 0,
+		"inventory": inventory.duplicate(true),
+		"item_durability": {},
+		"footwear_wear_distance": 0.0,
+		"inventory_order": inventory.keys(),
+		"hotbar_slots": ["", "", "", "", "", ""],
+		"equipment_slots": _equipment_slots.duplicate(true),
+		"active_hotbar_slot": 0,
+		"selected": "",
+		"nourishment": int((_world_snapshot.get("self", {}) as Dictionary).get("nourishment", 100)),
+		"craft_slots": [null, null, null, null],
+		"craft_slot_durability": [0, 0, 0, 0],
+	})
+
+
+func _apply_inventory_snapshot(payload: Dictionary) -> void:
+	var inventory: Dictionary = payload.get("inventory", {}) if payload.get("inventory", {}) is Dictionary else {}
+	_world_snapshot["inventory_summary"] = inventory.duplicate(true)
+	_equipment_slots = payload.get("equipment_slots", _equipment_slots).duplicate(true) if payload.get("equipment_slots", _equipment_slots) is Dictionary else _equipment_slots
+	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+
+
 func _update_human_count() -> void:
 	var next_count := Perception.count_live_humans(_roster, own_player_id, [], dedicated_server)
 	if next_count == human_player_count:
@@ -435,6 +550,9 @@ func _update_human_count() -> void:
 	else:
 		empty_since_msec = -1
 	human_player_count_changed.emit(human_player_count)
+	var achievements := get_node_or_null("/root/Achievements")
+	if achievements != null and achievements.has_method("record_multiplayer_players"):
+		achievements.call("record_multiplayer_players", human_player_count + 1)
 
 
 func _build_observation(now_msec: int) -> Dictionary:
@@ -445,6 +563,9 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["world_id"] = world_id
 	snapshot["legal_actions"] = Contract.ALL_ACTIONS
 	snapshot["self_defense"] = safety.observation_state(now_msec)
+	snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+	var achievements := get_node_or_null("/root/Achievements")
+	snapshot["achievements"] = {"unlocked": achievements.call("unlocked_ids") if achievements != null and achievements.has_method("unlocked_ids") else []}
 	if _welcome_emoji_pending and now_msec >= _welcome_emoji_due_msec:
 		snapshot["social_emoji"] = "👋"
 	else:
@@ -516,7 +637,22 @@ func _on_decision_rejected(decision: Dictionary, reason: String) -> void:
 
 func _on_decision_started(decision: Dictionary) -> void:
 	var now_msec := Time.get_ticks_msec()
-	if str(decision.get("action", "")) == Contract.ACTION_SEND_EMOJI:
+	var action := str(decision.get("action", ""))
+	if action == Contract.ACTION_EQUIP:
+		var item_name := str(decision.get("target_id", ""))
+		if not item_name.is_empty():
+			if item_name.contains("boots") or item_name.contains("sandals"):
+				_equipment_slots["feet"] = item_name
+			else:
+				_equipment_slots["hand"] = item_name
+		_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+	elif action == Contract.ACTION_MINE or action == Contract.ACTION_PLACE:
+		var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+		var key := "%d:%d" % [int(target.get("x", 0)), int(target.get("y", 0))]
+		_pending_action_targets[key] = {"action": action, "block": str(decision.get("block", "")), "content_id": str(target.get("content_id", ""))}
+	elif action == Contract.ACTION_CRAFT:
+		_pending_action_targets["craft"] = {"action": action, "output": str(decision.get("target_id", ""))}
+	if action == Contract.ACTION_SEND_EMOJI:
 		var emoji := str(decision.get("emoji", ""))
 		if _social.emoji_can_send(_last_emoji_sent_msec, now_msec, emoji, _previous_emoji, _social_last_sent_msec):
 			_last_emoji_sent_msec = now_msec
@@ -526,6 +662,27 @@ func _on_decision_started(decision: Dictionary) -> void:
 		else:
 			behavior.executor.cancel("emoji_cooldown")
 	decision_logged.emit({"event": "decision_started", "decision": decision.duplicate(true), "at_msec": now_msec})
+
+
+func _handle_action_result(payload: Dictionary) -> void:
+	if not bool(payload.get("accepted", false)):
+		return
+	var action := str(payload.get("action", ""))
+	var achievements := get_node_or_null("/root/Achievements")
+	if achievements == null:
+		return
+	if action == "craft_recipe" and achievements.has_method("record_craft"):
+		var craft: Dictionary = _pending_action_targets.get("craft", {}) if _pending_action_targets.get("craft", {}) is Dictionary else {}
+		achievements.call("record_craft", str(craft.get("output", payload.get("output", ""))))
+		_pending_action_targets.erase("craft")
+		return
+	var key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
+	var target: Dictionary = _pending_action_targets.get(key, {}) if _pending_action_targets.get(key, {}) is Dictionary else {}
+	_pending_action_targets.erase(key)
+	if action == "mine_block" and achievements.has_method("record_block_mined"):
+		achievements.call("record_block_mined", _block_name_for_content_id(str(target.get("content_id", ""))))
+	elif action == "place_block" and achievements.has_method("record_block_placed"):
+		achievements.call("record_block_placed", str(target.get("block", "")))
 
 
 func _emit_left(reason: String) -> void:

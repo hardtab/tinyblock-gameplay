@@ -33,7 +33,7 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 		"loaded_radius": radius,
 		"world_id": str(snapshot.get("world_id", "")),
 	}
-	for key in ["self_defense", "social_emoji", "social_target_id", "preferred_player_distance", "creature_attack_distance"]:
+	for key in ["self_defense", "social_emoji", "social_target_id", "preferred_player_distance", "creature_attack_distance", "recipes", "achievements", "equipment_slots"]:
 		if snapshot.has(key):
 			observation[key] = snapshot[key]
 	return observation

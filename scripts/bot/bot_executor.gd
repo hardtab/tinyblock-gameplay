@@ -71,13 +71,15 @@ func start(raw_decision: Variant, observation: Dictionary, now_msec: int) -> boo
 	_busy = true
 	action_started.emit(current_decision.duplicate(true))
 
-	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_RETALIATE_ONCE]:
+	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_CRAFT]:
 		if not _send_network_action(action, decision):
 			_fail("command_rejected")
 			return false
 		# These are acknowledged optimistically; action_result/snapshot updates
 		# will be observed by the next decision cycle.
 		_finish("command_sent")
+	elif action == Contract.ACTION_EQUIP:
+		_finish("equipped")
 	return true
 
 
@@ -122,12 +124,16 @@ func _send_network_action(action: String, decision: Dictionary) -> bool:
 			command = "place_block"
 			payload = _tile_payload(decision)
 			payload["block"] = str(decision.get("block", ""))
+			payload["block_name"] = str(decision.get("block", ""))
 		Contract.ACTION_ATTACK_CREATURE:
 			command = "attack_creature"
 			payload = {"creature_id": str(decision.get("target_id", ""))}
 		Contract.ACTION_RETALIATE_ONCE:
 			command = "attack_player"
 			payload = {"target_player_id": str(decision.get("target_id", ""))}
+		Contract.ACTION_CRAFT:
+			command = "craft_recipe"
+			payload = {"output": str(decision.get("target_id", ""))}
 		_:
 			return true
 	var sent := _send_command(command, payload)
@@ -159,7 +165,7 @@ func _tile_payload(decision: Dictionary) -> Dictionary:
 func _default_duration_msec(action: String) -> int:
 	if action in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_MOVE_TO, Contract.ACTION_FOLLOW, Contract.ACTION_FLEE_FROM, Contract.ACTION_LOOK_AT]:
 		return DEFAULT_MOVE_MSEC
-	if action in [Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_SEND_EMOJI]:
+	if action in [Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_SEND_EMOJI, Contract.ACTION_CRAFT]:
 		return DEFAULT_COMMAND_MSEC
 	return DEFAULT_ACTION_MSEC
 
