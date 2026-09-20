@@ -224,7 +224,7 @@ func handle_message(message: Dictionary) -> void:
 	var payload: Dictionary = message.get("payload", {}) if message.get("payload", {}) is Dictionary else {}
 	if kind == "control" and message_type == "player_joined":
 		var joined_id := str(message.get("player_id", ""))
-		if not joined_id.is_empty() and joined_id != own_player_id and joined_id != _host_player_id:
+		if sync_complete and not joined_id.is_empty() and joined_id != own_player_id and joined_id != _host_player_id:
 			_roster[joined_id] = {"id": joined_id, "health": 10, "alive": true, "role": str(message.get("role", "guest"))}
 			_record_event("player_joined", {"player_id": joined_id})
 			_update_human_count()
