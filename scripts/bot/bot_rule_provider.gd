@@ -323,6 +323,26 @@ func _pvp_loadout_container(observation: Dictionary) -> Dictionary:
 		var container := raw_container as Dictionary
 		if str(container.get("kind", "")) == "chest":
 			return container
+	# Some P2P hosts send the duel snapshot before the container catalog has
+	# arrived.  Duel geometry is deterministic, so recover the chest beside the
+	# bot's island from the pinned enemy side instead of starting the match
+	# empty-handed and walking into the void.
+	if bool(observation.get("pvp_world", false)) and not _has_pvp_loadout(observation):
+		var enemy := _pvp_target(observation)
+		if not enemy.is_empty():
+			var enemy_position := Contract.target_position(enemy)
+			var chest_x := 22 if enemy_position.x < 0.0 else -22
+			var chest_y := 7
+			var self_position := Contract.target_position(observation.get("self", {}))
+			var chest_position := Vector2((float(chest_x) + 0.5) * BlockDefs.TILE, (float(chest_y) + 0.5) * BlockDefs.TILE)
+			return {
+				"id": "container:%d:%d" % [chest_x, chest_y],
+				"x": chest_x,
+				"y": chest_y,
+				"position": [chest_position.x, chest_position.y],
+				"kind": "chest",
+				"reachable": self_position.distance_to(chest_position) <= float(BlockDefs.TILE) * 4.5,
+			}
 	return {}
 
 
