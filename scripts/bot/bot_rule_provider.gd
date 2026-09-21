@@ -364,6 +364,13 @@ func _approach_bridge_step(observation: Dictionary, social_target: Dictionary) -
 	if approach.is_empty() or float(approach.get("distance", 0.0)) <= min_distance:
 		return {}
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	# A bridge cell is an extension of the current support row. During a jump or
+	# a fall the avatar's y coordinate is an airborne position, not a valid
+	# support level; placing at that y creates a vertical trail in the void and
+	# makes the next movement decision chase an impossible route. Let physics
+	# finish the arc and re-evaluate from the landed tile instead.
+	if not bool(self_state.get("on_ground", false)):
+		return {}
 	var tile := float(BlockDefs.TILE)
 	var origin := Vector2i(floori((float(self_state.get("x", 0.0)) + 10.0) / tile), floori((float(self_state.get("y", 0.0)) + 28.0) / tile))
 	var approach_position := Contract.target_position(approach)
