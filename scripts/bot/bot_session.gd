@@ -473,6 +473,15 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		destination = Navigator.step_away_from(origin, Vector2(target.x, origin.y), 120.0)
 	else:
 		destination.y = origin.y
+	# In a duel, never let the short-horizon jump planner consume an input at
+	# the island lip.  The bridge planner needs the bot grounded at the edge;
+	# checking only after route/jump selection lets one speculative jump start an
+	# airborne arc and the recovery helper then places a block in mid-air.
+	if bool(self_state.get("on_ground", false)) and _pvp_gap_ahead(origin, destination):
+		_set_desired_input(false, false, false)
+		_advance_local_physics(self_state, delta, false)
+		_world_snapshot["self"] = self_state
+		return {"done": true, "reason": "edge_guard"}
 
 	var route_step := _physics_route_step(origin, destination, target_id)
 	var route_kind := str(route_step.get("kind", ""))
@@ -493,7 +502,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# Movement snapshots are still needed for older P2P hosts.  Run those
 	# snapshots through the same collision/gravity adapter as the dedicated
 	# host instead of teleporting x/y and claiming the player is grounded.
-	if bool(self_state.get("on_ground", false)) and (_would_step_into_void(origin, destination) or _pvp_gap_ahead(origin, destination)):
+	if bool(self_state.get("on_ground", false)) and _would_step_into_void(origin, destination):
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
 		_world_snapshot["self"] = self_state
@@ -817,6 +826,11 @@ func _try_place_support_block(self_state: Dictionary) -> bool:
 	its normal reach, collision, inventory, and placement validation.
 	"""
 	if _support_place_attempted or network_client == null or not network_client.has_method("send_command"):
+		return false
+	# PvP gaps are handled by the grounded one-cell bridge planner.  Do not
+	# place beneath an airborne duel avatar: that creates a misleading vertical
+	# pillar when a stale remote snapshot already drifted below the island.
+	if _is_pvp_world():
 		return false
 	if bool(self_state.get("on_ground", false)) or float(self_state.get("vy", 0.0)) <= 0.05:
 		return false
