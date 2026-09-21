@@ -167,7 +167,7 @@ func decide(observation: Dictionary) -> Dictionary:
 
 	var resources: Array = _as_array(observation.get("visible_resources", []))
 	if not resources.is_empty() and Contract.ACTION_MINE in legal:
-		var resource := _best_resource(resources)
+		var resource := _best_resource(resources, observation)
 		if not resource.is_empty():
 			var mining_tool := _mining_tool_for_target(observation, resource)
 			if not mining_tool.is_empty() and Contract.ACTION_EQUIP in legal:
@@ -339,7 +339,7 @@ func _first_dictionary(values: Array) -> Dictionary:
 	return {}
 
 
-func _best_resource(values: Array) -> Dictionary:
+func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var best := {}
 	var best_score := INF
 	for raw_value in values:
@@ -348,6 +348,15 @@ func _best_resource(values: Array) -> Dictionary:
 		var resource := raw_value as Dictionary
 		if resource.has("solid") and not bool(resource.get("solid", true)):
 			continue
+		# A solid block that needs a tool must never become a movement target when
+		# the bot cannot mine it.  Chasing the block centre makes the physics
+		# controller push into the wall, finish the action, and select the same
+		# adjacent block on the next decision, producing the visible left/right
+		# oscillation instead of useful work.
+		if not observation.is_empty():
+			var required_tier := int(resource.get("harvest_tier", 0))
+			if required_tier > 0 and not _has_required_mining_tier(observation, resource) and _mining_tool_for_target(observation, resource).is_empty():
+				continue
 		var score := float(resource.get("distance", 9999.0))
 		if not bool(resource.get("reachable", false)):
 			score += 1000.0
