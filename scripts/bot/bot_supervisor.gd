@@ -26,6 +26,7 @@ const DEFAULT_MAX_SESSION_SECONDS := 1800.0
 const DEFAULT_RETRY_BASE_SECONDS := 5.0
 const DEFAULT_RETRY_MAX_SECONDS := 300.0
 const DEFAULT_NO_WORLD_RETRY_MAX_SECONDS := 12.0
+const DEFAULT_POST_LEAVE_DISCOVERY_DELAY_SECONDS := 1.0
 ## Community servers are operated by us but are reported by the backend as
 ## `official`.  They are safe for the bot because they use the dedicated
 ## server protocol; first-party official worlds must still remain excluded.
@@ -188,7 +189,12 @@ func _on_empty_world_ready() -> void:
 func _on_session_left(reason: String) -> void:
 	var finished := _current_session_record.duplicate(true)
 	finished["reason"] = reason
-	var visited_key := str(finished.get("world_id", finished.get("session_id", "")))
+	# A newly-created room can reuse the same world id after the previous
+	# session was deleted. Cool down the concrete session, not the world, so
+	# the bot can join the replacement immediately without rejoining stale state.
+	var visited_key := str(finished.get("session_id", ""))
+	if visited_key.is_empty():
+		visited_key = str(finished.get("world_id", ""))
 	if not visited_key.is_empty():
 		recently_visited[visited_key] = Time.get_ticks_msec()
 	session_finished.emit(finished, reason)
@@ -197,8 +203,10 @@ func _on_session_left(reason: String) -> void:
 	session = null
 	_session_started_msec = -1
 	_current_session_record.clear()
-	_set_state(STATE_COOLDOWN)
-	_cooldown_until_msec = Time.get_ticks_msec() + int(session_cooldown_seconds * 1000.0)
+	# Do not apply the five-minute per-session cooldown globally. Poll once
+	# after network teardown, then discovery can select a different/new room.
+	_set_state(STATE_DISCOVERING)
+	_next_discovery_msec = Time.get_ticks_msec() + int(post_leave_discovery_delay_seconds() * 1000.0)
 
 
 func _on_session_log(event: Dictionary) -> void:
@@ -254,7 +262,7 @@ func filter_public_sessions(sessions: Array, expected_protocol_version: int = DE
 		var player_count := _display_player_count(entry)
 		var max_players := int(entry.get("max_players", 0))
 		var blacklist_until := int(entry.get("blacklisted_until_msec", blacklisted_sessions.get(session_id, 0)))
-		var recent_at := int(recently_visited_sessions.get(world_id, recently_visited_sessions.get(session_id, 0)))
+		var recent_at := int(recently_visited_sessions.get(session_id, recently_visited_sessions.get(world_id, 0)))
 		var current_now := now_msec if now_msec > 0 else Time.get_ticks_msec()
 		var official := bool(entry.get("official", entry.get("is_official", false)))
 		var dedicated_server := bool(entry.get("dedicated_server", false))
@@ -376,6 +384,10 @@ func retry_delay_seconds(attempt: int, jitter_unit: float = 0.5, max_seconds: fl
 	var backoff := minf(retry_max, DEFAULT_RETRY_BASE_SECONDS * pow(2.0, float(maxi(0, attempt - 1))))
 	var jitter := (clampf(jitter_unit, 0.0, 1.0) * 2.0 - 1.0) * 0.2
 	return minf(retry_max, backoff * (1.0 + jitter))
+
+
+func post_leave_discovery_delay_seconds() -> float:
+	return minf(DEFAULT_POST_LEAVE_DISCOVERY_DELAY_SECONDS, discovery_interval_seconds)
 
 
 func _normalize_string_array(value: Variant) -> PackedStringArray:
