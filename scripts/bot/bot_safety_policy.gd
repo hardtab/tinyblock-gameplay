@@ -90,6 +90,25 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 		Contract.ACTION_ATTACK_CREATURE:
 			if not _target_exists(observation.get("threats", []), target_id):
 				return _rejected(decision, "creature_target_not_visible")
+		Contract.ACTION_FIRE_BOW:
+			if not _bow_is_ready(observation):
+				return _rejected(decision, "bow_or_arrows_missing")
+			var pvp_world := bool(observation.get("pvp_world", false))
+			var enemy_id := str(observation.get("enemy_player_id", ""))
+			if pvp_world:
+				if enemy_id.is_empty() or target_id != enemy_id:
+					return _rejected(decision, "pvp_enemy_target_required")
+				if not _target_exists(observation.get("players", []), target_id):
+					return _rejected(decision, "pvp_enemy_not_visible")
+			else:
+				if not _target_exists(observation.get("threats", []), target_id) and not _target_exists(observation.get("players", []), target_id):
+					return _rejected(decision, "ranged_target_not_visible")
+			var ranged_target := _find_target(observation, target_id)
+			if ranged_target.is_empty() or float(ranged_target.get("distance", 9999.0)) > float(observation.get("bow_attack_distance", 320.0)):
+				return _rejected(decision, "ranged_target_out_of_range")
+			var direction := Contract.target_position(decision.get("direction", decision.get("target", {})))
+			if direction.length() < 0.1:
+				return _rejected(decision, "ranged_direction_missing")
 		Contract.ACTION_FLEE_FROM:
 			if target_id.is_empty() and _first_target_id(observation.get("threats", []), target_id).is_empty():
 				return _rejected(decision, "flee_target_missing")
@@ -98,8 +117,11 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 			if bool(mine_target.get("dig_route", false)):
 				if not _valid_dig_route_target(decision, observation):
 					return _rejected(decision, "dig_target_unsafe")
-			elif not _reachable_resource_exists(observation.get("visible_resources", []), target_id):
-				return _rejected(decision, "mine_target_not_reachable")
+			else:
+				if not _reachable_resource_exists(observation.get("visible_resources", []), target_id):
+					return _rejected(decision, "mine_target_not_reachable")
+				if not _target_has_required_tool(observation, mine_target):
+					return _rejected(decision, "required_mining_tool_missing")
 		Contract.ACTION_OPEN_CONTAINER:
 			if not _reachable_container_exists(observation.get("visible_containers", []), target_id):
 				return _rejected(decision, "container_target_not_reachable")
@@ -161,6 +183,23 @@ func _target_exists(raw_targets: Variant, target_id: String) -> bool:
 	return false
 
 
+func _find_target(observation: Dictionary, target_id: String) -> Dictionary:
+	for key in ["players", "threats"]:
+		for raw_target in _as_array(observation.get(key, [])):
+			if raw_target is Dictionary and str((raw_target as Dictionary).get("id", "")) == target_id:
+				return raw_target as Dictionary
+	return {}
+
+
+func _bow_is_ready(observation: Dictionary) -> bool:
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	var hand := str(equipment.get("hand", "")).to_lower()
+	if not hand.contains("bow"):
+		return false
+	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	return int(inventory.get("arrow", 0)) > 0
+
+
 func _reachable_resource_exists(raw_targets: Variant, target_id: String) -> bool:
 	for raw_target in _as_array(raw_targets):
 		if not raw_target is Dictionary:
@@ -169,6 +208,32 @@ func _reachable_resource_exists(raw_targets: Variant, target_id: String) -> bool
 		if str(target.get("id", "")) == target_id:
 			return bool(target.get("reachable", false))
 	return false
+
+
+func _target_has_required_tool(observation: Dictionary, target: Dictionary) -> bool:
+	var required_tier := int(target.get("harvest_tier", 0))
+	if required_tier <= 0:
+		return true
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	var hand := str(equipment.get("hand", ""))
+	var entry: Dictionary = _block_entry(hand)
+	var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
+	if str(definition.get("category", "")) != "mining_tool":
+		return false
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	return int(effects.get("harvest_tier", 0)) >= required_tier
+
+
+func _block_entry(block_name: String) -> Dictionary:
+	var loop := Engine.get_main_loop()
+	if loop == null or not loop.has_method("get_root"):
+		return {}
+	var root: Node = loop.get_root()
+	var defs := root.get_node_or_null("BlockDefs")
+	if defs == null or not defs.get("BLOCKS") is Dictionary:
+		return {}
+	var blocks: Dictionary = defs.get("BLOCKS")
+	return blocks.get(block_name, {}) if blocks.get(block_name, {}) is Dictionary else {}
 
 
 func _reachable_container_exists(raw_targets: Variant, target_id: String) -> bool:

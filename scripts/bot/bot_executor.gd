@@ -21,6 +21,9 @@ var current_decision: Dictionary = {}
 var current_observation: Dictionary = {}
 var action_started_msec := -1
 var action_deadline_msec := -1
+var _mine_next_progress_msec := -1
+var _mine_progress_stage := -1
+var _mine_final_sent := false
 var _busy := false
 
 
@@ -70,8 +73,14 @@ func start(raw_decision: Variant, observation: Dictionary, now_msec: int) -> boo
 	action_deadline_msec = now_msec + commit_msec
 	_busy = true
 	action_started.emit(current_decision.duplicate(true))
+	if action == Contract.ACTION_MINE:
+		_mine_next_progress_msec = now_msec
+		_mine_progress_stage = -1
+		_mine_final_sent = false
+		_send_mine_progress(now_msec, 0)
+		return true
 
-	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER]:
+	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER]:
 		if not _send_network_action(action, decision):
 			_fail("command_rejected")
 			return false
@@ -88,6 +97,9 @@ func tick(delta: float, observation: Dictionary, now_msec: int) -> void:
 		return
 	current_observation = observation.duplicate(true)
 	var action := str(current_decision.get("action", Contract.ACTION_WAIT))
+	if action == Contract.ACTION_MINE:
+		_tick_mining(now_msec)
+		return
 	if action in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_MOVE_TO, Contract.ACTION_FOLLOW, Contract.ACTION_FLEE_FROM, Contract.ACTION_LOOK_AT]:
 		if movement_callable.is_valid():
 			var result: Variant = movement_callable.call(action, current_decision.duplicate(true), current_observation.duplicate(true), delta)
@@ -108,6 +120,9 @@ func cancel(reason: String = "cancelled") -> void:
 	current_observation.clear()
 	action_started_msec = -1
 	action_deadline_msec = -1
+	_mine_next_progress_msec = -1
+	_mine_progress_stage = -1
+	_mine_final_sent = false
 
 
 func _send_network_action(action: String, decision: Dictionary) -> bool:
@@ -128,6 +143,14 @@ func _send_network_action(action: String, decision: Dictionary) -> bool:
 		Contract.ACTION_ATTACK_CREATURE:
 			command = "attack_creature"
 			payload = {"creature_id": str(decision.get("target_id", ""))}
+		Contract.ACTION_FIRE_BOW:
+			command = "fire_bow"
+			var direction: Vector2 = Contract.target_position(decision.get("direction", decision.get("target", {})))
+			payload = {
+				"direction_x": direction.x,
+				"direction_y": direction.y,
+				"charge": clampf(float(decision.get("charge", 1.0)), 0.0, 1.0),
+			}
 		Contract.ACTION_RETALIATE_ONCE:
 			command = "attack_player"
 			payload = {"target_player_id": str(decision.get("target_id", ""))}
@@ -155,6 +178,38 @@ func _send_command(command: String, payload: Dictionary) -> bool:
 	return false
 
 
+func _tick_mining(now_msec: int) -> void:
+	var commit_msec := maxi(600, int(current_decision.get("commit_for_ms", 2200)))
+	if not _mine_final_sent:
+		if now_msec >= _mine_next_progress_msec:
+			var elapsed := maxi(0, now_msec - action_started_msec)
+			var stage := clampi(int(float(elapsed) / float(commit_msec) * 5.0), 0, 4)
+			if stage > _mine_progress_stage:
+				_send_mine_progress(now_msec, stage)
+			_mine_next_progress_msec = now_msec + 250
+		if now_msec >= action_deadline_msec:
+			var payload := _tile_payload(current_decision)
+			if not _send_command("mine_block", payload):
+				_fail("mine_command_rejected")
+				return
+			_mine_final_sent = true
+			_mine_next_progress_msec = -1
+			action_deadline_msec = now_msec + 3_000
+		return
+	if now_msec >= action_deadline_msec:
+		_finish("mine_ack_timeout")
+
+
+func _send_mine_progress(now_msec: int, stage: int) -> void:
+	var payload := _tile_payload(current_decision)
+	payload["stage"] = clampi(stage, 0, 5)
+	var target: Dictionary = current_decision.get("target", {}) if current_decision.get("target", {}) is Dictionary else {}
+	payload["block_name"] = str(target.get("block_name", target.get("content_id", "")))
+	if _send_command("mine_progress", payload):
+		_mine_progress_stage = stage
+		command_sent.emit("mine_progress", payload.duplicate(true))
+
+
 func _tile_payload(decision: Dictionary) -> Dictionary:
 	var target: Variant = decision.get("target", {})
 	if target is Dictionary:
@@ -168,7 +223,7 @@ func _tile_payload(decision: Dictionary) -> Dictionary:
 func _default_duration_msec(action: String) -> int:
 	if action in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_MOVE_TO, Contract.ACTION_FOLLOW, Contract.ACTION_FLEE_FROM, Contract.ACTION_LOOK_AT]:
 		return DEFAULT_MOVE_MSEC
-	if action in [Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_SEND_EMOJI, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER]:
+	if action in [Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_SEND_EMOJI, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER]:
 		return DEFAULT_COMMAND_MSEC
 	return DEFAULT_ACTION_MSEC
 

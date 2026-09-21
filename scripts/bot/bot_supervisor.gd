@@ -145,19 +145,19 @@ func _discover() -> void:
 	_current_session_record["selected_at_msec"] = Time.get_ticks_msec()
 	session_selected.emit(_current_session_record.duplicate(true))
 	_log("session_selected", {"session_id": str(selected.get("session_id", "")), "world_id": str(selected.get("world_id", ""))})
-	_create_session()
+	_create_session(int(selected.get("protocol_version", protocol_version)))
 	_set_state(STATE_JOINING)
 	session.join_session(selected)
 
 
-func _create_session() -> void:
+func _create_session(selected_protocol_version: int = -1) -> void:
 	if session != null:
 		session.queue_free()
 	session = SessionClass.new()
 	add_child(session)
 	session.configure(backend, network_client, {
 		"empty_grace_seconds": empty_grace_seconds,
-		"protocol_version": protocol_version,
+		"protocol_version": selected_protocol_version if selected_protocol_version > 0 else protocol_version,
 	})
 	session.session_ready.connect(_on_session_ready)
 	session.sync_started.connect(_on_session_sync_started)
@@ -250,7 +250,7 @@ func filter_public_sessions(sessions: Array, expected_protocol_version: int = DE
 		var current_now := now_msec if now_msec > 0 else Time.get_ticks_msec()
 		var official := bool(entry.get("official", entry.get("is_official", false)))
 		var dedicated_server := bool(entry.get("dedicated_server", false))
-		if session_id.is_empty() or access_mode != "public" or world_mode == "duel":
+		if session_id.is_empty() or access_mode != "public":
 			continue
 		# Managed community worlds are marked `official` by the backend even
 		# though they are intended to be visible in the community pool.  Keep
@@ -269,7 +269,9 @@ func filter_public_sessions(sessions: Array, expected_protocol_version: int = DE
 			Contract.MIN_SUPPORTED_CLIENT_VERSION,
 		):
 			continue
-		if int(entry.get("protocol_version", -1)) != expected_protocol_version:
+		var entry_protocol := int(entry.get("protocol_version", -1))
+		var duel_protocol_allowed := world_mode == "duel" and expected_protocol_version == DEFAULT_PROTOCOL_VERSION and entry_protocol == 3
+		if entry_protocol != expected_protocol_version and not duel_protocol_allowed:
 			continue
 		if player_count < 1 or (max_players > 0 and player_count >= max_players):
 			continue

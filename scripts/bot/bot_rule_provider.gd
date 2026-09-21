@@ -54,6 +54,22 @@ func decide(observation: Dictionary) -> Dictionary:
 	if not welcome_emoji.is_empty() and Contract.ACTION_SEND_EMOJI in legal:
 		return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_SEND_EMOJI, {"id": social_target_id, "emoji": welcome_emoji}, 500, 0.78)
 
+	# A bow is a deliberate ranged activity.  In a PvP world the enemy is
+	# pinned for the lifetime of the session; outside PvP, only hostile creatures
+	# are valid targets so nearby players are never attacked unsolicited.
+	var ranged_target := _ranged_target(observation)
+	if not ranged_target.is_empty() and Contract.ACTION_FIRE_BOW in legal:
+		var self_position := Contract.target_position(self_state)
+		var target_position := Contract.target_position(ranged_target)
+		var direction := target_position - self_position
+		return _decision(
+			Contract.GOAL_SELF_DEFENSE if bool(observation.get("pvp_world", false)) else Contract.GOAL_SURVIVE,
+			Contract.ACTION_FIRE_BOW,
+			ranged_target.merged({"direction": [direction.x, direction.y], "charge": 1.0}),
+			650,
+			0.9,
+		)
+
 	var craft_target := _craftable_output(observation)
 	if not craft_target.is_empty() and Contract.ACTION_CRAFT in legal:
 		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_CRAFT, {"id": craft_target}, 700, 0.9)
@@ -82,8 +98,14 @@ func decide(observation: Dictionary) -> Dictionary:
 	var resources: Array = _as_array(observation.get("visible_resources", []))
 	if not resources.is_empty() and Contract.ACTION_MINE in legal:
 		var resource := _first_dictionary(resources)
+		var mining_tool := _mining_tool_for_target(observation, resource)
+		if not mining_tool.is_empty() and Contract.ACTION_EQUIP in legal:
+			return _decision(Contract.GOAL_GATHER, Contract.ACTION_EQUIP, {"id": mining_tool}, 350, 0.94)
 		if bool(resource.get("reachable", false)):
-			return _decision(Contract.GOAL_GATHER, Contract.ACTION_MINE, resource, 1800, 0.67)
+			if _has_required_mining_tier(observation, resource):
+				return _decision(Contract.GOAL_GATHER, Contract.ACTION_MINE, resource, 2200, 0.88)
+		if Contract.ACTION_MOVE_TO in legal:
+			return _decision(Contract.GOAL_GATHER, Contract.ACTION_MOVE_TO, resource, 2200, 0.7)
 
 	var containers: Array = _as_array(observation.get("visible_containers", []))
 	if not containers.is_empty() and Contract.ACTION_OPEN_CONTAINER in legal:
@@ -207,10 +229,82 @@ func _equipable_tool(observation: Dictionary) -> String:
 	var inventory := _inventory(observation)
 	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
 	var current := str(equipment.get("hand", ""))
-	for preferred in ["stone_pickaxe", "copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "resonance_pickaxe", "stone_axe", "stone_sword"]:
+	for preferred in ["bow", "stone_pickaxe", "copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "resonance_pickaxe", "stone_axe", "stone_sword"]:
 		if int(inventory.get(preferred, 0)) > 0 and current != preferred:
 			return preferred
 	return ""
+
+
+func _mining_tool_for_target(observation: Dictionary, target: Dictionary) -> String:
+	var required_tier := int(target.get("harvest_tier", 0))
+	if required_tier <= 0:
+		return ""
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	if _tool_harvest_tier(str(equipment.get("hand", ""))) >= required_tier:
+		return ""
+	var inventory := _inventory(observation)
+	var best := ""
+	var best_tier := 99
+	for raw_name in inventory.keys():
+		var name := str(raw_name)
+		if int(inventory.get(name, 0)) <= 0:
+			continue
+		var tier := _tool_harvest_tier(name)
+		if tier >= required_tier and tier < best_tier:
+			best = name
+			best_tier = tier
+	return best
+
+
+func _has_required_mining_tier(observation: Dictionary, target: Dictionary) -> bool:
+	var required_tier := int(target.get("harvest_tier", 0))
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	return _tool_harvest_tier(str(equipment.get("hand", ""))) >= required_tier
+
+
+func _tool_harvest_tier(block_name: String) -> int:
+	var entry := _block_entry(block_name)
+	var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
+	if str(definition.get("category", "")) != "mining_tool":
+		return 0
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	return int(effects.get("harvest_tier", 0))
+
+
+func _block_entry(block_name: String) -> Dictionary:
+	var loop := Engine.get_main_loop()
+	if loop == null or not loop.has_method("get_root"):
+		return {}
+	var root: Node = loop.get_root()
+	var defs := root.get_node_or_null("BlockDefs")
+	if defs == null or not defs.get("BLOCKS") is Dictionary:
+		return {}
+	var blocks: Dictionary = defs.get("BLOCKS")
+	return blocks.get(block_name, {}) if blocks.get(block_name, {}) is Dictionary else {}
+
+
+func _ranged_target(observation: Dictionary) -> Dictionary:
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	var inventory := _inventory(observation)
+	if not str(equipment.get("hand", "")).to_lower().contains("bow") or int(inventory.get("arrow", 0)) <= 0:
+		return {}
+	var max_distance := float(observation.get("bow_attack_distance", 320.0))
+	var enemy_id := str(observation.get("enemy_player_id", ""))
+	if bool(observation.get("pvp_world", false)) and not enemy_id.is_empty():
+		for raw_player in _as_array(observation.get("players", [])):
+			if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == enemy_id:
+				var enemy := raw_player as Dictionary
+				if bool(enemy.get("alive", true)) and float(enemy.get("distance", 9999.0)) <= max_distance:
+					return enemy
+		return {}
+	var threats := _as_array(observation.get("threats", []))
+	for raw_threat in threats:
+		if not raw_threat is Dictionary:
+			continue
+		var threat := raw_threat as Dictionary
+		if bool(threat.get("alive", true)) and float(threat.get("distance", 9999.0)) <= max_distance:
+			return threat
+	return {}
 
 
 func _build_target(observation: Dictionary) -> Dictionary:

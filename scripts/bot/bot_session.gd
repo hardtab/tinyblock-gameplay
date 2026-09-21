@@ -70,6 +70,7 @@ var _social := Social.new()
 var _last_player_snapshot_msec := -1
 var _equipment_slots := {"hand": "", "feet": ""}
 var _pending_action_targets: Dictionary = {}
+var _blocked_action_targets: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
 var _physics_route: Array[Dictionary] = []
 var _physics_route_target := Vector2i(2147483647, 2147483647)
@@ -85,6 +86,7 @@ var _climb_time_left_msec := 0
 var _support_place_attempted := false
 var _support_place_last_attempt_msec := -1
 var _host_player_id := ""
+var _pvp_enemy_player_id := ""
 var _craft_pending_output := ""
 var _craft_retry_after_msec := -1
 var _craft_blocked_outputs: Dictionary = {}
@@ -94,6 +96,7 @@ const PLAYER_INPUT_INTERVAL_MSEC := 50
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
+const ACTION_RETRY_BLOCK_MSEC := 4_000
 const SUPPORT_PLACE_COOLDOWN_MSEC := 650
 const SUPPORT_PLACE_MAX_DISTANCE := BlockDefs.TILE * 4.5
 const SUPPORT_PLACE_INVALID_TILE := Vector2i(2147483647, 2147483647)
@@ -167,6 +170,7 @@ func join_session(record: Dictionary) -> void:
 	_last_player_input_msec = -1
 	_desired_input = {"left": false, "right": false, "jump": false}
 	_pending_action_targets.clear()
+	_blocked_action_targets.clear()
 	_terrain_tiles.clear()
 	_physics_route.clear()
 	_physics_route_target = Vector2i(2147483647, 2147483647)
@@ -182,6 +186,7 @@ func join_session(record: Dictionary) -> void:
 	_support_place_attempted = false
 	_support_place_last_attempt_msec = -1
 	_host_player_id = ""
+	_pvp_enemy_player_id = ""
 	_craft_pending_output = ""
 	_craft_retry_after_msec = -1
 	_craft_blocked_outputs.clear()
@@ -255,6 +260,8 @@ func handle_message(message: Dictionary) -> void:
 			return
 		if sync_complete and not joined_id.is_empty() and joined_id != own_player_id and joined_id != _host_player_id:
 			_roster[joined_id] = {"id": joined_id, "health": 10, "alive": true, "role": str(message.get("role", "guest"))}
+			if _pvp_enemy_player_id.is_empty() and _is_pvp_world():
+				_pvp_enemy_player_id = joined_id
 			_record_event("player_joined", {"player_id": joined_id})
 			_update_human_count()
 		return
@@ -307,6 +314,9 @@ func handle_message(message: Dictionary) -> void:
 		else:
 			_record_event("player_hit_unattributed", {"target_player_id": str(payload.get("target_player_id", ""))})
 		behavior.request_decision(Time.get_ticks_msec())
+		return
+	if message_type == "duel_start":
+		_record_event("duel_start", payload)
 		return
 	if message_type == "action_result":
 		_handle_action_result(payload)
@@ -988,6 +998,8 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		player_state["id"] = player_id
 		player_state["alive"] = int(player_state.get("health", 10)) > 0
 		_roster[player_id] = player_state.duplicate(true)
+	if _is_pvp_world() and _pvp_enemy_player_id.is_empty() and not _roster.is_empty():
+		_pvp_enemy_player_id = str(_roster.keys()[0])
 	_world_snapshot["self"] = local_state.duplicate(true)
 	_world_snapshot["inventory_summary"] = _inventory_by_name(snapshot.get("inventory", {}))
 	_world_snapshot["recipes"] = _recipe_catalog(snapshot)
@@ -1008,6 +1020,8 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_send_inventory_snapshot()
 	_welcome_emoji_pending = human_player_count > 0
 	_welcome_emoji_due_msec = Time.get_ticks_msec() + 900 if _welcome_emoji_pending else -1
+	if _is_pvp_world() and network_client != null and network_client.has_method("send_command"):
+		network_client.call("send_command", "duel_ready", {"world_id": world_id})
 	behavior.request_decision(Time.get_ticks_msec())
 	session_ready.emit(session_id, own_player_id)
 
@@ -1183,6 +1197,7 @@ func _update_human_count() -> void:
 
 
 func _build_observation(now_msec: int) -> Dictionary:
+	_expire_stale_action_targets(now_msec)
 	var snapshot := _world_snapshot.duplicate(true)
 	snapshot["self"] = snapshot.get("self", {"health": 10, "x": 0.0, "y": 0.0})
 	snapshot["players"] = _roster.values()
@@ -1196,6 +1211,11 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["craft_blocked_outputs"] = _craft_blocked_outputs.keys()
 	snapshot["terrain_tiles"] = _terrain_observation(snapshot["self"] as Dictionary)
 	snapshot["visible_containers"] = _visible_containers_from_snapshot(snapshot, snapshot["self"] as Dictionary)
+	snapshot["visible_resources"] = _filter_blocked_resources(snapshot.get("visible_resources", []), now_msec)
+	var generation: Dictionary = snapshot.get("generation", {}) if snapshot.get("generation", {}) is Dictionary else {}
+	snapshot["pvp_world"] = str(generation.get("mode", "")) == "duel"
+	snapshot["enemy_player_id"] = _enemy_player_id()
+	snapshot["bow_attack_distance"] = BlockDefs.TILE * 10.0
 	var achievements := get_node_or_null("/root/Achievements")
 	snapshot["achievements"] = {"unlocked": achievements.call("unlocked_ids") if achievements != null and achievements.has_method("unlocked_ids") else []}
 	if _welcome_emoji_pending and now_msec >= _welcome_emoji_due_msec:
@@ -1203,6 +1223,44 @@ func _build_observation(now_msec: int) -> Dictionary:
 	else:
 		snapshot["social_emoji"] = ""
 	return Perception.build(snapshot, own_player_id, observation_radius, now_msec)
+
+
+func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
+	var resources: Array = raw_resources as Array if raw_resources is Array else []
+	var filtered: Array = []
+	for raw_resource in resources:
+		if not raw_resource is Dictionary:
+			continue
+		var resource := raw_resource as Dictionary
+		var key := str(resource.get("id", ""))
+		var blocked_until := int(_blocked_action_targets.get(key, 0))
+		if blocked_until > 0 and now_msec >= blocked_until:
+			_blocked_action_targets.erase(key)
+			blocked_until = 0
+		if blocked_until <= now_msec:
+			filtered.append(resource)
+	return filtered
+
+
+func _expire_stale_action_targets(now_msec: int) -> void:
+	for raw_key in _pending_action_targets.keys():
+		var key := str(raw_key)
+		var pending: Dictionary = _pending_action_targets[raw_key] if _pending_action_targets[raw_key] is Dictionary else {}
+		var sent_at := int(pending.get("sent_at_msec", -1))
+		if sent_at < 0 or now_msec - sent_at < 2_200:
+			continue
+		if str(pending.get("action", "")) in [Contract.ACTION_MINE, Contract.ACTION_PLACE] and key.contains(":"):
+			_blocked_action_targets["tile:%s" % key] = now_msec + ACTION_RETRY_BLOCK_MSEC
+		_pending_action_targets.erase(raw_key)
+
+
+func _enemy_player_id() -> String:
+	return _pvp_enemy_player_id if _is_pvp_world() else ""
+
+
+func _is_pvp_world() -> bool:
+	var generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
+	return str(generation.get("mode", "")) == "duel"
 
 
 func _terrain_observation(self_state: Dictionary) -> Array:
@@ -1237,6 +1295,9 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 		var tile := raw_tile as Dictionary
 		var tile_x := int(tile.get("x", 0))
 		var tile_y := int(tile.get("y", 0))
+		var content_id := str(tile.get("content_id", ""))
+		var block_name := _block_name_for_content_id(content_id)
+		var block_definition: Dictionary = _block_entry(block_name)
 		var position := Vector2((float(tile_x) + 0.5) * BlockDefs.TILE, (float(tile_y) + 0.5) * BlockDefs.TILE)
 		if origin.distance_to(position) > max_distance:
 			continue
@@ -1244,7 +1305,9 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 			"id": "tile:%d:%d" % [tile_x, tile_y],
 			"x": tile_x,
 			"y": tile_y,
-			"content_id": str(tile.get("content_id", "")),
+			"content_id": content_id,
+			"block_name": block_name,
+			"harvest_tier": int(block_definition.get("harvest_tier", 0)),
 			"position": [position.x, position.y],
 			"reachable": origin.distance_to(position) <= float(BlockDefs.TILE) * 2.5,
 		})
@@ -1344,7 +1407,7 @@ func _on_decision_started(decision: Dictionary) -> void:
 	elif action == Contract.ACTION_MINE or action == Contract.ACTION_PLACE:
 		var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
 		var key := "%d:%d" % [int(target.get("x", 0)), int(target.get("y", 0))]
-		_pending_action_targets[key] = {"action": action, "block": str(decision.get("block", "")), "content_id": str(target.get("content_id", ""))}
+		_pending_action_targets[key] = {"action": action, "block": str(decision.get("block", "")), "content_id": str(target.get("content_id", "")), "sent_at_msec": now_msec}
 	elif action == Contract.ACTION_CRAFT:
 		_craft_pending_output = str(decision.get("target_id", ""))
 		_craft_retry_after_msec = now_msec + CRAFT_RESPONSE_TIMEOUT_MSEC
@@ -1389,6 +1452,11 @@ func _handle_action_result(payload: Dictionary) -> void:
 			achievements.call("record_craft", output)
 		return
 	if not bool(payload.get("accepted", false)):
+		var rejected_key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
+		_blocked_action_targets["tile:%s" % rejected_key] = Time.get_ticks_msec() + ACTION_RETRY_BLOCK_MSEC
+		_pending_action_targets.erase(rejected_key)
+		if action == "mine_block" and behavior != null and behavior.executor != null and behavior.executor.current_action() == Contract.ACTION_MINE:
+			behavior.executor.cancel("mine_rejected")
 		return
 	var achievements := get_node_or_null("/root/Achievements")
 	if achievements == null:
@@ -1396,6 +1464,9 @@ func _handle_action_result(payload: Dictionary) -> void:
 	var key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
 	var target: Dictionary = _pending_action_targets.get(key, {}) if _pending_action_targets.get(key, {}) is Dictionary else {}
 	_pending_action_targets.erase(key)
+	_blocked_action_targets.erase("tile:%s" % key)
+	if action == "mine_block" and behavior != null and behavior.executor != null and behavior.executor.current_action() == Contract.ACTION_MINE:
+		behavior.executor.cancel("mine_acknowledged")
 	if action == "mine_block" and achievements.has_method("record_block_mined"):
 		achievements.call("record_block_mined", _block_name_for_content_id(str(target.get("content_id", ""))))
 	elif action == "place_block" and achievements.has_method("record_block_placed"):
