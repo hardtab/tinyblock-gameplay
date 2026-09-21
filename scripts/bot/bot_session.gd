@@ -1590,6 +1590,11 @@ func _on_decision_started(decision: Dictionary) -> void:
 		var container_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
 		var container_key := "%d:%d" % [int(container_target.get("x", 0)), int(container_target.get("y", 0))]
 		_pending_action_targets[container_key] = {"action": action}
+		# Duel chest commands are authoritative and may acknowledge after the
+		# next behaviour tick. Mark the one-shot loadout request as in flight so a
+		# delayed response cannot make the bot spam OPEN_CONTAINER every 900 ms.
+		if _is_pvp_world():
+			_pvp_chest_opened = true
 	if action == Contract.ACTION_SEND_EMOJI:
 		var emoji := str(decision.get("emoji", ""))
 		if _social.emoji_can_send(_last_emoji_sent_msec, now_msec, emoji, _previous_emoji, _social_last_sent_msec):
