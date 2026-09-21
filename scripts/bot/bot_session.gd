@@ -1261,6 +1261,14 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["craft_blocked_outputs"] = _craft_blocked_outputs.keys()
 	snapshot["terrain_tiles"] = _terrain_observation(snapshot["self"] as Dictionary)
 	snapshot["visible_containers"] = _visible_containers_from_snapshot(snapshot, snapshot["self"] as Dictionary)
+	if _is_pvp_world() and _duel_fallback_container(snapshot["self"] as Dictionary).size() > 0:
+		var has_chest := false
+		for raw_container in snapshot["visible_containers"]:
+			if raw_container is Dictionary and str((raw_container as Dictionary).get("kind", "")) == "chest":
+				has_chest = true
+				break
+		if not has_chest:
+			snapshot["visible_containers"].append(_duel_fallback_container(snapshot["self"] as Dictionary))
 	snapshot["visible_resources"] = _filter_blocked_resources(snapshot.get("visible_resources", []), now_msec)
 	var generation: Dictionary = snapshot.get("generation", {}) if snapshot.get("generation", {}) is Dictionary else {}
 	snapshot["pvp_world"] = _is_pvp_world()
@@ -1447,6 +1455,26 @@ func _visible_containers_from_snapshot(snapshot: Dictionary, self_state: Diction
 		if containers.size() >= 32:
 			break
 	return containers
+
+
+func _duel_fallback_container(self_state: Dictionary) -> Dictionary:
+	if not _is_pvp_world() or _pvp_enemy_player_id.is_empty():
+		return {}
+	var enemy: Dictionary = _roster.get(_pvp_enemy_player_id, {}) if _roster.get(_pvp_enemy_player_id, {}) is Dictionary else {}
+	if enemy.is_empty():
+		return {}
+	var enemy_position := Contract.target_position(enemy)
+	var chest_x := 22 if enemy_position.x < 0.0 else -22
+	var chest_y := 7
+	var chest_position := Vector2((float(chest_x) + 0.5) * BlockDefs.TILE, (float(chest_y) + 0.5) * BlockDefs.TILE)
+	return {
+		"id": "container:%d:%d" % [chest_x, chest_y],
+		"x": chest_x,
+		"y": chest_y,
+		"position": [chest_position.x, chest_position.y],
+		"kind": "chest",
+		"reachable": Contract.target_position(self_state).distance_to(chest_position) <= float(BlockDefs.TILE) * 4.5,
+	}
 
 
 func _threats_from_creatures(raw_creatures: Variant) -> Array:
