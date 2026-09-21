@@ -54,6 +54,22 @@ func decide(observation: Dictionary) -> Dictionary:
 	if not welcome_emoji.is_empty() and Contract.ACTION_SEND_EMOJI in legal:
 		return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_SEND_EMOJI, {"id": social_target_id, "emoji": welcome_emoji}, 500, 0.78)
 
+	# Duel arenas provide a shared battle chest. Loot it before committing to the
+	# pinned opponent: otherwise the bot can start the match empty-handed and
+	# never get a chance to equip the bow, weapon, pickaxe, footwear, or blocks.
+	var pvp_chest := _pvp_loadout_container(observation)
+	if not pvp_chest.is_empty() and bool(observation.get("pvp_world", false)):
+		if bool(pvp_chest.get("reachable", false)) and Contract.ACTION_OPEN_CONTAINER in legal:
+			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_OPEN_CONTAINER, pvp_chest, 900, 0.98)
+		if not _has_pvp_loadout(observation) and Contract.ACTION_MOVE_TO in legal:
+			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, pvp_chest, 1800, 0.94)
+
+	# Equip battle gear before choosing the combat action. The pvp-aware helper
+	# keeps the bot from cycling through every tool after the chest is looted.
+	var equip_target := _equipable_tool(observation)
+	if not equip_target.is_empty() and Contract.ACTION_EQUIP in legal:
+		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_EQUIP, {"id": equip_target}, 350, 0.96)
+
 	# A bow is a deliberate ranged activity.  In a PvP world the enemy is
 	# pinned for the lifetime of the session; outside PvP, only hostile creatures
 	# are valid targets so nearby players are never attacked unsolicited.
@@ -85,9 +101,6 @@ func decide(observation: Dictionary) -> Dictionary:
 	var craft_target := _craftable_output(observation)
 	if not craft_target.is_empty() and Contract.ACTION_CRAFT in legal:
 		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_CRAFT, {"id": craft_target}, 700, 0.9)
-	var equip_target := _equipable_tool(observation)
-	if not equip_target.is_empty() and Contract.ACTION_EQUIP in legal:
-		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_EQUIP, {"id": equip_target}, 350, 0.86)
 	if not threats.is_empty() and Contract.ACTION_ATTACK_CREATURE in legal:
 		var creature := _first_dictionary(threats)
 		if float(creature.get("distance", 9999.0)) <= float(observation.get("creature_attack_distance", 48.0)):
@@ -262,11 +275,44 @@ func _recipe_inputs_available(recipe: Dictionary, inventory: Dictionary) -> bool
 func _equipable_tool(observation: Dictionary) -> String:
 	var inventory := _inventory(observation)
 	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	var pvp_world := bool(observation.get("pvp_world", false))
+	# Footwear is the current defensive equipment slot in Tiny Block. Equip it
+	# once after opening the duel chest, before changing the combat hand item.
+	if pvp_world and str(equipment.get("feet", "")).is_empty():
+		for footwear in ["trail_boots", "palm_sandals", "ice_boots", "moonstone_boots"]:
+			if int(inventory.get(footwear, 0)) > 0:
+				return footwear
 	var current := str(equipment.get("hand", ""))
+	if pvp_world:
+		if int(inventory.get("bow", 0)) > 0 and int(inventory.get("arrow", 0)) > 0 and current != "bow":
+			return "bow"
+		for preferred in ["stone_sword", "stone_axe", "wooden_pickaxe", "stone_pickaxe", "copper_pickaxe"]:
+			if int(inventory.get(preferred, 0)) > 0 and current != preferred:
+				return preferred
+		return ""
 	for preferred in ["bow", "stone_pickaxe", "copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "resonance_pickaxe", "stone_axe", "stone_sword"]:
 		if int(inventory.get(preferred, 0)) > 0 and current != preferred:
 			return preferred
 	return ""
+
+
+func _has_pvp_loadout(observation: Dictionary) -> bool:
+	var inventory := _inventory(observation)
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	for name in ["bow", "stone_sword", "stone_axe", "wooden_pickaxe", "stone_pickaxe", "copper_pickaxe", "trail_boots", "palm_sandals", "ice_boots", "moonstone_boots"]:
+		if int(inventory.get(name, 0)) > 0 or str(equipment.get("hand", "")) == name or str(equipment.get("feet", "")) == name:
+			return true
+	return false
+
+
+func _pvp_loadout_container(observation: Dictionary) -> Dictionary:
+	for raw_container in _as_array(observation.get("visible_containers", [])):
+		if not raw_container is Dictionary:
+			continue
+		var container := raw_container as Dictionary
+		if str(container.get("kind", "")) == "chest":
+			return container
+	return {}
 
 
 func _mining_tool_for_target(observation: Dictionary, target: Dictionary) -> String:
