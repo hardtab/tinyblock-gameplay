@@ -39,6 +39,7 @@ var state := STATE_IDLE
 var session_id := ""
 var own_player_id := ""
 var world_id := ""
+var _session_world_mode := ""
 var protocol_version := 2
 var dedicated_server := false
 var empty_grace_msec := DEFAULT_EMPTY_GRACE_MSEC
@@ -187,6 +188,7 @@ func join_session(record: Dictionary) -> void:
 	_support_place_last_attempt_msec = -1
 	_host_player_id = ""
 	_pvp_enemy_player_id = ""
+	_session_world_mode = str(record.get("world_mode", record.get("mode", ""))).to_lower()
 	_craft_pending_output = ""
 	_craft_retry_after_msec = -1
 	_craft_blocked_outputs.clear()
@@ -225,6 +227,9 @@ func _connect_join_response(response: Dictionary, record: Dictionary) -> bool:
 		metadata = record
 	session_id = str(metadata.get("session_id", body.get("session_id", record.get("session_id", ""))))
 	world_id = str(metadata.get("world_id", body.get("world_id", world_id)))
+	var metadata_world_mode := str(metadata.get("world_mode", metadata.get("mode", ""))).to_lower()
+	if not metadata_world_mode.is_empty():
+		_session_world_mode = metadata_world_mode
 	dedicated_server = bool(metadata.get("dedicated_server", body.get("dedicated_server", false)))
 	if network_client == null or not network_client.has_method("connect_with_ticket"):
 		_emit_left("network_unavailable")
@@ -1010,7 +1015,12 @@ func _apply_snapshot_if_complete() -> void:
 
 
 func _apply_world_snapshot(snapshot: Dictionary) -> void:
+	var selected_world_mode := _session_world_mode
 	_world_snapshot = snapshot.duplicate(true)
+	var snapshot_generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
+	if not selected_world_mode.is_empty() and (snapshot_generation.is_empty() or selected_world_mode == "duel"):
+		snapshot_generation["mode"] = selected_world_mode
+		_world_snapshot["generation"] = snapshot_generation
 	_rebuild_terrain_index(_world_snapshot.get("tiles", []))
 	world_id = str(snapshot.get("world_id", world_id))
 	var multiplayer_state: Dictionary = snapshot.get("multiplayer", {}) if snapshot.get("multiplayer", {}) is Dictionary else {}
@@ -1252,7 +1262,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["visible_containers"] = _visible_containers_from_snapshot(snapshot, snapshot["self"] as Dictionary)
 	snapshot["visible_resources"] = _filter_blocked_resources(snapshot.get("visible_resources", []), now_msec)
 	var generation: Dictionary = snapshot.get("generation", {}) if snapshot.get("generation", {}) is Dictionary else {}
-	snapshot["pvp_world"] = str(generation.get("mode", "")) == "duel"
+	snapshot["pvp_world"] = _is_pvp_world()
 	snapshot["enemy_player_id"] = _enemy_player_id()
 	snapshot["bow_attack_distance"] = BlockDefs.TILE * 10.0
 	snapshot["achievements"] = _achievement_observation()
@@ -1302,7 +1312,7 @@ func _enemy_player_id() -> String:
 
 func _is_pvp_world() -> bool:
 	var generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
-	return str(generation.get("mode", "")) == "duel"
+	return str(generation.get("mode", "")).to_lower() == "duel" or _session_world_mode == "duel"
 
 
 func _terrain_observation(self_state: Dictionary) -> Array:
