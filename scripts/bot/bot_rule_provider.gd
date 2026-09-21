@@ -39,6 +39,9 @@ func decide(observation: Dictionary) -> Dictionary:
 
 	# Immediate survival has priority over social or gathering behaviour.
 	var threats: Array = _as_array(observation.get("threats", []))
+	var arrow_cover := _incoming_arrow_cover_decision(observation)
+	if not arrow_cover.is_empty() and Contract.ACTION_PLACE in legal:
+		return arrow_cover
 	if low_health and not threats.is_empty() and Contract.ACTION_FLEE_FROM in legal:
 		var threat := _first_dictionary(threats)
 		return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, threat, 1600, 0.96)
@@ -439,6 +442,94 @@ func _terrain_map(raw: Variant) -> Dictionary:
 func _terrain_solid(terrain: Dictionary, key: String) -> bool:
 	var name := str(terrain.get(key, "")).to_lower()
 	return not name.is_empty() and name not in ["air", "core.air", "water", "lava"]
+
+
+func _incoming_arrow_cover_decision(observation: Dictionary) -> Dictionary:
+	var projectiles := _as_array(observation.get("active_projectiles", []))
+	if projectiles.is_empty():
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var self_center := Vector2(
+		float(self_state.get("x", 0.0)) + float(self_state.get("w", 20.0)) * 0.5,
+		float(self_state.get("y", 0.0)) + float(self_state.get("h", 28.0)) * 0.5,
+	)
+	var own_player_id := str(observation.get("own_player_id", ""))
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var inventory := _inventory(observation)
+	var block_name := ""
+	for candidate in ["cobblestone", "stone", "planks", "palm_planks", "pine_planks", "weeping_planks", "dirt"]:
+		if int(inventory.get(candidate, 0)) > 0:
+			block_name = candidate
+			break
+	if block_name.is_empty():
+		return {}
+
+	var best_time := INF
+	var best_target := Vector2i.ZERO
+	for raw_projectile in projectiles:
+		if not raw_projectile is Dictionary:
+			continue
+		var projectile := raw_projectile as Dictionary
+		if str(projectile.get("kind", "arrow")) != "arrow":
+			continue
+		var owner_id := str(projectile.get("owner_player_id", ""))
+		if not own_player_id.is_empty() and owner_id == own_player_id:
+			continue
+		if float(projectile.get("age", 0.0)) > 1.5:
+			continue
+		var position := Vector2(float(projectile.get("x", INF)), float(projectile.get("y", INF)))
+		var velocity := Vector2(float(projectile.get("vx", 0.0)), float(projectile.get("vy", 0.0)))
+		var speed_squared := velocity.length_squared()
+		if not is_finite(position.x) or not is_finite(position.y) or not is_finite(velocity.x) or not is_finite(velocity.y) or speed_squared < 1.0:
+			continue
+		var time_to_closest := (self_center - position).dot(velocity) / speed_squared
+		if time_to_closest < 0.0 or time_to_closest > 0.85:
+			continue
+		var closest := position + velocity * time_to_closest
+		var hit_radius := maxf(26.0, maxf(float(self_state.get("w", 20.0)), float(self_state.get("h", 28.0))) * 0.65)
+		if closest.distance_to(self_center) > hit_radius:
+			continue
+		var toward_arrow := (position - self_center).normalized()
+		if toward_arrow.length_squared() < 0.1:
+			continue
+		var cover_center := self_center + toward_arrow * 24.0
+		var base_tile := Vector2i(floori(cover_center.x / float(BlockDefs.TILE)), floori(cover_center.y / float(BlockDefs.TILE)))
+		var offsets := [Vector2i.ZERO, Vector2i(0, -1), Vector2i(0, 1), Vector2i(-1, 0), Vector2i(1, 0)]
+		for offset in offsets:
+			var candidate: Vector2i = base_tile + offset
+			var key := "%d:%d" % [candidate.x, candidate.y]
+			if _terrain_solid(terrain, key) or _tile_overlaps_player(candidate, self_state):
+				continue
+			var tile_center := Vector2((float(candidate.x) + 0.5) * BlockDefs.TILE, (float(candidate.y) + 0.5) * BlockDefs.TILE)
+			if tile_center.distance_to(self_center) > float(BlockDefs.TILE) * 3.0:
+				continue
+			if time_to_closest < best_time:
+				best_time = time_to_closest
+				best_target = candidate
+			break
+	if best_time == INF:
+		return {}
+	var target_id := "arrow-cover:%d:%d" % [best_target.x, best_target.y]
+	return {
+		"action": Contract.ACTION_PLACE,
+		"goal": Contract.GOAL_SELF_DEFENSE,
+		"target_id": target_id,
+		"target": {"id": target_id, "x": best_target.x, "y": best_target.y, "reachable": true, "reason": "incoming_arrow"},
+		"block": block_name,
+		"commit_for_ms": 350,
+		"confidence": 0.97,
+	}
+
+
+func _tile_overlaps_player(tile: Vector2i, self_state: Dictionary) -> bool:
+	var tile_rect := Rect2(float(tile.x * BlockDefs.TILE), float(tile.y * BlockDefs.TILE), float(BlockDefs.TILE), float(BlockDefs.TILE))
+	var player_rect := Rect2(
+		float(self_state.get("x", 0.0)),
+		float(self_state.get("y", 0.0)),
+		float(self_state.get("w", 20.0)),
+		float(self_state.get("h", 28.0)),
+	)
+	return tile_rect.grow(-1.0).intersects(player_rect.grow(-1.0))
 
 
 func _mining_tool_for_target(observation: Dictionary, target: Dictionary) -> String:

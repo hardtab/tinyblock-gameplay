@@ -37,6 +37,8 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 		"recent_events": recent_events,
 		"loaded_radius": radius,
 		"world_id": str(snapshot.get("world_id", "")),
+		"own_player_id": own_player_id,
+		"active_projectiles": _as_array(snapshot.get("active_projectiles", [])).duplicate(true),
 	}
 	for key in ["self_defense", "social_emoji", "social_target_id", "preferred_player_distance", "creature_attack_distance", "bow_attack_distance", "pvp_world", "duel_started", "enemy_player_id", "pvp_chest_opened", "recipes", "achievements", "equipment_slots", "craft_pending_output", "craft_retry_after_msec", "craft_blocked_outputs"]:
 		if snapshot.has(key):

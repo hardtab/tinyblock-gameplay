@@ -1095,6 +1095,8 @@ func _apply_snapshot_if_complete() -> void:
 func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	var selected_world_mode := _session_world_mode
 	_world_snapshot = snapshot.duplicate(true)
+	if _world_snapshot.has("active_projectiles"):
+		_world_snapshot["active_projectiles"] = _validated_projectile_snapshot(_world_snapshot.get("active_projectiles", []))
 	var snapshot_generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
 	var snapshot_is_duel := str(snapshot_generation.get("mode", "")).to_lower() == "duel"
 	if not selected_world_mode.is_empty() and (snapshot_generation.is_empty() or selected_world_mode == "duel"):
@@ -1256,6 +1258,8 @@ func _station_available(snapshot: Dictionary, station: String) -> bool:
 
 func _apply_players_snapshot(payload: Dictionary) -> void:
 	var players: Dictionary = payload.get("players", {}) if payload.get("players", {}) is Dictionary else {}
+	if payload.has("active_projectiles"):
+		_world_snapshot["active_projectiles"] = _validated_projectile_snapshot(payload.get("active_projectiles", []))
 	# The host sends the complete authoritative roster on every snapshot. Do not
 	# retain IDs from an earlier player_joined stream after those players leave.
 	_roster.clear()
@@ -1282,6 +1286,42 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 	if _is_pvp_world() and _pvp_enemy_player_id.is_empty() and not _roster.is_empty():
 		_pvp_enemy_player_id = str(_roster.keys()[0])
 	_update_human_count()
+
+
+func _validated_projectile_snapshot(raw_projectiles: Variant) -> Array:
+	var result: Array = []
+	if not raw_projectiles is Array:
+		return result
+	for raw_projectile in raw_projectiles:
+		if not raw_projectile is Dictionary:
+			continue
+		var projectile := raw_projectile as Dictionary
+		if str(projectile.get("kind", "arrow")) != "arrow":
+			continue
+		var x := float(projectile.get("x", INF))
+		var y := float(projectile.get("y", INF))
+		var vx := float(projectile.get("vx", 0.0))
+		var vy := float(projectile.get("vy", 0.0))
+		if not is_finite(x) or not is_finite(y) or not is_finite(vx) or not is_finite(vy) or Vector2(vx, vy).length_squared() < 1.0:
+			continue
+		var shot_id := str(projectile.get("shot_id", projectile.get("id", "")))
+		if shot_id.is_empty():
+			continue
+		result.append({
+			"id": str(projectile.get("id", "arrow:%s" % shot_id)),
+			"kind": "arrow",
+			"shot_id": shot_id,
+			"owner_player_id": str(projectile.get("owner_player_id", "")),
+			"x": x,
+			"y": y,
+			"vx": clampf(vx, -2000.0, 2000.0),
+			"vy": clampf(vy, -2000.0, 2000.0),
+			"age": clampf(float(projectile.get("age", 0.0)), 0.0, 10.0),
+			"damage": clampi(int(projectile.get("damage", 1)), 1, 10),
+		})
+		if result.size() >= 64:
+			break
+	return result
 
 
 func _send_inventory_snapshot() -> void:
@@ -1347,6 +1387,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	_expire_stale_action_targets(now_msec)
 	var snapshot := _world_snapshot.duplicate(true)
 	snapshot["self"] = snapshot.get("self", {"health": 10, "x": 0.0, "y": 0.0})
+	snapshot["own_player_id"] = own_player_id
 	snapshot["players"] = _roster.values()
 	snapshot["recent_events"] = _recent_events.duplicate(true)
 	snapshot["world_id"] = world_id
