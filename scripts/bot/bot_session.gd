@@ -94,6 +94,7 @@ var _craft_blocked_outputs: Dictionary = {}
 var _population_logged := false
 const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
 const PLAYER_INPUT_INTERVAL_MSEC := 50
+const DUEL_PROTOCOL_VERSION := 3
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
@@ -1312,7 +1313,11 @@ func _enemy_player_id() -> String:
 
 func _is_pvp_world() -> bool:
 	var generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
-	return str(generation.get("mode", "")).to_lower() == "duel" or _session_world_mode == "duel"
+	return (
+		str(generation.get("mode", "")).to_lower() == "duel"
+		or _session_world_mode == "duel"
+		or protocol_version == DUEL_PROTOCOL_VERSION
+	)
 
 
 func _terrain_observation(self_state: Dictionary) -> Array:
