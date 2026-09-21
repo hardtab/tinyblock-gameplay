@@ -1036,9 +1036,11 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	var selected_world_mode := _session_world_mode
 	_world_snapshot = snapshot.duplicate(true)
 	var snapshot_generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
+	var snapshot_is_duel := str(snapshot_generation.get("mode", "")).to_lower() == "duel"
 	if not selected_world_mode.is_empty() and (snapshot_generation.is_empty() or selected_world_mode == "duel"):
 		snapshot_generation["mode"] = selected_world_mode
 		_world_snapshot["generation"] = snapshot_generation
+		snapshot_is_duel = selected_world_mode == "duel"
 	_rebuild_terrain_index(_world_snapshot.get("tiles", []))
 	world_id = str(snapshot.get("world_id", world_id))
 	var multiplayer_state: Dictionary = snapshot.get("multiplayer", {}) if snapshot.get("multiplayer", {}) is Dictionary else {}
@@ -1065,6 +1067,14 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		_roster[player_id] = player_state.duplicate(true)
 	if _is_pvp_world() and _pvp_enemy_player_id.is_empty() and not _roster.is_empty():
 		_pvp_enemy_player_id = str(_roster.keys()[0])
+	# A guest that reconnects after the host has already started the duel will
+	# not receive the one-shot `duel_start` control message. The host's world
+	# snapshot is authoritative and only exists for an active game, so a duel
+	# snapshot with another player is sufficient to restore the started state.
+	# Waiting lobbies do not send a game snapshot and therefore remain safe.
+	if _is_pvp_world() and snapshot_is_duel and not _roster.is_empty() and not _duel_started:
+		_duel_started = true
+		_record_event("duel_start_inferred", {"reason": "active_duel_snapshot"})
 	_world_snapshot["self"] = local_state.duplicate(true)
 	_world_snapshot["inventory_summary"] = _inventory_by_name(snapshot.get("inventory", {}))
 	_world_snapshot["recipes"] = _recipe_catalog(snapshot)
