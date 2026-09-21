@@ -3103,9 +3103,16 @@ func _prune_remote_mining() -> void:
 	var now_msec := Time.get_ticks_msec()
 	for key in remote_mining.keys():
 		var remote_event: Dictionary = remote_mining[key] if remote_mining[key] is Dictionary else {}
-		if (
-			int(remote_event.get("expires_msec", now_msec)) <= now_msec
-			or not _remote_mining_target_is_present(remote_event)
+		# Keep a short-lived event while the corresponding tile delta is still in
+		# flight. _draw_mining_cracks() independently checks target presence, so
+		# this never renders cracks in empty space but does not lose valid progress
+		# merely because the visual client received the event first.
+		var target_present := _remote_mining_target_is_present(remote_event)
+		if not bool(remote_event.get("target_confirmed", false)) and target_present:
+			remote_event["target_confirmed"] = true
+			remote_mining[key] = remote_event
+		if int(remote_event.get("expires_msec", now_msec)) <= now_msec or (
+			bool(remote_event.get("target_confirmed", false)) and not target_present
 		):
 			remote_mining.erase(key)
 
@@ -3151,15 +3158,13 @@ func apply_remote_mining_event(player_id: String, payload: Dictionary) -> void:
 		"y": int(payload.get("y", NO_TILE.y)),
 		"stage": clampi(int(payload.get("stage", 0)), 0, 5),
 		"block_name": str(payload.get("block_name", "")),
+		"target_confirmed": _remote_mining_target_is_present({
+			"x": int(payload.get("x", NO_TILE.x)),
+			"y": int(payload.get("y", NO_TILE.y)),
+			"block_name": str(payload.get("block_name", "")),
+		}),
 		"expires_msec": Time.get_ticks_msec() + REMOTE_MINING_EXPIRES_MSEC,
 	}
-	if not _remote_mining_target_is_present(event):
-		# The host may send the final progress packet just after the authoritative
-		# tile delta. Keeping it would render cracks in the air for the expiry
-		# window, so reject targets that no longer exist on this world replica.
-		remote_mining.erase(key)
-		queue_redraw()
-		return
 	remote_mining[key] = event
 	queue_redraw()
 
