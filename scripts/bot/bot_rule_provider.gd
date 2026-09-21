@@ -352,7 +352,11 @@ func _approach_bridge_step(observation: Dictionary, social_target: Dictionary) -
 	# This bounds each placement to one tile and leaves reach/collision checks to
 	# the authoritative host. The same step is used to close a duel gap and to
 	# walk up to another player for a wave.
-	if not _terrain_solid(terrain, current_key) or terrain.has(next_key) and not str(terrain[next_key]).is_empty():
+	var pvp_edge_fallback := bool(observation.get("pvp_world", false)) and (
+		(direction < 0 and origin.x <= 12 and origin.x >= 10)
+		or (direction > 0 and origin.x >= -12 and origin.x <= -10)
+	)
+	if (not _terrain_solid(terrain, current_key) and not pvp_edge_fallback) or terrain.has(next_key) and not str(terrain[next_key]).is_empty():
 		return {}
 	var inventory := _inventory(observation)
 	for block_name in ["cobblestone", "planks", "palm_planks", "pine_planks", "weeping_planks", "stone", "dirt"]:

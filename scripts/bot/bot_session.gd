@@ -478,7 +478,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# Movement snapshots are still needed for older P2P hosts.  Run those
 	# snapshots through the same collision/gravity adapter as the dedicated
 	# host instead of teleporting x/y and claiming the player is grounded.
-	if bool(self_state.get("on_ground", false)) and _would_step_into_void(origin, destination):
+	if bool(self_state.get("on_ground", false)) and (_would_step_into_void(origin, destination) or _pvp_gap_ahead(origin, destination)):
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
 		_world_snapshot["self"] = self_state
@@ -517,6 +517,19 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		self_state["vx"] = 0.0
 	_world_snapshot["self"] = self_state
 	return {"done": done, "reason": "movement_step"}
+
+
+func _pvp_gap_ahead(origin: Vector2, destination: Vector2) -> bool:
+	if not _is_pvp_world():
+		return false
+	var direction := signf(destination.x - origin.x)
+	if is_zero_approx(direction):
+		return false
+	var support := _support_tile_for_position(origin)
+	# Duel arenas have two fixed six-block islands centered at -18 and 18.
+	# Stop at the edge before the next input can carry the bot into the void;
+	# the next provider decision can then place a bounded bridge block.
+	return (direction < 0.0 and support.x == 12) or (direction > 0.0 and support.x == -12)
 
 
 func _set_desired_input(move_left: bool, move_right: bool, jump: bool) -> void:
