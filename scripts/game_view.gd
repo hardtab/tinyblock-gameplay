@@ -65,6 +65,7 @@ const REMOTE_PLAYER_TELEPORT_DISTANCE := BlockDefs.TILE * 8.0
 const REMOTE_PLAYER_EXTRAPOLATION_SECONDS := 0.15
 const REMOTE_PLAYER_INDICATOR_MARGIN := 28.0
 const EMOJI_BUBBLE_SECONDS := 3.0
+const REMOTE_MINING_EXPIRES_MSEC := 1_000
 const REMOTE_CREATURE_INTERPOLATION_SPEED := 14.0
 const REMOTE_CREATURE_TELEPORT_DISTANCE := 8.0
 const TIDEGLASS_REVEAL_GLOW_MSEC := 520
@@ -351,11 +352,7 @@ func _process(_delta: float) -> void:
 	_update_low_zoom_lod(_delta)
 	_animation_time += _delta
 	anim_frame = int(_animation_time * 60.0)
-	var now_msec := Time.get_ticks_msec()
-	for key in remote_mining.keys():
-		var remote_event: Dictionary = remote_mining[key] if remote_mining[key] is Dictionary else {}
-		if int(remote_event.get("expires_msec", now_msec)) <= now_msec:
-			remote_mining.erase(key)
+	_prune_remote_mining()
 	_update_remote_player_interpolation(_delta)
 	_update_remote_creature_interpolation(_delta)
 	_update_arrows(_delta)
@@ -3080,6 +3077,8 @@ func _draw_mining_cracks() -> void:
 		if not raw_event is Dictionary:
 			continue
 		var event := raw_event as Dictionary
+		if not _remote_mining_target_is_present(event):
+			continue
 		_draw_mining_cracks_at(
 			int(event.get("x", NO_TILE.x)),
 			int(event.get("y", NO_TILE.y)),
@@ -3100,6 +3099,44 @@ func _draw_mining_cracks_at(tx: int, ty: int, t: float) -> void:
 	draw_rect(Rect2(bx + 1, by + 1, BlockDefs.TILE - 2, maxi(2, int((BlockDefs.TILE - 2) * (1.0 - t)))), Color(1, 1, 1, 0.08 + t * 0.12))
 
 
+func _prune_remote_mining() -> void:
+	var now_msec := Time.get_ticks_msec()
+	for key in remote_mining.keys():
+		var remote_event: Dictionary = remote_mining[key] if remote_mining[key] is Dictionary else {}
+		if (
+			int(remote_event.get("expires_msec", now_msec)) <= now_msec
+			or not _remote_mining_target_is_present(remote_event)
+		):
+			remote_mining.erase(key)
+
+
+func _remote_mining_target_is_present(event: Dictionary) -> bool:
+	var tx := int(event.get("x", NO_TILE.x))
+	var ty := int(event.get("y", NO_TILE.y))
+	if tx == NO_TILE.x or ty == NO_TILE.y or not sim.in_bounds(tx, ty):
+		return false
+	var block := sim.get_block(tx, ty)
+	var block_present := int(block.get("id", 0)) != 0
+	if not block_present:
+		# Plants occupy authoritative cells without replacing the base tile. They
+		# are still valid mining targets and should receive the same overlay.
+		block_present = not sim.plant_block_at(tx, ty).is_empty()
+	if not block_present:
+		return false
+	# A tile can be replaced while a delayed progress packet is in flight. Do
+	# not draw an old target's cracks over the newly placed block.
+	var expected_name := str(event.get("block_name", ""))
+	if expected_name.is_empty():
+		return true
+	var current_name := str(block.get("name", ""))
+	var current_content_id := str(block.get("content_id", ""))
+	if current_name.is_empty() and current_content_id.is_empty():
+		var plant := sim.plant_block_at(tx, ty)
+		current_name = str(plant.get("name", ""))
+		current_content_id = str(plant.get("content_id", ""))
+	return expected_name == current_name or expected_name == current_content_id
+
+
 func apply_remote_mining_event(player_id: String, payload: Dictionary) -> void:
 	if player_id.is_empty():
 		return
@@ -3109,12 +3146,21 @@ func apply_remote_mining_event(player_id: String, payload: Dictionary) -> void:
 		remote_mining.erase(key)
 		queue_redraw()
 		return
-	remote_mining[key] = {
+	var event := {
 		"x": int(payload.get("x", NO_TILE.x)),
 		"y": int(payload.get("y", NO_TILE.y)),
 		"stage": clampi(int(payload.get("stage", 0)), 0, 5),
-		"expires_msec": Time.get_ticks_msec() + 1_000,
+		"block_name": str(payload.get("block_name", "")),
+		"expires_msec": Time.get_ticks_msec() + REMOTE_MINING_EXPIRES_MSEC,
 	}
+	if not _remote_mining_target_is_present(event):
+		# The host may send the final progress packet just after the authoritative
+		# tile delta. Keeping it would render cracks in the air for the expiry
+		# window, so reject targets that no longer exist on this world replica.
+		remote_mining.erase(key)
+		queue_redraw()
+		return
+	remote_mining[key] = event
 	queue_redraw()
 
 
