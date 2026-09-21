@@ -648,6 +648,23 @@ func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 	_physics_route_replan_msec = 0
 
 
+func _seed_duel_fallback_terrain() -> void:
+	"""Keep both deterministic duel island surfaces collidable for a guest.
+
+	P2P hosts can send a snapshot centered on their own island. A bot that
+	spawns on the opposite island would otherwise see no support tiles, run its
+	local physics through empty space, and only then attempt a bridge while
+	falling. Seed only the known surface row and never overwrite authoritative
+	tiles; subsequent tile batches remain the source of truth for every change.
+	"""
+	for start_x in [-24, 12]:
+		for tile_x in range(start_x, start_x + 12):
+			var key := "%d:%d" % [tile_x, 8]
+			if not _terrain_tiles.has(key):
+				_terrain_tiles[key] = "grass"
+	_physics_route_replan_msec = 0
+
+
 func _apply_tile_batch(payload: Dictionary) -> void:
 	var tiles: Array = payload.get("tiles", []) if payload.get("tiles", []) is Array else []
 	for raw_tile in tiles:
@@ -1042,6 +1059,8 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		_world_snapshot["generation"] = snapshot_generation
 		snapshot_is_duel = selected_world_mode == "duel"
 	_rebuild_terrain_index(_world_snapshot.get("tiles", []))
+	if str(snapshot_generation.get("mode", "")).to_lower() == "duel":
+		_seed_duel_fallback_terrain()
 	world_id = str(snapshot.get("world_id", world_id))
 	var multiplayer_state: Dictionary = snapshot.get("multiplayer", {}) if snapshot.get("multiplayer", {}) is Dictionary else {}
 	var player_states: Dictionary = multiplayer_state.get("player_states", {}) if multiplayer_state.get("player_states", {}) is Dictionary else {}
