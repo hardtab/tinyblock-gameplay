@@ -721,7 +721,10 @@ func create_duel_world(seed: int = 0) -> void:
 		var center: Vector2i = island["center"]
 		# Keep the chest beside the spawn and leave the island center free for
 		# the tree placed by _decorate_floating_island().
-		var chest_pos := Vector2i(center.x + (-4 if island_index == 0 else 4), center.y - 1)
+		# Put the battle cache on the inside edge of each island.  The outer
+		# half contains the biome tree and fluid hazards; keeping the cache and
+		# spawn on the bridge-facing side gives both players a clear combat lane.
+		var chest_pos := Vector2i(center.x + (4 if island_index == 0 else -4), center.y - 1)
 		set_block(chest_pos.x, chest_pos.y, int(BlockDefs.BLOCKS.chest.id))
 		containers[chest_pos] = {
 			"contents": shared_contents.duplicate(true),
@@ -749,7 +752,7 @@ func duel_spawn_point(player_index: int) -> Vector2i:
 		return default_spawn
 	var island: Dictionary = floating_island_layout[clampi(player_index, 0, 1)]
 	var center: Vector2i = island["center"]
-	return Vector2i(center.x + (-3 if player_index == 0 else 3), center.y)
+	return Vector2i(center.x + (4 if player_index == 0 else -4), center.y)
 
 
 func _duel_chest_contents(rng: RandomNumberGenerator) -> Dictionary:

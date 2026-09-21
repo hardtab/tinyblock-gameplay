@@ -1520,7 +1520,7 @@ func _duel_fallback_container(self_state: Dictionary) -> Dictionary:
 	if enemy.is_empty():
 		return {}
 	var enemy_position := Contract.target_position(enemy)
-	var chest_x := 22 if enemy_position.x < 0.0 else -22
+	var chest_x := 14 if enemy_position.x < 0.0 else -14
 	var chest_y := 7
 	var chest_position := Vector2((float(chest_x) + 0.5) * BlockDefs.TILE, (float(chest_y) + 0.5) * BlockDefs.TILE)
 	return {
