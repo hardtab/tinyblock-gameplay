@@ -312,9 +312,12 @@ func _equipable_tool(observation: Dictionary) -> String:
 			return ""
 		if int(inventory.get("bow", 0)) > 0 and int(inventory.get("arrow", 0)) > 0 and current != "bow":
 			return "bow"
-		for preferred in ["stone_sword", "stone_axe", "wooden_pickaxe", "stone_pickaxe", "copper_pickaxe"]:
-			if int(inventory.get(preferred, 0)) > 0 and current != preferred:
-				return preferred
+		# Once the bow is empty, keep one offensive fallback equipped.  Cycling
+		# through pickaxes here prevents the next MOVE_TO/ATTACK_PLAYER decision
+		# from ever running, leaving the bot stranded at bow range.
+		for preferred in ["stone_sword", "stone_axe"]:
+			if int(inventory.get(preferred, 0)) > 0:
+				return "" if current == preferred else preferred
 		return ""
 	for preferred in ["bow", "stone_pickaxe", "copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "resonance_pickaxe", "stone_axe", "stone_sword"]:
 		if int(inventory.get(preferred, 0)) > 0 and current != preferred:

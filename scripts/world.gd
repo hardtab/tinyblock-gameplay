@@ -768,7 +768,9 @@ func _duel_chest_contents(rng: RandomNumberGenerator) -> Dictionary:
 		"bow": 1,
 		"arrow": rng.randi_range(12, 20),
 		footwear[rng.randi_range(0, footwear.size() - 1)]: 1,
-		"cobblestone": rng.randi_range(12, 24),
+		# A complete duel bridge spans the deterministic island gap. Keep enough
+		# blocks for the bot to cross it even when the bow is exhausted.
+		"cobblestone": rng.randi_range(32, 40),
 		"prepared_meal": rng.randi_range(1, 3),
 	}
 	return contents
