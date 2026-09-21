@@ -25,6 +25,7 @@ const DEFAULT_SESSION_COOLDOWN_SECONDS := 300.0
 const DEFAULT_MAX_SESSION_SECONDS := 1800.0
 const DEFAULT_RETRY_BASE_SECONDS := 5.0
 const DEFAULT_RETRY_MAX_SECONDS := 300.0
+const DEFAULT_NO_WORLD_RETRY_MAX_SECONDS := 12.0
 ## Community servers are operated by us but are reported by the backend as
 ## `official`.  They are safe for the bot because they use the dedicated
 ## server protocol; first-party official worlds must still remain excluded.
@@ -213,7 +214,14 @@ func _on_session_decision(event: Dictionary) -> void:
 
 func _schedule_retry(reason: String) -> void:
 	_retry_attempt += 1
-	var delay := retry_delay_seconds(_retry_attempt, _rng.randf())
+	# A public world can appear immediately after a failed listing.  Do not let
+	# the generic network backoff (which may reach five minutes) make the bot
+	# visibly absent from that world.  Keep long backoff only for backend/transport
+	# failures where polling harder would add load without improving discovery.
+	var retry_max := DEFAULT_RETRY_MAX_SECONDS
+	if reason in ["no_eligible_world", "selection_failed"]:
+		retry_max = minf(DEFAULT_NO_WORLD_RETRY_MAX_SECONDS, discovery_interval_seconds)
+	var delay := retry_delay_seconds(_retry_attempt, _rng.randf(), retry_max)
 	_next_discovery_msec = Time.get_ticks_msec() + int(delay * 1000.0)
 	_set_state(STATE_DISCOVERING)
 	_log("discovery_retry", {"attempt": _retry_attempt, "delay_seconds": delay, "reason": reason})
@@ -363,10 +371,11 @@ func empty_grace_elapsed(empty_since_msec: int, now_msec: int, grace_msec: int) 
 	return should_leave_empty_world(empty_since_msec, now_msec, grace_msec)
 
 
-func retry_delay_seconds(attempt: int, jitter_unit: float = 0.5) -> float:
-	var backoff := minf(DEFAULT_RETRY_MAX_SECONDS, DEFAULT_RETRY_BASE_SECONDS * pow(2.0, float(maxi(0, attempt - 1))))
+func retry_delay_seconds(attempt: int, jitter_unit: float = 0.5, max_seconds: float = DEFAULT_RETRY_MAX_SECONDS) -> float:
+	var retry_max := maxf(1.0, max_seconds)
+	var backoff := minf(retry_max, DEFAULT_RETRY_BASE_SECONDS * pow(2.0, float(maxi(0, attempt - 1))))
 	var jitter := (clampf(jitter_unit, 0.0, 1.0) * 2.0 - 1.0) * 0.2
-	return minf(DEFAULT_RETRY_MAX_SECONDS, backoff * (1.0 + jitter))
+	return minf(retry_max, backoff * (1.0 + jitter))
 
 
 func _normalize_string_array(value: Variant) -> PackedStringArray:
