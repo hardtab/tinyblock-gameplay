@@ -317,6 +317,11 @@ func handle_message(message: Dictionary) -> void:
 	if message_type == "players_snapshot":
 		_apply_players_snapshot(payload)
 		return
+	if message_type == "creatures_snapshot":
+		_apply_creatures_snapshot(payload)
+		_record_event(message_type, payload)
+		behavior.request_decision(Time.get_ticks_msec())
+		return
 	if message_type == "player_inventory":
 		_apply_inventory_snapshot(payload)
 		return
@@ -1286,6 +1291,53 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 	if _is_pvp_world() and _pvp_enemy_player_id.is_empty() and not _roster.is_empty():
 		_pvp_enemy_player_id = str(_roster.keys()[0])
 	_update_human_count()
+
+
+func _apply_creatures_snapshot(payload: Dictionary) -> void:
+	var raw_creatures: Array = payload.get("creatures", []) if payload.get("creatures", []) is Array else []
+	var previous: Dictionary = {}
+	var previous_entries: Array = _world_snapshot.get("creatures", []) if _world_snapshot.get("creatures", []) is Array else []
+	for raw_previous in previous_entries:
+		if raw_previous is Dictionary:
+			previous[str((raw_previous as Dictionary).get("id", ""))] = raw_previous
+	var creatures: Array = []
+	for raw_entry in raw_creatures:
+		if raw_entry is Dictionary:
+			var dictionary_creature := (raw_entry as Dictionary).duplicate(true)
+			if not str(dictionary_creature.get("id", "")).is_empty():
+				creatures.append(dictionary_creature)
+			continue
+		if not raw_entry is Array or (raw_entry as Array).size() < 6:
+			continue
+		var entry := raw_entry as Array
+		var creature_id := str(entry[0])
+		var block_name := str(entry[5])
+		if creature_id.is_empty() or block_name.is_empty():
+			continue
+		var creature: Dictionary = (previous.get(creature_id, {}) as Dictionary).duplicate(true)
+		creature["id"] = creature_id
+		creature["block_name"] = block_name
+		creature["x"] = float(entry[1])
+		creature["y"] = float(entry[2])
+		creature["facing"] = -1 if int(entry[3]) < 0 else 1
+		creature["health"] = maxi(0, int(entry[4]))
+		creature["dead"] = int(creature["health"]) <= 0
+		if entry.size() > 6:
+			creature["work_action"] = str(entry[6])
+		if entry.size() > 7:
+			creature["work_action_ticks"] = maxi(0, int(entry[7]))
+		if entry.size() > 10:
+			creature["carried_materials"] = maxi(0, int(entry[10]))
+		# Newer hosts may append these fields. Keeping them optional preserves
+		# compatibility with older P2P/community hosts while letting a bot react
+		# immediately after a defensive creature has been provoked or attacked.
+		if entry.size() > 11:
+			creature["provoked_ticks"] = maxi(0, int(entry[11]))
+		if entry.size() > 12:
+			creature["attack_cooldown"] = maxi(0, int(entry[12]))
+		creatures.append(creature)
+	_world_snapshot["creatures"] = creatures
+	_world_snapshot["threats"] = _threats_from_creatures(creatures)
 
 
 func _validated_projectile_snapshot(raw_projectiles: Variant) -> Array:

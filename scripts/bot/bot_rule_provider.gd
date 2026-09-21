@@ -12,6 +12,7 @@ const WANDER_COMMIT_MSEC := 1800
 const BOW_ARROW_MIN_SPEED := 250.0
 const BOW_ARROW_MAX_SPEED := 560.0
 const BOW_ARROW_GRAVITY := 310.0
+const CREATURE_DANGER_RADIUS := 224.0
 const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stone", "cobblestone", "workbench", "chest", "furnace", "glass", "stone_bricks"]
 
 
@@ -39,12 +40,33 @@ func decide(observation: Dictionary) -> Dictionary:
 
 	# Immediate survival has priority over social or gathering behaviour.
 	var threats: Array = _as_array(observation.get("threats", []))
+	var creature_threat := _dangerous_creature_threat(observation, threats)
 	var arrow_cover := _incoming_arrow_cover_decision(observation)
 	if not arrow_cover.is_empty() and Contract.ACTION_PLACE in legal:
 		return arrow_cover
-	if low_health and not threats.is_empty() and Contract.ACTION_FLEE_FROM in legal:
-		var threat := _first_dictionary(threats)
-		return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, threat, 1600, 0.96)
+	if low_health and not creature_threat.is_empty() and Contract.ACTION_FLEE_FROM in legal:
+		return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, creature_threat, 1600, 0.96)
+
+	# Hostile creatures are an immediate survival concern even while the bot is
+	# still at full health.  The old policy only fled when health was already low
+	# and otherwise let crafting, following, or a mining tool win the decision;
+	# that made an attacking animal look harmless until the first hit landed.
+	if not creature_threat.is_empty():
+		var creature_distance := float(creature_threat.get("distance", 9999.0))
+		var combat_tool := _creature_combat_tool(observation)
+		if not combat_tool.is_empty() and Contract.ACTION_EQUIP in legal:
+			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_EQUIP, {"id": combat_tool}, 350, 0.98)
+		var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+		var hand := str(equipment.get("hand", ""))
+		var inventory := _inventory(observation)
+		var bow_ready := hand.to_lower() == "bow" and int(inventory.get("arrow", 0)) > 0
+		var bow_distance := float(observation.get("bow_attack_distance", 320.0))
+		if bow_ready and creature_distance <= bow_distance and Contract.ACTION_FIRE_BOW in legal:
+			return _creature_bow_decision(observation, creature_threat)
+		if creature_distance <= float(observation.get("creature_attack_distance", 48.0)) and Contract.ACTION_ATTACK_CREATURE in legal and _is_melee_weapon(hand):
+			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_ATTACK_CREATURE, creature_threat, 500, 0.92)
+		if Contract.ACTION_FLEE_FROM in legal:
+			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, creature_threat, 1200, 0.97)
 
 	# The safety policy writes an explicit, short-lived retaliation grant into
 	# the observation.  The rule provider never infers an attacker from nearby
@@ -212,6 +234,102 @@ func _decision(goal: String, action: String, target: Dictionary, commit_for_ms: 
 
 func _as_array(value: Variant) -> Array:
 	return value as Array if value is Array else []
+
+
+func _dangerous_creature_threat(observation: Dictionary, threats: Array) -> Dictionary:
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var danger_radius := float(observation.get("creature_danger_distance", CREATURE_DANGER_RADIUS))
+	var best := {}
+	var best_distance := INF
+	for raw_threat in threats:
+		if not raw_threat is Dictionary:
+			continue
+		var threat := raw_threat as Dictionary
+		if not bool(threat.get("alive", true)) or int(threat.get("health", 1)) <= 0:
+			continue
+		var distance := float(threat.get("distance", Contract.distance_between(self_state, threat)))
+		if distance > danger_radius:
+			continue
+		var profile := _creature_profile(threat)
+		var damage := int(profile.get("damage", 0))
+		if damage <= 0:
+			continue
+		var temperament := str(profile.get("temperament", "passive")).to_lower()
+		var attack_trigger := str(profile.get("attack_trigger", "never")).to_lower()
+		var provoked_ticks := int(threat.get("provoked_ticks", 0))
+		var explicitly_attacking := bool(threat.get("is_attacking", false)) or bool(threat.get("attacking", false))
+		var recently_attacked := int(threat.get("attack_cooldown", 0)) > 0
+		var awareness_blocks := clampf(float(profile.get("awareness_blocks", 7.0)), 1.0, 16.0)
+		var within_awareness := distance <= awareness_blocks * 32.0
+		var active_attack := explicitly_attacking or recently_attacked
+		if attack_trigger == "always":
+			active_attack = active_attack or within_awareness
+		elif attack_trigger == "provoked":
+			active_attack = active_attack or provoked_ticks > 0
+		# Defensive animals are safe until provoked; aggressive animals with an
+		# always-on trigger are dangerous as soon as they become aware of the bot.
+		if temperament == "aggressive" and attack_trigger == "never":
+			active_attack = active_attack or within_awareness
+		if not active_attack:
+			continue
+		if distance < best_distance:
+			best = threat
+			best_distance = distance
+	return best
+
+
+func _creature_profile(threat: Dictionary) -> Dictionary:
+	var block_name := str(threat.get("block_name", ""))
+	var entry := _block_entry(block_name)
+	var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
+	var behavior: Dictionary = definition.get("behavior", {}) if definition.get("behavior", {}) is Dictionary else {}
+	var stats: Dictionary = definition.get("stats", {}) if definition.get("stats", {}) is Dictionary else {}
+	return {
+		"damage": int(threat.get("damage", threat.get("attack_damage", stats.get("damage", 0)))),
+		"temperament": str(threat.get("temperament", behavior.get("temperament", "passive"))),
+		"attack_trigger": str(threat.get("attack_trigger", behavior.get("attack_trigger", "never"))),
+		"awareness_blocks": float(threat.get("awareness_blocks", behavior.get("awareness_blocks", 7.0))),
+	}
+
+
+func _creature_combat_tool(observation: Dictionary) -> String:
+	var inventory := _inventory(observation)
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	var current := str(equipment.get("hand", ""))
+	if _is_melee_weapon(current):
+		return ""
+	if current.to_lower() == "bow" and int(inventory.get("arrow", 0)) > 0:
+		return ""
+	if int(inventory.get("bow", 0)) > 0 and int(inventory.get("arrow", 0)) > 0:
+		return "bow"
+	for preferred in ["stone_sword", "stone_axe"]:
+		if int(inventory.get(preferred, 0)) > 0:
+			return preferred
+	for raw_name in inventory.keys():
+		var name := str(raw_name)
+		if int(inventory.get(name, 0)) > 0 and _is_melee_weapon(name):
+			return name
+	return ""
+
+
+func _is_melee_weapon(item_name: String) -> bool:
+	var normalized := item_name.to_lower()
+	return normalized.contains("sword") or (normalized.contains("axe") and not normalized.contains("pickaxe"))
+
+
+func _creature_bow_decision(observation: Dictionary, creature: Dictionary) -> Dictionary:
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var self_position := Contract.target_position(self_state)
+	var target_position := Contract.target_position(creature)
+	var relative_target := (target_position + Vector2(10.0, 14.0)) - (self_position + Vector2(10.0, 11.76))
+	var direction := bow_aim_direction(relative_target, 1.0)
+	return _decision(
+		Contract.GOAL_SURVIVE,
+		Contract.ACTION_FIRE_BOW,
+		creature.merged({"direction": [direction.x, direction.y], "charge": 1.0}),
+		650,
+		0.94,
+	)
 
 
 func _first_dictionary(values: Array) -> Dictionary:
