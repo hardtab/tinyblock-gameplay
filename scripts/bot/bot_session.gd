@@ -317,6 +317,16 @@ func handle_message(message: Dictionary) -> void:
 		return
 	if message_type == "duel_start":
 		_record_event("duel_start", payload)
+		# The host can open the lobby with a generic world snapshot and only then
+		# switch the simulation to the duel ruleset. Promote that transition here
+		# so the bot does not spend the match mining or wandering before it pins
+		# its single opponent.
+		var generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
+		generation["mode"] = "duel"
+		_world_snapshot["generation"] = generation
+		if _pvp_enemy_player_id.is_empty() and not _roster.is_empty():
+			_pvp_enemy_player_id = str(_roster.keys()[0])
+		behavior.request_decision(Time.get_ticks_msec())
 		return
 	if message_type == "action_result":
 		_handle_action_result(payload)
