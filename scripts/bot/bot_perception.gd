@@ -23,6 +23,7 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 	resources.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.get("distance", 9999.0)) < float(b.get("distance", 9999.0)))
 
 	var recent_events := _bounded_events(snapshot.get("recent_events", []), DEFAULT_MAX_EVENTS)
+	var emoji_events := _normalize_emoji_events(snapshot.get("emoji_events", []), own_player_id, self_position, radius)
 	var observation := {
 		"observed_at_msec": now_msec,
 		"self": self_state,
@@ -35,6 +36,7 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 		"legal_actions": Contract.normalize_legal_actions(snapshot.get("legal_actions", Contract.ALL_ACTIONS)),
 		"current_goal": str(snapshot.get("current_goal", Contract.GOAL_IDLE)),
 		"recent_events": recent_events,
+		"emoji_events": emoji_events,
 		"action_history": _bounded_events(snapshot.get("action_history", []), DEFAULT_MAX_EVENTS),
 		"loaded_radius": radius,
 		"world_id": str(snapshot.get("world_id", "")),
@@ -139,6 +141,30 @@ static func _bounded_events(raw_events: Variant, limit: int) -> Array:
 		if events[index] is Dictionary:
 			result.append((events[index] as Dictionary).duplicate(true))
 	return result
+
+
+static func _normalize_emoji_events(raw_events: Variant, own_player_id: String, origin: Vector2, radius: float) -> Array:
+	var result: Array = []
+	for raw_event in _as_array(raw_events):
+		if not raw_event is Dictionary:
+			continue
+		var event := (raw_event as Dictionary).duplicate(true)
+		var player_id := str(event.get("player_id", event.get("sender_player_id", "")))
+		var emoji := str(event.get("emoji", ""))
+		if player_id.is_empty() or player_id == own_player_id or emoji.is_empty():
+			continue
+		var position := Contract.target_position(event)
+		var distance := origin.distance_to(position)
+		if event.has("position") or event.has("x") or event.has("y"):
+			if distance > radius:
+				continue
+			event["position"] = [position.x, position.y]
+			event["relative_position"] = [position.x - origin.x, position.y - origin.y]
+			event["distance"] = distance
+		event["player_id"] = player_id
+		event["emoji"] = emoji
+		result.append(event)
+	return _bounded_events(result, DEFAULT_MAX_EVENTS)
 
 
 static func _dictionary(value: Variant) -> Dictionary:

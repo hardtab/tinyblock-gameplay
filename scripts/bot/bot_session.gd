@@ -6,6 +6,7 @@ const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 const Navigator = preload("res://gameplay/scripts/bot/bot_navigator.gd")
 const BlockDefs = preload("res://gameplay/scripts/block_defs.gd")
 const Social = preload("res://gameplay/scripts/bot/bot_social.gd")
+const EmojiReactions = preload("res://gameplay/scripts/emoji_reactions.gd")
 const BehaviorClass = preload("res://gameplay/scripts/bot/bot_behavior.gd")
 const RuleProviderClass = preload("res://gameplay/scripts/bot/bot_rule_provider.gd")
 const SafetyClass = preload("res://gameplay/scripts/bot/bot_safety_policy.gd")
@@ -59,6 +60,7 @@ var _snapshot_chunks: Array[String] = []
 var _world_snapshot: Dictionary = {}
 var _roster: Dictionary = {}
 var _recent_events: Array[Dictionary] = []
+var _recent_emoji_events: Array[Dictionary] = []
 var _action_history: Array[Dictionary] = []
 var _last_emoji_sent_msec := -1
 var _previous_emoji := ""
@@ -102,7 +104,8 @@ const DUEL_PROTOCOL_VERSION := 3
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
-const ACTION_RETRY_BLOCK_MSEC := 4_000
+const ACTION_RETRY_BLOCK_MSEC := 8_000
+const EMOJI_EVENT_TTL_MSEC := 8_000
 const SUPPORT_PLACE_COOLDOWN_MSEC := 650
 const SUPPORT_PLACE_MAX_DISTANCE := BlockDefs.TILE * 4.5
 const SUPPORT_PLACE_INVALID_TILE := Vector2i(2147483647, 2147483647)
@@ -174,6 +177,7 @@ func join_session(record: Dictionary) -> void:
 	_snapshot_chunks.clear()
 	_roster.clear()
 	_recent_events.clear()
+	_recent_emoji_events.clear()
 	_last_player_snapshot_msec = -1
 	_last_player_input_msec = -1
 	_desired_input = {"left": false, "right": false, "jump": false}
@@ -356,6 +360,11 @@ func handle_message(message: Dictionary) -> void:
 	if message_type == "tile_batch":
 		_apply_tile_batch(payload)
 		_record_event(message_type, payload)
+		return
+	if message_type == "emoji_reaction":
+		_record_event(message_type, payload)
+		_record_emoji_event(message, payload)
+		behavior.request_decision(Time.get_ticks_msec())
 		return
 	if message_type in ["emoji_reaction", "creatures_snapshot", "tile_batch", "plant_batch", "region_complete"]:
 		_record_event(message_type, payload)
@@ -1445,6 +1454,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["own_player_id"] = own_player_id
 	snapshot["players"] = _roster.values()
 	snapshot["recent_events"] = _recent_events.duplicate(true)
+	snapshot["emoji_events"] = _active_emoji_events(now_msec)
 	snapshot["action_history"] = _action_history.duplicate(true)
 	snapshot["world_id"] = world_id
 	snapshot["legal_actions"] = Contract.ALL_ACTIONS
@@ -1699,6 +1709,36 @@ func _record_event(event_name: String, data: Dictionary) -> void:
 		_recent_events.pop_front()
 
 
+func _record_emoji_event(message: Dictionary, payload: Dictionary) -> void:
+	var emoji := EmojiReactions.sanitize(payload.get("emoji", message.get("emoji", "")))
+	if emoji.is_empty():
+		return
+	var player_id := str(payload.get("player_id", payload.get("sender_player_id", message.get("player_id", message.get("sender_player_id", "")))))
+	if player_id.is_empty() or player_id == own_player_id:
+		return
+	var event := {"player_id": player_id, "emoji": emoji, "at_msec": Time.get_ticks_msec()}
+	var actor: Dictionary = _roster.get(player_id, {}) if _roster.get(player_id, {}) is Dictionary else {}
+	var x := float(payload.get("x", actor.get("x", 0.0)))
+	var y := float(payload.get("y", actor.get("y", 0.0)))
+	if payload.has("position") and payload.get("position") is Array and (payload.get("position") as Array).size() >= 2:
+		x = float((payload.get("position") as Array)[0])
+		y = float((payload.get("position") as Array)[1])
+	event["position"] = [x, y]
+	_recent_emoji_events.append(event)
+	while _recent_emoji_events.size() > Perception.DEFAULT_MAX_EVENTS:
+		_recent_emoji_events.pop_front()
+
+
+func _active_emoji_events(now_msec: int) -> Array[Dictionary]:
+	var active: Array[Dictionary] = []
+	for event in _recent_emoji_events:
+		var at_msec := int(event.get("at_msec", 0))
+		if at_msec > 0 and now_msec - at_msec <= EMOJI_EVENT_TTL_MSEC:
+			active.append(event.duplicate(true))
+	_recent_emoji_events = active
+	return active
+
+
 func _on_decision_proposed(decision: Dictionary) -> void:
 	decision_logged.emit({"event": "decision_proposed", "decision": decision.duplicate(true), "at_msec": Time.get_ticks_msec()})
 
@@ -1750,6 +1790,9 @@ func _on_decision_started(decision: Dictionary) -> void:
 
 
 func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
+	var target_id := str(decision.get("target_id", ""))
+	if reason in ["blocked_obstacle", "edge_guard", "timeout"] and target_id.begins_with("tile:"):
+		_blocked_action_targets[target_id] = Time.get_ticks_msec() + ACTION_RETRY_BLOCK_MSEC
 	_record_action_history("finished", decision, reason)
 
 
