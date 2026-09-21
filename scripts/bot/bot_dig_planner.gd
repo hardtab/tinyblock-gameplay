@@ -1,6 +1,8 @@
 class_name BotDigPlanner
 extends RefCounted
 
+const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
+
 ## Bounded excavation planner used by the rule provider.
 ##
 ## This is deliberately a one-step planner.  It never teleports the bot or
@@ -94,8 +96,8 @@ static func _target_tile(observation: Dictionary, origin: Vector2i) -> Vector2i:
 
 static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i) -> Dictionary:
 	return {
-		"action": "MINE",
-		"goal": "DIG_ROUTE",
+		"action": Contract.ACTION_MINE,
+		"goal": Contract.GOAL_DIG_ROUTE,
 		"target_id": "dig:%d:%d" % [x, y],
 		"target": {
 			"id": "dig:%d:%d" % [x, y],
@@ -116,8 +118,8 @@ static func _place_step(x: int, y: int, origin: Vector2i, target: Vector2i, obse
 	if block.is_empty():
 		return {}
 	return {
-		"action": "PLACE",
-		"goal": "DIG_ROUTE",
+		"action": Contract.ACTION_PLACE,
+		"goal": Contract.GOAL_DIG_ROUTE,
 		"target_id": "dig-step:%d:%d" % [x, y],
 		"target": {
 			"id": "dig-step:%d:%d" % [x, y],
