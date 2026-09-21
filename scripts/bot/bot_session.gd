@@ -797,6 +797,11 @@ func _support_place_target(self_state: Dictionary) -> Vector2i:
 	# fluid cells; an unknown non-air cell must never be overwritten locally.
 	if not tile_name.is_empty():
 		return SUPPORT_PLACE_INVALID_TILE
+	# If the cell immediately above the candidate is already solid, the bot is
+	# falling beside/over an existing floor.  Placing beneath that floor would
+	# create an invisible pillar instead of a recovery step.
+	if _terrain_solid_at(tx, ty - 1):
+		return SUPPORT_PLACE_INVALID_TILE
 	var player_center := Vector2(x + width * 0.5, y + height * 0.5)
 	var tile_center := Vector2(tile_left + BlockDefs.TILE * 0.5, tile_top + BlockDefs.TILE * 0.5)
 	if player_center.distance_to(tile_center) > SUPPORT_PLACE_MAX_DISTANCE:

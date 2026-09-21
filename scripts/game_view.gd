@@ -87,6 +87,7 @@ var _animation_time := 0.0
 var _simulation_accumulator := 0.0
 
 var mining: Dictionary = {}
+var remote_mining: Dictionary = {}
 var mining_active := false
 var place_mode := false
 
@@ -299,6 +300,7 @@ func continue_world(state: Dictionary) -> bool:
 
 
 func _finish_world_start() -> void:
+	remote_mining.clear()
 	_remote_player_render_positions.clear()
 	_remote_player_render_revisions.clear()
 	remote_creature_targets.clear()
@@ -349,6 +351,11 @@ func _process(_delta: float) -> void:
 	_update_low_zoom_lod(_delta)
 	_animation_time += _delta
 	anim_frame = int(_animation_time * 60.0)
+	var now_msec := Time.get_ticks_msec()
+	for key in remote_mining.keys():
+		var remote_event: Dictionary = remote_mining[key] if remote_mining[key] is Dictionary else {}
+		if int(remote_event.get("expires_msec", now_msec)) <= now_msec:
+			remote_mining.erase(key)
 	_update_remote_player_interpolation(_delta)
 	_update_remote_creature_interpolation(_delta)
 	_update_arrows(_delta)
@@ -734,6 +741,13 @@ func try_keyboard_place() -> void:
 		return
 	if sim.place_block(tile.x, tile.y):
 		block_placed.emit(placed_name)
+		if MultiplayerClient.is_online():
+			multiplayer_action_requested.emit("world_action_event", {
+				"sound": "place_block",
+				"block_name": placed_name,
+				"x": tile.x,
+				"y": tile.y,
+			})
 
 
 func try_place() -> void:
@@ -761,6 +775,12 @@ func try_place_at_screen(screen_pos: Vector2) -> void:
 		multiplayer_action_requested.emit("recover_one_use_cache", {"x": tile.x, "y": tile.y})
 		return
 	if sim.try_open_chest(tile.x, tile.y):
+		if MultiplayerClient.is_online() and not multiplayer_guest:
+			multiplayer_action_requested.emit("world_action_event", {
+				"sound": "chest_open",
+				"x": tile.x,
+				"y": tile.y,
+			})
 		return
 	if sim.try_open_station_inventory(tile.x, tile.y):
 		return
@@ -774,6 +794,13 @@ func try_place_at_screen(screen_pos: Vector2) -> void:
 		return
 	if sim.place_block(tile.x, tile.y):
 		block_placed.emit(placed_name)
+		if MultiplayerClient.is_online():
+			multiplayer_action_requested.emit("world_action_event", {
+				"sound": "place_block",
+				"block_name": placed_name,
+				"x": tile.x,
+				"y": tile.y,
+			})
 
 
 func try_attack_at_screen(screen_pos: Vector2) -> bool:
@@ -802,6 +829,12 @@ func try_attack_at_screen(screen_pos: Vector2) -> bool:
 			Sfx.place("lumenroot")
 			return true
 	Sfx.attack()
+	if MultiplayerClient.is_online() and not multiplayer_guest:
+		multiplayer_action_requested.emit("world_action_event", {
+			"sound": "attack",
+			"x": floori((float(sim.player.get("x", 0.0)) + float(sim.player.get("w", 20.0)) * 0.5) / float(BlockDefs.TILE)),
+			"y": floori((float(sim.player.get("y", 0.0)) + float(sim.player.get("h", 28.0)) * 0.5) / float(BlockDefs.TILE)),
+		})
 	if not remote_player_id.is_empty():
 		show_remote_player_hit(remote_player_id)
 		remote_player_attacked.emit(remote_player_id)
@@ -1471,6 +1504,13 @@ func _tick_mining(delta: float) -> void:
 	if stage > mining.get("last_stage", -1):
 		mining["last_stage"] = stage
 		Sfx.mine_hit(block.get("name", ""))
+		if MultiplayerClient.is_online():
+			multiplayer_action_requested.emit("mine_progress", {
+				"x": tx,
+				"y": ty,
+				"stage": stage,
+				"block_name": str(block.get("name", "")),
+			})
 
 	if mining["progress"] >= mining["need"]:
 		if multiplayer_guest:
@@ -1482,6 +1522,13 @@ func _tick_mining(delta: float) -> void:
 			var block_name := str(block.get("name", "unknown"))
 			Analytics.record_activation_step("block_mined", {"block": block_name})
 			block_mined.emit(block_name)
+			if MultiplayerClient.is_online() and not multiplayer_guest:
+				multiplayer_action_requested.emit("world_action_event", {
+					"sound": "mine_complete",
+					"block_name": block_name,
+					"x": tx,
+					"y": ty,
+				})
 		mining.clear()
 
 
@@ -3024,11 +3071,25 @@ func _equipment_colors_from_definition(definition: Dictionary) -> Array[Color]:
 
 
 func _draw_mining_cracks() -> void:
-	if mining.is_empty():
+	if not mining.is_empty():
+		var tx: int = mining["tx"]
+		var ty: int = mining["ty"]
+		var t := float(mining["progress"]) / float(mining["need"])
+		_draw_mining_cracks_at(tx, ty, t)
+	for raw_event in remote_mining.values():
+		if not raw_event is Dictionary:
+			continue
+		var event := raw_event as Dictionary
+		_draw_mining_cracks_at(
+			int(event.get("x", NO_TILE.x)),
+			int(event.get("y", NO_TILE.y)),
+			clampf(float(event.get("stage", 0)) / 5.0, 0.0, 1.0),
+		)
+
+
+func _draw_mining_cracks_at(tx: int, ty: int, t: float) -> void:
+	if tx == NO_TILE.x or ty == NO_TILE.y:
 		return
-	var tx: int = mining["tx"]
-	var ty: int = mining["ty"]
-	var t := float(mining["progress"]) / float(mining["need"])
 	var bx := tx * BlockDefs.TILE
 	var by := ty * BlockDefs.TILE
 	var crack_color := Color(0, 0, 0, 0.35 + t * 0.45)
@@ -3037,6 +3098,24 @@ func _draw_mining_cracks() -> void:
 		var ox := 4 + i * 4
 		draw_line(Vector2(bx + ox, by + 6), Vector2(bx + 16, by + 20), crack_color, 2.0)
 	draw_rect(Rect2(bx + 1, by + 1, BlockDefs.TILE - 2, maxi(2, int((BlockDefs.TILE - 2) * (1.0 - t)))), Color(1, 1, 1, 0.08 + t * 0.12))
+
+
+func apply_remote_mining_event(player_id: String, payload: Dictionary) -> void:
+	if player_id.is_empty():
+		return
+	var key := player_id
+	var event_name := str(payload.get("event", "mine_progress"))
+	if event_name in ["mine_complete", "mine_cancel"]:
+		remote_mining.erase(key)
+		queue_redraw()
+		return
+	remote_mining[key] = {
+		"x": int(payload.get("x", NO_TILE.x)),
+		"y": int(payload.get("y", NO_TILE.y)),
+		"stage": clampi(int(payload.get("stage", 0)), 0, 5),
+		"expires_msec": Time.get_ticks_msec() + 1_000,
+	}
+	queue_redraw()
 
 
 func _player_is_moving() -> bool:

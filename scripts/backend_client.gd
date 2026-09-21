@@ -125,6 +125,7 @@ func create_multiplayer_session(world_id: String, world_name: String, world_mode
 		"world_mode": world_mode,
 		"access_mode": access_mode,
 		"protocol_version": protocol_version,
+		"host_client_version": MultiplayerClient.client_version(),
 		"dedicated_server": dedicated_server,
 	}
 	if dedicated_server and max_players > 0:

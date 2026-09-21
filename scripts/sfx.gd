@@ -1,18 +1,28 @@
 extends Node
 const ACHIEVEMENT_STREAM_PATH := "res://gameplay/assets/audio/sfx/achievement_unlocked.mp3"
+const VoiceChatClass = preload("res://gameplay/scripts/voice_chat.gd")
 
 var _enabled := not OS.has_feature("dedicated_server")
+var _suppressed := false
 
 
 func set_enabled(on: bool) -> void:
 	_enabled = on
 
 
-func _tone(freq: float, dur: float, wave: int = 0, vol: float = 0.07, slide: float = 0.0) -> void:
-	if not _enabled:
+func set_suppressed(on: bool) -> void:
+	_suppressed = on
+
+
+func is_suppressed() -> bool:
+	return _suppressed
+
+
+func _tone(freq: float, dur: float, wave: int = 0, vol: float = 0.07, slide: float = 0.0, gain: float = 1.0) -> void:
+	if not _enabled or _suppressed or gain <= 0.0:
 		return
 	var player := AudioStreamPlayer.new()
-	player.stream = _make_tone(freq, dur, wave, vol, slide)
+	player.stream = _make_tone(freq, dur, wave, vol * gain, slide)
 	add_child(player)
 	player.finished.connect(player.queue_free)
 	player.play()
@@ -134,21 +144,25 @@ func _make_tool_break() -> AudioStreamWAV:
 	return stream
 
 
-func _burst(freqs: Array, dur: float, wave: int, vol: float) -> void:
+func _burst(freqs: Array, dur: float, wave: int, vol: float, gain: float = 1.0) -> void:
 	for i in freqs.size():
 		var f: float = freqs[i]
-		get_tree().create_timer(i * 0.018).timeout.connect(func(): _tone(f, dur, wave, vol * (1.0 - i * 0.15)))
+		get_tree().create_timer(i * 0.018).timeout.connect(func(): _tone(f, dur, wave, vol * (1.0 - i * 0.15), 0.0, gain))
 
 
 func mine_hit(name: String) -> void:
+	_mine_hit(name, 1.0)
+
+
+func _mine_hit(name: String, gain: float) -> void:
 	if name in ["stone", "cobblestone", "obsidian"]:
-		_tone(180.0, 0.04, 0, 0.03)
+		_tone(180.0, 0.04, 0, 0.03, 0.0, gain)
 	elif name == "wood":
-		_tone(140.0, 0.05, 1, 0.045)
+		_tone(140.0, 0.05, 1, 0.045, 0.0, gain)
 	elif name in ["water", "lava"]:
 		pass
 	else:
-		_tone(220.0 + randf() * 40.0, 0.035, 1, 0.035)
+		_tone(220.0 + randf() * 40.0, 0.035, 1, 0.035, 0.0, gain)
 
 
 func attack() -> void:
@@ -157,33 +171,72 @@ func attack() -> void:
 
 
 func break_block(name: String) -> void:
+	_break_block(name, 1.0)
+
+
+func _break_block(name: String, gain: float) -> void:
 	if name in ["stone", "cobblestone", "obsidian"]:
-		_burst([220.0, 160.0, 110.0], 0.07, 0, 0.06)
+		_burst([220.0, 160.0, 110.0], 0.07, 0, 0.06, gain)
 	elif name == "wood":
-		_burst([120.0, 90.0], 0.08, 1, 0.07)
+		_burst([120.0, 90.0], 0.08, 1, 0.07, gain)
 	elif name in ["leaves", "grass"]:
-		_burst([420.0, 520.0, 380.0], 0.05, 1, 0.04)
+		_burst([420.0, 520.0, 380.0], 0.05, 1, 0.04, gain)
 	elif name == "water":
-		_tone(260.0, 0.08, 2, 0.03, -80.0)
+		_tone(260.0, 0.08, 2, 0.03, -80.0, gain)
 	elif name == "lava":
-		_tone(90.0, 0.12, 2, 0.05)
+		_tone(90.0, 0.12, 2, 0.05, 0.0, gain)
 	else:
-		_burst([180.0, 140.0], 0.06, 1, 0.05)
+		_burst([180.0, 140.0], 0.06, 1, 0.05, gain)
 
 
 func place(name: String) -> void:
+	_place(name, 1.0)
+
+
+func _place(name: String, gain: float) -> void:
 	if name == "water":
-		_tone(300.0, 0.06, 2, 0.03, -60.0)
+		_tone(300.0, 0.06, 2, 0.03, -60.0, gain)
 	elif name == "lava":
-		_tone(110.0, 0.08, 2, 0.04)
+		_tone(110.0, 0.08, 2, 0.04, 0.0, gain)
 	elif name in ["stone", "cobblestone", "obsidian"]:
-		_tone(160.0, 0.05, 0, 0.045, -30.0)
+		_tone(160.0, 0.05, 0, 0.045, -30.0, gain)
 	else:
-		_tone(200.0, 0.04, 1, 0.04, -20.0)
+		_tone(200.0, 0.04, 1, 0.04, -20.0, gain)
 
 
 func mix_stone() -> void:
 	_burst([140.0, 100.0], 0.09, 0, 0.06)
+
+
+func craft() -> void:
+	_burst([280.0, 360.0], 0.07, 3, 0.035)
+
+
+func play_proximity_event(event_name: String, block_name: String = "", distance_tiles: float = 0.0) -> void:
+	var gain := VoiceChatClass.proximity_gain(maxf(0.0, distance_tiles))
+	if gain <= 0.0:
+		return
+	match event_name:
+		"mine_hit", "mine_progress": _mine_hit(block_name, gain)
+		"break_block", "mine_complete": _break_block(block_name, gain)
+		"place_block": _place(block_name, gain)
+		"attack": _tone(410.0, 0.065, 2, 0.045, -250.0, gain)
+		"jump": _tone(360.0, 0.075, 3, 0.022, 180.0, gain)
+		"land": _tone(200.0, 0.05, 3, 0.018, -40.0, gain)
+		"craft": _burst([280.0, 360.0], 0.07, 3, 0.035, gain)
+		"chest_open": _play_stream(_make_chest_open(), gain)
+		"tool_break": _play_stream(_make_tool_break(), gain)
+
+
+func _play_stream(stream: AudioStream, gain: float = 1.0) -> void:
+	if not _enabled or _suppressed or stream == null or gain <= 0.0:
+		return
+	var player := AudioStreamPlayer.new()
+	player.stream = stream
+	player.volume_db = linear_to_db(clampf(gain, 0.0001, 1.0))
+	add_child(player)
+	player.finished.connect(player.queue_free)
+	player.play()
 
 
 func discovery(kind: String = "entity", first_in_world: bool = true) -> void:

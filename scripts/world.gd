@@ -12457,7 +12457,7 @@ func craft_output() -> Dictionary:
 		give_to_inventory(name, recipe["out"][name])
 	var out_keys: Array = recipe["out"].keys()
 	if out_keys.size() > 0:
-		Sfx.place(out_keys[0])
+		Sfx.craft()
 	inventory_changed.emit()
 	state_changed.emit()
 	if out_keys.is_empty():
