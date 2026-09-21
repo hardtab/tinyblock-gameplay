@@ -2,6 +2,7 @@ class_name BotSafetyPolicy
 extends RefCounted
 
 const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
+const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 const EmojiReactions = preload("res://gameplay/scripts/emoji_reactions.gd")
 
 const DEFAULT_RETALIATION_WINDOW_MSEC := 10_000
@@ -113,6 +114,8 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 			var ranged_target := _find_target(observation, target_id)
 			if ranged_target.is_empty() or float(ranged_target.get("distance", 9999.0)) > float(observation.get("bow_attack_distance", 320.0)):
 				return _rejected(decision, "ranged_target_out_of_range")
+			if not Perception.has_clear_bow_line_of_sight(observation, ranged_target):
+				return _rejected(decision, "ranged_target_blocked")
 			var direction := Contract.target_position(decision.get("direction", decision.get("target", {})))
 			if direction.length() < 0.1:
 				return _rejected(decision, "ranged_direction_missing")

@@ -63,6 +63,7 @@ const HIT_FLASH_MSEC := 180
 const REMOTE_PLAYER_INTERPOLATION_SPEED := 18.0
 const REMOTE_PLAYER_TELEPORT_DISTANCE := BlockDefs.TILE * 8.0
 const REMOTE_PLAYER_EXTRAPOLATION_SECONDS := 0.15
+const REMOTE_PLAYER_AIRBORNE_EXTRAPOLATION_SECONDS := 0.04
 const REMOTE_PLAYER_INDICATOR_MARGIN := 28.0
 const EMOJI_BUBBLE_SECONDS := 3.0
 const REMOTE_MINING_EXPIRES_MSEC := 1_000
@@ -2884,10 +2885,15 @@ func _update_remote_player_interpolation(delta: float) -> void:
 		var player_id := str(raw_player_id)
 		var remote: Dictionary = remote_players[player_id]
 		var target := Vector2(float(remote.get("x", 0.0)), float(remote.get("y", 0.0)))
+		var extrapolation_limit := (
+			REMOTE_PLAYER_EXTRAPOLATION_SECONDS
+			if bool(remote.get("on_ground", false))
+			else REMOTE_PLAYER_AIRBORNE_EXTRAPOLATION_SECONDS
+		)
 		var snapshot_age := clampf(
 			float(Time.get_ticks_msec() - int(remote.get("_received_msec", Time.get_ticks_msec()))) / 1000.0,
 			0.0,
-			REMOTE_PLAYER_EXTRAPOLATION_SECONDS,
+			extrapolation_limit,
 		)
 		var simulation_steps := snapshot_age * 60.0
 		target.x += float(remote.get("vx", 0.0)) * simulation_steps

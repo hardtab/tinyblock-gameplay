@@ -77,6 +77,41 @@ static func nearest_player(observation: Dictionary) -> Dictionary:
 	return _dictionary(players[0]) if not players.is_empty() and players[0] is Dictionary else {}
 
 
+static func has_clear_bow_line_of_sight(observation: Dictionary, target: Dictionary) -> bool:
+	var raw_terrain: Variant = observation.get("terrain_tiles", [])
+	if not raw_terrain is Array or (raw_terrain as Array).is_empty():
+		# An incomplete terrain window must not make a valid target permanently
+		# unshootable. The host remains authoritative for the projectile collision.
+		return true
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var origin := Contract.target_position(self_state) + Vector2(10.0, 11.76)
+	var destination := Contract.target_position(target) + Vector2(10.0, 14.0)
+	var distance := origin.distance_to(destination)
+	if distance < 1.0:
+		return true
+	var tile_size := 32.0
+	var origin_tile := Vector2i(floori(origin.x / tile_size), floori(origin.y / tile_size))
+	var target_tile := Vector2i(floori(destination.x / tile_size), floori(destination.y / tile_size))
+	var terrain := {}
+	for raw_tile in raw_terrain:
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		var block_name := str(tile.get("block_name", "")).to_lower()
+		if block_name.is_empty() or block_name in ["air", "core.air"]:
+			continue
+		terrain[Vector2i(int(tile.get("x", 0)), int(tile.get("y", 0)))] = true
+	var samples := maxi(1, int(ceil(distance / 8.0)))
+	for index in range(1, samples):
+		var point := origin.lerp(destination, float(index) / float(samples))
+		var tile := Vector2i(floori(point.x / tile_size), floori(point.y / tile_size))
+		if tile == origin_tile or tile == target_tile:
+			continue
+		if terrain.has(tile):
+			return false
+	return true
+
+
 static func _normalize_entities(raw_entities: Variant, own_player_id: String, origin: Vector2, radius: float, hostile_default: bool) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	var entries: Array = []

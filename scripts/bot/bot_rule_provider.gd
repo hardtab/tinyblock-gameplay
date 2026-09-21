@@ -2,6 +2,7 @@ class_name BotRuleProvider
 extends BotDecisionProvider
 
 const DigPlanner = preload("res://gameplay/scripts/bot/bot_dig_planner.gd")
+const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 
 var _rng := RandomNumberGenerator.new()
 var _build_step := 0
@@ -132,6 +133,21 @@ func decide(observation: Dictionary) -> Dictionary:
 			ranged_target.merged({"direction": [direction.x, direction.y], "charge": 1.0}),
 			650,
 			0.9,
+			)
+	var blocked_ranged_target := _ranged_target(observation, false)
+	if (
+		not blocked_ranged_target.is_empty()
+		and not Perception.has_clear_bow_line_of_sight(observation, blocked_ranged_target)
+		and Contract.ACTION_MOVE_TO in legal
+	):
+		# Do not waste arrows into a wall. Move toward the target so the next
+		# observation can choose a clear angle or a closer melee action.
+		return _decision(
+			Contract.GOAL_SELF_DEFENSE if bool(observation.get("pvp_world", false)) else Contract.GOAL_SURVIVE,
+			Contract.ACTION_MOVE_TO,
+			blocked_ranged_target,
+			1200,
+			0.92,
 		)
 
 	# A duel has one permanent opponent. If the bot has no bow (or the target is
@@ -740,7 +756,7 @@ func _block_entry(block_name: String) -> Dictionary:
 	return blocks.get(block_name, {}) if blocks.get(block_name, {}) is Dictionary else {}
 
 
-func _ranged_target(observation: Dictionary) -> Dictionary:
+func _ranged_target(observation: Dictionary, require_clear_path: bool = true) -> Dictionary:
 	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
 	var inventory := _inventory(observation)
 	if not str(equipment.get("hand", "")).to_lower().contains("bow") or int(inventory.get("arrow", 0)) <= 0:
@@ -751,16 +767,16 @@ func _ranged_target(observation: Dictionary) -> Dictionary:
 		for raw_player in _as_array(observation.get("players", [])):
 			if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == enemy_id:
 				var enemy := raw_player as Dictionary
-				if bool(enemy.get("alive", true)) and float(enemy.get("distance", 9999.0)) <= max_distance:
+				if bool(enemy.get("alive", true)) and float(enemy.get("distance", 9999.0)) <= max_distance and (not require_clear_path or Perception.has_clear_bow_line_of_sight(observation, enemy)):
 					return enemy
 		return {}
 	var threats := _as_array(observation.get("threats", []))
 	for raw_threat in threats:
-		if not raw_threat is Dictionary:
-			continue
-		var threat := raw_threat as Dictionary
-		if bool(threat.get("alive", true)) and float(threat.get("distance", 9999.0)) <= max_distance:
-			return threat
+			if not raw_threat is Dictionary:
+				continue
+			var threat := raw_threat as Dictionary
+			if bool(threat.get("alive", true)) and float(threat.get("distance", 9999.0)) <= max_distance and (not require_clear_path or Perception.has_clear_bow_line_of_sight(observation, threat)):
+				return threat
 	return {}
 
 
