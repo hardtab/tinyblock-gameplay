@@ -149,8 +149,16 @@ func decide(observation: Dictionary) -> Dictionary:
 	var containers: Array = _as_array(observation.get("visible_containers", []))
 	if not containers.is_empty() and Contract.ACTION_OPEN_CONTAINER in legal:
 		for raw_container in containers:
-			if raw_container is Dictionary and bool((raw_container as Dictionary).get("reachable", false)):
-				return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_OPEN_CONTAINER, raw_container, 900, 0.76)
+			if not raw_container is Dictionary:
+				continue
+			var container := raw_container as Dictionary
+			# The PvP battle chest is a one-shot loadout action. Once its request
+			# is in flight, do not route it through this generic container pass and
+			# issue the same command again while inventory sync is travelling back.
+			if bool(observation.get("pvp_world", false)) and bool(observation.get("pvp_chest_opened", false)) and str(container.get("kind", "")) == "chest":
+				continue
+			if bool(container.get("reachable", false)):
+				return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_OPEN_CONTAINER, container, 900, 0.76)
 
 	# Social proximity is a context, not the bot's whole job.  Only follow after
 	# the nearby achievement, gathering, and building opportunities have been
