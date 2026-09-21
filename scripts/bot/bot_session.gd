@@ -477,17 +477,23 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# the island lip.  The bridge planner needs the bot grounded at the edge;
 	# checking only after route/jump selection lets one speculative jump start an
 	# airborne arc and the recovery helper then places a block in mid-air.
-	if bool(self_state.get("on_ground", false)) and _pvp_gap_ahead(origin, destination):
+	var pvp_surface_y := float(WorldSim.ISLAND_CY * BlockDefs.TILE) - float(self_state.get("h", 28.0))
+	var pvp_grounded_window := bool(self_state.get("on_ground", false)) or absf(origin.y - pvp_surface_y) <= float(BlockDefs.TILE) * 3.0
+	if _is_pvp_world() and pvp_grounded_window and _pvp_gap_ahead(origin, destination):
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
 		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "edge_guard"}
 
-	var route_step := _physics_route_step(origin, destination, target_id)
+	# Duel traversal has a dedicated one-cell bridge planner.  The generic
+	# short-horizon route is allowed to invent jump arcs over unknown cells and
+	# makes the guest oscillate above the bridge instead of requesting its next
+	# support block.  The arena lane is flat, so keep this transition grounded.
+	var route_step := {} if _is_pvp_world() else _physics_route_step(origin, destination, target_id)
 	var route_kind := str(route_step.get("kind", ""))
 	if not route_step.is_empty():
 		destination = route_step.get("position", destination)
-	var hint := route_kind if route_kind in ["jump", "climb"] else _movement_hint(origin, destination)
+	var hint := "" if _is_pvp_world() else (route_kind if route_kind in ["jump", "climb"] else _movement_hint(origin, destination))
 	if _climb_active or hint == "climb":
 		_set_desired_input(signf(destination.x - origin.x) < 0.0, signf(destination.x - origin.x) > 0.0, true)
 		return _climb_step(self_state, destination, delta)
