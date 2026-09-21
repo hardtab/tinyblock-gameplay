@@ -15,6 +15,7 @@ const BOW_ARROW_MAX_SPEED := 560.0
 const BOW_ARROW_GRAVITY := 310.0
 const CREATURE_DANGER_RADIUS := 224.0
 const BUILD_ACTION_COOLDOWN_MSEC := 8_000
+const MAX_CONSECUTIVE_MINING_ACTIONS := 3
 const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stone", "cobblestone", "workbench", "chest", "furnace", "glass", "stone_bricks"]
 
 
@@ -164,7 +165,12 @@ func decide(observation: Dictionary) -> Dictionary:
 			return Contract.normalize_decision(dig_step)
 
 	var resources: Array = _as_array(observation.get("visible_resources", []))
-	if not resources.is_empty() and Contract.ACTION_MINE in legal:
+	var mining_streak := _consecutive_action_streak(observation, Contract.ACTION_MINE)
+	# Mining is useful background work, but an endless stream of nearby MINE
+	# decisions makes the avatar look frozen even when every command succeeds.
+	# Rotate to craft/build/explore after a short burst; the next observation can
+	# return to mining once another activity has completed.
+	if mining_streak < MAX_CONSECUTIVE_MINING_ACTIONS and not resources.is_empty() and Contract.ACTION_MINE in legal:
 		var resource := _best_resource(resources, observation)
 		if not resource.is_empty():
 			var mining_tool := _mining_tool_for_target(observation, resource)
@@ -379,6 +385,21 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			best_score = score
 			best = resource
 	return best
+
+
+func _consecutive_action_streak(observation: Dictionary, action: String) -> int:
+	var history: Array = _as_array(observation.get("action_history", []))
+	var streak := 0
+	for index in range(history.size() - 1, -1, -1):
+		if not history[index] is Dictionary:
+			continue
+		var entry := history[index] as Dictionary
+		if str(entry.get("phase", "")) != "started":
+			continue
+		if str(entry.get("action", "")) != action:
+			break
+		streak += 1
+	return streak
 
 
 func _wander_target(self_state: Dictionary) -> Dictionary:
