@@ -541,6 +541,14 @@ func _pvp_gap_ahead(origin: Vector2, destination: Vector2) -> bool:
 	if is_zero_approx(direction):
 		return false
 	var support := _support_tile_for_position(origin)
+	var next_x := support.x + int(direction)
+	# A bridge placement is acknowledged by the host asynchronously. Once the
+	# tile batch containing that block arrives, it is a valid support cell and
+	# must let the movement controller advance onto it. Without this guard the
+	# edge check below keeps treating the same island lip as a void forever,
+	# causing an endless MOVE_TO -> edge_guard loop after the first bridge block.
+	if _terrain_solid_at(next_x, support.y):
+		return false
 	# Duel arenas have two fixed six-block islands centered at -18 and 18.
 	# Stop at the edge before the next input can carry the bot into the void;
 	# the next provider decision can then place a bounded bridge block.
