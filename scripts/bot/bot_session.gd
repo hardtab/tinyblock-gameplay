@@ -992,7 +992,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_roster.clear()
 	for raw_id in player_states:
 		var player_id := str(raw_id)
-		if player_id == own_player_id or player_id == _host_player_id:
+		if player_id == own_player_id or (player_id == _host_player_id and not _is_pvp_world()):
 			continue
 		var player_state := player_states[raw_id] as Dictionary if player_states[raw_id] is Dictionary else {}
 		player_state["id"] = player_id
@@ -1129,7 +1129,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 					local_state[field] = entry[field]
 			_world_snapshot["self"] = local_state
 			continue
-		if player_id == _host_player_id:
+		if player_id == _host_player_id and not _is_pvp_world():
 			continue
 		entry["id"] = player_id
 		entry["alive"] = int(entry.get("health", 10)) > 0
@@ -1222,7 +1222,11 @@ func _build_observation(now_msec: int) -> Dictionary:
 		snapshot["social_emoji"] = "👋"
 	else:
 		snapshot["social_emoji"] = ""
-	return Perception.build(snapshot, own_player_id, observation_radius, now_msec)
+	# Duel arenas may place the pinned opponent farther away than the ordinary
+	# social observation radius. The provider still filters to the single pinned
+	# enemy, so expanding only this read radius cannot authorize random PvP.
+	var perception_radius := maxf(observation_radius, 4096.0) if _is_pvp_world() else observation_radius
+	return Perception.build(snapshot, own_player_id, perception_radius, now_msec)
 
 
 func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
@@ -1279,7 +1283,15 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 		var tile_y := int(parts[1])
 		if abs(tile_x - center_x) > 10 or abs(tile_y - center_y) > 8:
 			continue
-		result.append({"x": tile_x, "y": tile_y, "block_name": str(_terrain_tiles[key])})
+		var block_name := str(_terrain_tiles[key])
+		var block := _block_entry(block_name)
+		result.append({
+			"x": tile_x,
+			"y": tile_y,
+			"block_name": block_name,
+			"harvest_tier": _block_harvest_tier(block),
+			"hardness": float(block.get("hardness", 0.0)),
+		})
 	return result
 
 
@@ -1298,6 +1310,9 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 		var content_id := str(tile.get("content_id", ""))
 		var block_name := _block_name_for_content_id(content_id)
 		var block_definition: Dictionary = _block_entry(block_name)
+		var solid := bool(block_definition.get("solid", false)) and not bool(block_definition.get("fluid", false))
+		if block_name.is_empty() or block_name == "air" or not solid:
+			continue
 		var position := Vector2((float(tile_x) + 0.5) * BlockDefs.TILE, (float(tile_y) + 0.5) * BlockDefs.TILE)
 		if origin.distance_to(position) > max_distance:
 			continue
@@ -1307,13 +1322,35 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 			"y": tile_y,
 			"content_id": content_id,
 			"block_name": block_name,
-			"harvest_tier": int(block_definition.get("harvest_tier", 0)),
+			"harvest_tier": _block_harvest_tier(block_definition),
+			"hardness": float(block_definition.get("hardness", 0.0)),
 			"position": [position.x, position.y],
 			"reachable": origin.distance_to(position) <= float(BlockDefs.TILE) * 2.5,
 		})
 		if resources.size() >= 256:
 			break
 	return resources
+
+
+func _block_harvest_tier(block: Dictionary) -> int:
+	if block.is_empty() or not bool(block.get("solid", false)) or bool(block.get("fluid", false)):
+		return 0
+	if block.has("harvest_tier"):
+		return clampi(int(block.get("harvest_tier", 0)), 0, 6)
+	var definition: Dictionary = block.get("definition", {}) if block.get("definition", {}) is Dictionary else {}
+	var tags: Array = definition.get("tags", []) if definition.get("tags", []) is Array else []
+	if "obsidian" in tags or ("rare" in tags and ("ore" in tags or "crystal" in tags or "mineral" in tags)):
+		return 4
+	if "ore" in tags or "crystal" in tags or "gem" in tags or "mineral" in tags:
+		return 3
+	var hardness := int(block.get("hardness", 0))
+	if hardness >= 50:
+		return 4
+	if hardness >= 26:
+		return 2
+	if hardness >= 18:
+		return 1
+	return 0
 
 
 func _visible_containers_from_snapshot(snapshot: Dictionary, self_state: Dictionary) -> Array:
@@ -1404,6 +1441,7 @@ func _on_decision_started(decision: Dictionary) -> void:
 			else:
 				_equipment_slots["hand"] = item_name
 		_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+		_send_inventory_snapshot()
 	elif action == Contract.ACTION_MINE or action == Contract.ACTION_PLACE:
 		var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
 		var key := "%d:%d" % [int(target.get("x", 0)), int(target.get("y", 0))]
@@ -1458,15 +1496,15 @@ func _handle_action_result(payload: Dictionary) -> void:
 		if action == "mine_block" and behavior != null and behavior.executor != null and behavior.executor.current_action() == Contract.ACTION_MINE:
 			behavior.executor.cancel("mine_rejected")
 		return
-	var achievements := get_node_or_null("/root/Achievements")
-	if achievements == null:
-		return
 	var key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
 	var target: Dictionary = _pending_action_targets.get(key, {}) if _pending_action_targets.get(key, {}) is Dictionary else {}
 	_pending_action_targets.erase(key)
 	_blocked_action_targets.erase("tile:%s" % key)
 	if action == "mine_block" and behavior != null and behavior.executor != null and behavior.executor.current_action() == Contract.ACTION_MINE:
 		behavior.executor.cancel("mine_acknowledged")
+	var achievements := get_node_or_null("/root/Achievements")
+	if achievements == null:
+		return
 	if action == "mine_block" and achievements.has_method("record_block_mined"):
 		achievements.call("record_block_mined", _block_name_for_content_id(str(target.get("content_id", ""))))
 	elif action == "place_block" and achievements.has_method("record_block_placed"):

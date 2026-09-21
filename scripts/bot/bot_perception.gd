@@ -10,7 +10,10 @@ const DEFAULT_MAX_EVENTS := 12
 static func build(snapshot: Dictionary, own_player_id: String, radius: float = DEFAULT_RADIUS, now_msec: int = 0) -> Dictionary:
 	var self_state := _dictionary(snapshot.get("self", {})).duplicate(true)
 	var self_position := Contract.target_position(self_state)
-	var players := _normalize_entities(snapshot.get("players", []), own_player_id, self_position, radius, false)
+	# Duel snapshots deliberately include the host as the bot's pinned enemy.
+	# Outside PvP, keep the existing human-only social filter so ordinary host
+	# metadata can never become an unsolicited target.
+	var players := _normalize_entities(snapshot.get("players", []), own_player_id, self_position, radius, bool(snapshot.get("pvp_world", false)))
 	var threats := _normalize_entities(snapshot.get("threats", snapshot.get("creatures", [])), "", self_position, radius, true)
 	var resources := _normalize_entities(snapshot.get("visible_resources", snapshot.get("resources", [])), "", self_position, radius, false)
 	for resource in resources:

@@ -70,6 +70,18 @@ func decide(observation: Dictionary) -> Dictionary:
 			0.9,
 		)
 
+	# A duel has one permanent opponent. If the bot has no bow (or the target is
+	# already in melee range), close the distance and keep attacking that player
+	# until the authoritative duel result ends the session.
+	var pvp_target := _pvp_target(observation)
+	if not pvp_target.is_empty():
+		var pvp_distance := float(pvp_target.get("distance", 9999.0))
+		var melee_distance := float(observation.get("retaliation_distance", 52.0))
+		if pvp_distance <= melee_distance and Contract.ACTION_ATTACK_PLAYER in legal:
+			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_ATTACK_PLAYER, pvp_target, 550, 0.98)
+		if Contract.ACTION_MOVE_TO in legal:
+			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, pvp_target, 1800, 0.94)
+
 	var craft_target := _craftable_output(observation)
 	if not craft_target.is_empty() and Contract.ACTION_CRAFT in legal:
 		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_CRAFT, {"id": craft_target}, 700, 0.9)
@@ -97,15 +109,16 @@ func decide(observation: Dictionary) -> Dictionary:
 
 	var resources: Array = _as_array(observation.get("visible_resources", []))
 	if not resources.is_empty() and Contract.ACTION_MINE in legal:
-		var resource := _first_dictionary(resources)
-		var mining_tool := _mining_tool_for_target(observation, resource)
-		if not mining_tool.is_empty() and Contract.ACTION_EQUIP in legal:
-			return _decision(Contract.GOAL_GATHER, Contract.ACTION_EQUIP, {"id": mining_tool}, 350, 0.94)
-		if bool(resource.get("reachable", false)):
-			if _has_required_mining_tier(observation, resource):
-				return _decision(Contract.GOAL_GATHER, Contract.ACTION_MINE, resource, 2200, 0.88)
-		if Contract.ACTION_MOVE_TO in legal:
-			return _decision(Contract.GOAL_GATHER, Contract.ACTION_MOVE_TO, resource, 2200, 0.7)
+		var resource := _best_resource(resources)
+		if not resource.is_empty():
+			var mining_tool := _mining_tool_for_target(observation, resource)
+			if not mining_tool.is_empty() and Contract.ACTION_EQUIP in legal:
+				return _decision(Contract.GOAL_GATHER, Contract.ACTION_EQUIP, {"id": mining_tool}, 350, 0.94)
+			if bool(resource.get("reachable", false)):
+				if _has_required_mining_tier(observation, resource):
+					return _decision(Contract.GOAL_GATHER, Contract.ACTION_MINE, resource, 2200, 0.88)
+			if Contract.ACTION_MOVE_TO in legal:
+				return _decision(Contract.GOAL_GATHER, Contract.ACTION_MOVE_TO, resource, 2200, 0.7)
 
 	var containers: Array = _as_array(observation.get("visible_containers", []))
 	if not containers.is_empty() and Contract.ACTION_OPEN_CONTAINER in legal:
@@ -162,6 +175,27 @@ func _first_dictionary(values: Array) -> Dictionary:
 		if value is Dictionary:
 			return value as Dictionary
 	return {}
+
+
+func _best_resource(values: Array) -> Dictionary:
+	var best := {}
+	var best_score := INF
+	for raw_value in values:
+		if not raw_value is Dictionary:
+			continue
+		var resource := raw_value as Dictionary
+		if resource.has("solid") and not bool(resource.get("solid", true)):
+			continue
+		var score := float(resource.get("distance", 9999.0))
+		if not bool(resource.get("reachable", false)):
+			score += 1000.0
+		# Prefer harvestable targets over blocks that require a better tool.
+		if int(resource.get("harvest_tier", 0)) > 0:
+			score -= 2.0
+		if score < best_score:
+			best_score = score
+			best = resource
+	return best
 
 
 func _wander_target(self_state: Dictionary) -> Dictionary:
@@ -304,6 +338,20 @@ func _ranged_target(observation: Dictionary) -> Dictionary:
 		var threat := raw_threat as Dictionary
 		if bool(threat.get("alive", true)) and float(threat.get("distance", 9999.0)) <= max_distance:
 			return threat
+	return {}
+
+
+func _pvp_target(observation: Dictionary) -> Dictionary:
+	if not bool(observation.get("pvp_world", false)):
+		return {}
+	var enemy_id := str(observation.get("enemy_player_id", ""))
+	if enemy_id.is_empty():
+		return {}
+	for raw_player in _as_array(observation.get("players", [])):
+		if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == enemy_id:
+			var player := raw_player as Dictionary
+			if bool(player.get("alive", true)):
+				return player
 	return {}
 
 

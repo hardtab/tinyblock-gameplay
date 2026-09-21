@@ -87,6 +87,13 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 				return _rejected(decision, "no_active_direct_hit")
 			if not _player_is_near(observation, target_id, float(observation.get("retaliation_distance", 52.0))):
 				return _rejected(decision, "attacker_out_of_range")
+		Contract.ACTION_ATTACK_PLAYER:
+			if not bool(observation.get("pvp_world", false)):
+				return _rejected(decision, "pvp_only_action")
+			if str(observation.get("enemy_player_id", "")) != target_id:
+				return _rejected(decision, "pvp_enemy_target_required")
+			if not _player_is_near(observation, target_id, float(observation.get("retaliation_distance", 52.0))):
+				return _rejected(decision, "enemy_out_of_range")
 		Contract.ACTION_ATTACK_CREATURE:
 			if not _target_exists(observation.get("threats", []), target_id):
 				return _rejected(decision, "creature_target_not_visible")
@@ -101,7 +108,7 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 				if not _target_exists(observation.get("players", []), target_id):
 					return _rejected(decision, "pvp_enemy_not_visible")
 			else:
-				if not _target_exists(observation.get("threats", []), target_id) and not _target_exists(observation.get("players", []), target_id):
+				if not _target_exists(observation.get("threats", []), target_id):
 					return _rejected(decision, "ranged_target_not_visible")
 			var ranged_target := _find_target(observation, target_id)
 			if ranged_target.is_empty() or float(ranged_target.get("distance", 9999.0)) > float(observation.get("bow_attack_distance", 320.0)):
@@ -269,8 +276,22 @@ func _valid_dig_route_target(decision: Dictionary, observation: Dictionary) -> b
 		if int(tile.get("x", 0)) != target_x or int(tile.get("y", 0)) != target_y:
 			continue
 		var block_name := str(tile.get("block_name", ""))
-		return not block_name.is_empty() and block_name not in ["air", "core.air"]
+		if block_name.is_empty() or block_name in ["air", "core.air"]:
+			return false
+		var required_tier := int(tile.get("harvest_tier", 0))
+		if required_tier > 0 and _tool_harvest_tier(hand) < required_tier:
+			return false
+		return true
 	return false
+
+
+func _tool_harvest_tier(block_name: String) -> int:
+	var entry := _block_entry(block_name)
+	var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
+	if str(definition.get("category", "")) != "mining_tool":
+		return 0
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	return int(effects.get("harvest_tier", 0))
 
 
 func _first_target_id(raw_targets: Variant, fallback: String) -> String:

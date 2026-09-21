@@ -46,12 +46,12 @@ static func next_step(observation: Dictionary) -> Dictionary:
 		if not _solid(terrain, next_x, origin.y - 1):
 			return _place_step(next_x, origin.y - 1, origin, target, observation)
 		if _solid(terrain, next_x, origin.y - 2):
-			return _mine_step(next_x, origin.y - 2, origin, target)
+			return _mine_step(next_x, origin.y - 2, origin, target, observation)
 		return {}
 	# Clear the two-cell player corridor before trying to walk through a wall.
 	for head_y in [origin.y - 1, origin.y - 2]:
 		if _solid(terrain, next_x, head_y):
-			return _mine_step(next_x, head_y, origin, target)
+			return _mine_step(next_x, head_y, origin, target, observation)
 	# If the next column has no floor, bridge a bounded gap.  The next decision
 	# will see the new support block and continue one block at a time.
 	if not _solid(terrain, next_x, origin.y):
@@ -94,7 +94,7 @@ static func _target_tile(observation: Dictionary, origin: Vector2i) -> Vector2i:
 	return best
 
 
-static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i) -> Dictionary:
+static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, observation: Dictionary) -> Dictionary:
 	return {
 		"action": Contract.ACTION_MINE,
 		"goal": Contract.GOAL_DIG_ROUTE,
@@ -107,6 +107,8 @@ static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i) -> Di
 			"route_target": [target.x, target.y],
 			"origin": [origin.x, origin.y],
 			"reachable": true,
+			"harvest_tier": _terrain_harvest_tier(observation, x, y),
+			"hardness": _terrain_hardness(observation, x, y),
 		},
 		"commit_for_ms": 1200,
 		"confidence": 0.74,
@@ -211,6 +213,26 @@ static func _interesting_resource(name: String) -> bool:
 		if normalized.contains(token):
 			return true
 	return false
+
+
+static func _terrain_harvest_tier(observation: Dictionary, x: int, y: int) -> int:
+	var raw_tiles: Variant = observation.get("terrain_tiles", [])
+	if not raw_tiles is Array:
+		return 0
+	for raw_tile in raw_tiles:
+		if raw_tile is Dictionary and int((raw_tile as Dictionary).get("x", 0)) == x and int((raw_tile as Dictionary).get("y", 0)) == y:
+			return int((raw_tile as Dictionary).get("harvest_tier", 0))
+	return 0
+
+
+static func _terrain_hardness(observation: Dictionary, x: int, y: int) -> float:
+	var raw_tiles: Variant = observation.get("terrain_tiles", [])
+	if not raw_tiles is Array:
+		return 0.0
+	for raw_tile in raw_tiles:
+		if raw_tile is Dictionary and int((raw_tile as Dictionary).get("x", 0)) == x and int((raw_tile as Dictionary).get("y", 0)) == y:
+			return float((raw_tile as Dictionary).get("hardness", 0.0))
+	return 0.0
 
 
 static func _invalid_tile() -> Vector2i:

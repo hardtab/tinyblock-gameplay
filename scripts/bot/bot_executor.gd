@@ -70,6 +70,9 @@ func start(raw_decision: Variant, observation: Dictionary, now_msec: int) -> boo
 	current_decision = decision
 	current_observation = observation.duplicate(true)
 	action_started_msec = now_msec
+	if action == Contract.ACTION_MINE:
+		commit_msec = _mine_duration_msec(decision, observation, commit_msec)
+		decision["commit_for_ms"] = commit_msec
 	action_deadline_msec = now_msec + commit_msec
 	_busy = true
 	action_started.emit(current_decision.duplicate(true))
@@ -80,7 +83,7 @@ func start(raw_decision: Variant, observation: Dictionary, now_msec: int) -> boo
 		_send_mine_progress(now_msec, 0)
 		return true
 
-	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER]:
+	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER]:
 		if not _send_network_action(action, decision):
 			_fail("command_rejected")
 			return false
@@ -154,6 +157,9 @@ func _send_network_action(action: String, decision: Dictionary) -> bool:
 		Contract.ACTION_RETALIATE_ONCE:
 			command = "attack_player"
 			payload = {"target_player_id": str(decision.get("target_id", ""))}
+		Contract.ACTION_ATTACK_PLAYER:
+			command = "attack_player"
+			payload = {"target_player_id": str(decision.get("target_id", ""))}
 		Contract.ACTION_CRAFT:
 			command = "craft_recipe"
 			payload = {"output": str(decision.get("target_id", ""))}
@@ -183,11 +189,12 @@ func _tick_mining(now_msec: int) -> void:
 	if not _mine_final_sent:
 		if now_msec >= _mine_next_progress_msec:
 			var elapsed := maxi(0, now_msec - action_started_msec)
-			var stage := clampi(int(float(elapsed) / float(commit_msec) * 5.0), 0, 4)
+			var stage := clampi(int(float(elapsed) / float(commit_msec) * 5.0), 0, 5)
 			if stage > _mine_progress_stage:
 				_send_mine_progress(now_msec, stage)
 			_mine_next_progress_msec = now_msec + 250
 		if now_msec >= action_deadline_msec:
+			_send_mine_progress(now_msec, 5)
 			var payload := _tile_payload(current_decision)
 			if not _send_command("mine_block", payload):
 				_fail("mine_command_rejected")
@@ -198,6 +205,30 @@ func _tick_mining(now_msec: int) -> void:
 		return
 	if now_msec >= action_deadline_msec:
 		_finish("mine_ack_timeout")
+
+
+func _mine_duration_msec(decision: Dictionary, observation: Dictionary, fallback_msec: int) -> int:
+	var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+	var hardness := float(target.get("hardness", 0.0))
+	if hardness <= 0.0:
+		return maxi(600, fallback_msec)
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	var hand := str(equipment.get("hand", ""))
+	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	var multiplier := 1.0
+	# The rule layer already checked the harvest tier. This lightweight lookup
+	# keeps the hold duration proportional to the equipped tool without coupling
+	# the executor to WorldSim internals.
+	if not hand.is_empty() and int(inventory.get(hand, 0)) > 0:
+		var loop := Engine.get_main_loop()
+		if loop != null and loop.has_method("get_root"):
+			var defs: Node = loop.get_root().get_node_or_null("BlockDefs")
+			if defs != null and defs.get("BLOCKS") is Dictionary:
+				var entry: Dictionary = defs.get("BLOCKS").get(hand, {}) if defs.get("BLOCKS").get(hand, {}) is Dictionary else {}
+				var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
+				var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+				multiplier = maxf(1.0, float(effects.get("mining_speed_multiplier", 1.0)))
+	return clampi(roundi((850.0 + hardness * 58.0) / multiplier), 600, 6000)
 
 
 func _send_mine_progress(now_msec: int, stage: int) -> void:
@@ -223,7 +254,7 @@ func _tile_payload(decision: Dictionary) -> Dictionary:
 func _default_duration_msec(action: String) -> int:
 	if action in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_MOVE_TO, Contract.ACTION_FOLLOW, Contract.ACTION_FLEE_FROM, Contract.ACTION_LOOK_AT]:
 		return DEFAULT_MOVE_MSEC
-	if action in [Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_SEND_EMOJI, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER]:
+	if action in [Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER, Contract.ACTION_SEND_EMOJI, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER]:
 		return DEFAULT_COMMAND_MSEC
 	return DEFAULT_ACTION_MSEC
 
