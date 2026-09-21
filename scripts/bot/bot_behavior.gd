@@ -14,6 +14,19 @@ const BotExecutorClass = preload("res://gameplay/scripts/bot/bot_executor.gd")
 
 const DEFAULT_DECISION_INTERVAL_MSEC := 900
 const REJECTION_RETRY_MSEC := 350
+const AGGRESSIVE_PLAYER_DECISION_INTERVAL_MSEC := 450
+const AGGRESSIVE_PLAYER_COMMIT_SCALE := 0.5
+const AGGRESSIVE_PLAYER_COMMIT_MIN_MSEC := 250
+const AGGRESSIVE_PLAYER_ACTIONS: PackedStringArray = [
+	Contract.ACTION_MOVE_NEAR_PLAYER,
+	Contract.ACTION_MOVE_TO,
+	Contract.ACTION_FOLLOW,
+	Contract.ACTION_PLACE,
+	Contract.ACTION_FIRE_BOW,
+	Contract.ACTION_RETALIATE_ONCE,
+	Contract.ACTION_ATTACK_PLAYER,
+	Contract.ACTION_EQUIP,
+]
 
 var provider: BotDecisionProvider
 var safety: BotSafetyPolicy
@@ -60,6 +73,15 @@ func tick(observation: Dictionary, delta: float, now_msec: int) -> void:
 	var decision: Dictionary = approved.get("decision", {}) if approved.get("decision", {}) is Dictionary else {}
 	if decision.is_empty():
 		decision = Contract.normalize_decision({"action": Contract.ACTION_WAIT})
+	var aggressive_player := _is_aggressive_player_decision(decision, observation)
+	if aggressive_player:
+		decision = decision.duplicate(true)
+		var original_commit_msec := int(decision.get("commit_for_ms", 0))
+		if original_commit_msec > 0:
+			decision["commit_for_ms"] = maxi(
+				AGGRESSIVE_PLAYER_COMMIT_MIN_MSEC,
+				int(round(float(original_commit_msec) * AGGRESSIVE_PLAYER_COMMIT_SCALE)),
+			)
 	var goal := str(decision.get("goal", Contract.GOAL_IDLE))
 	if goal != _last_goal:
 		_last_goal = goal
@@ -68,4 +90,44 @@ func tick(observation: Dictionary, delta: float, now_msec: int) -> void:
 		_next_decision_msec = now_msec + REJECTION_RETRY_MSEC
 		return
 	decision_started.emit(decision.duplicate(true))
-	_next_decision_msec = now_msec + maxi(decision_interval_msec, int(decision.get("commit_for_ms", 0)))
+	var next_interval_msec := AGGRESSIVE_PLAYER_DECISION_INTERVAL_MSEC if aggressive_player else decision_interval_msec
+	_next_decision_msec = now_msec + maxi(next_interval_msec, int(decision.get("commit_for_ms", 0)))
+
+
+func _is_aggressive_player_decision(decision: Dictionary, observation: Dictionary) -> bool:
+	var action := str(decision.get("action", ""))
+	if action not in AGGRESSIVE_PLAYER_ACTIONS:
+		return false
+	var target_id := str(decision.get("target_id", ""))
+	if target_id.is_empty() and decision.get("target", {}) is Dictionary:
+		target_id = str((decision.get("target", {}) as Dictionary).get("id", ""))
+	var enemy_id := str(observation.get("enemy_player_id", ""))
+	var defense: Dictionary = observation.get("self_defense", {}) if observation.get("self_defense", {}) is Dictionary else {}
+	var attacker_id := str(defense.get("attacker_player_id", ""))
+	var targets_player := (
+		(not target_id.is_empty() and target_id in [enemy_id, attacker_id])
+		or _observation_has_player(observation, target_id)
+	)
+	if action in [Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER]:
+		return targets_player
+	if action in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_MOVE_TO, Contract.ACTION_FOLLOW]:
+		if targets_player:
+			return true
+		return str(decision.get("goal", "")) == Contract.GOAL_SELF_DEFENSE and (not enemy_id.is_empty() or not attacker_id.is_empty())
+	if action in [Contract.ACTION_PLACE, Contract.ACTION_EQUIP]:
+		return str(decision.get("goal", "")) == Contract.GOAL_SELF_DEFENSE and (
+			targets_player or not enemy_id.is_empty() or not attacker_id.is_empty()
+		)
+	return false
+
+
+func _observation_has_player(observation: Dictionary, target_id: String) -> bool:
+	if target_id.is_empty():
+		return false
+	var players: Variant = observation.get("players", [])
+	if not players is Array:
+		return false
+	for raw_player in players:
+		if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == target_id:
+			return true
+	return false
