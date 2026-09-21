@@ -82,6 +82,8 @@ var _jump_start_x := 0.0
 var _climb_active := false
 var _climb_column := 0
 var _climb_time_left_msec := 0
+var _support_place_attempted := false
+var _support_place_last_attempt_msec := -1
 var _host_player_id := ""
 var _craft_pending_output := ""
 var _craft_retry_after_msec := -1
@@ -92,6 +94,13 @@ const PLAYER_INPUT_INTERVAL_MSEC := 50
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
+const SUPPORT_PLACE_COOLDOWN_MSEC := 650
+const SUPPORT_PLACE_MAX_DISTANCE := BlockDefs.TILE * 4.5
+const SUPPORT_PLACE_INVALID_TILE := Vector2i(2147483647, 2147483647)
+const SUPPORT_BLOCK_PRIORITY: PackedStringArray = [
+	"planks", "palm_planks", "pine_planks", "weeping_planks",
+	"stone_bricks", "cobblestone", "stone", "dirt",
+]
 const BOT_SKIN := {
 	"skin": "#8b5a3c",
 	"shirt": "#76b852",
@@ -170,6 +179,8 @@ func join_session(record: Dictionary) -> void:
 	_climb_active = false
 	_climb_column = 0
 	_climb_time_left_msec = 0
+	_support_place_attempted = false
+	_support_place_last_attempt_msec = -1
 	_host_player_id = ""
 	_craft_pending_output = ""
 	_craft_retry_after_msec = -1
@@ -713,6 +724,100 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 	self_state["vy"] = vy
 	self_state["facing"] = -1 if direction < 0.0 else (1 if direction > 0.0 else int(self_state.get("facing", 1)))
 	self_state["on_ground"] = on_ground
+	if on_ground:
+		# A support placement is scoped to one airborne arc.  Re-arm only after
+		# the authoritative/local collision adapter has put the bot on ground.
+		_support_place_attempted = false
+	else:
+		_try_place_support_block(self_state)
+
+
+func _try_place_support_block(self_state: Dictionary) -> bool:
+	"""Ask the authoritative host to place one solid block beneath a falling bot.
+
+	This is deliberately a network action, not a local position correction.  It
+	is only attempted while the player is descending, and the host still applies
+	its normal reach, collision, inventory, and placement validation.
+	"""
+	if _support_place_attempted or network_client == null or not network_client.has_method("send_command"):
+		return false
+	if bool(self_state.get("on_ground", false)) or float(self_state.get("vy", 0.0)) <= 0.05:
+		return false
+	var now_msec := Time.get_ticks_msec()
+	if _support_place_last_attempt_msec >= 0 and now_msec - _support_place_last_attempt_msec < SUPPORT_PLACE_COOLDOWN_MSEC:
+		return false
+	var block_name := _support_block_name()
+	if block_name.is_empty():
+		return false
+	var target := _support_place_target(self_state)
+	if target == SUPPORT_PLACE_INVALID_TILE:
+		return false
+	var payload := {"x": target.x, "y": target.y, "block_name": block_name, "block": block_name}
+	var sent: Variant = network_client.call("send_command", "place_block", payload)
+	if sent is bool and not bool(sent):
+		return false
+	_support_place_attempted = true
+	_support_place_last_attempt_msec = now_msec
+	var key := "%d:%d" % [target.x, target.y]
+	_pending_action_targets[key] = {
+		"action": Contract.ACTION_PLACE,
+		"block": block_name,
+		"content_id": str(_block_entry(block_name).get("content_id", "")),
+	}
+	structured_log.emit({
+		"event": "support_block_place_requested",
+		"x": target.x,
+		"y": target.y,
+		"block": block_name,
+		"at_msec": now_msec,
+	})
+	return true
+
+
+func _support_place_target(self_state: Dictionary) -> Vector2i:
+	if bool(self_state.get("on_ground", false)) or float(self_state.get("vy", 0.0)) <= 0.05:
+		return SUPPORT_PLACE_INVALID_TILE
+	var x := float(self_state.get("x", 0.0))
+	var y := float(self_state.get("y", 0.0))
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var tx := floori((x + width * 0.5) / float(BlockDefs.TILE))
+	# Use the first complete cell below the player's feet.  This prevents the
+	# placement from intersecting the avatar while still catching a short fall.
+	var ty := ceili((y + height - 0.01) / float(BlockDefs.TILE))
+	if absi(tx) > 100000 or absi(ty) > 100000:
+		return SUPPORT_PLACE_INVALID_TILE
+	var tile_top := float(ty * BlockDefs.TILE)
+	var tile_left := float(tx * BlockDefs.TILE)
+	var player_bottom := y + height
+	if tile_top < player_bottom - 0.01:
+		return SUPPORT_PLACE_INVALID_TILE
+	var tile_name := _terrain_name_at(tx, ty)
+	# Empty terrain is represented by an absent key.  Refuse known solid or
+	# fluid cells; an unknown non-air cell must never be overwritten locally.
+	if not tile_name.is_empty():
+		return SUPPORT_PLACE_INVALID_TILE
+	var player_center := Vector2(x + width * 0.5, y + height * 0.5)
+	var tile_center := Vector2(tile_left + BlockDefs.TILE * 0.5, tile_top + BlockDefs.TILE * 0.5)
+	if player_center.distance_to(tile_center) > SUPPORT_PLACE_MAX_DISTANCE:
+		return SUPPORT_PLACE_INVALID_TILE
+	return Vector2i(tx, ty)
+
+
+func _support_block_name() -> String:
+	var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+	for candidate in SUPPORT_BLOCK_PRIORITY:
+		if int(inventory.get(candidate, 0)) <= 0:
+			continue
+		var definition := _block_entry(candidate)
+		if definition.is_empty() or not bool(definition.get("solid", false)):
+			continue
+		if bool(definition.get("item", false)) or bool(definition.get("plant", false)) or bool(definition.get("creature_item", false)):
+			continue
+		if bool(definition.get("fluid", false)) or bool(definition.get("falls_when_unsupported", false)):
+			continue
+		return candidate
+	return ""
 
 
 func _local_collision(px: float, py: float, width: float, height: float) -> Dictionary:
@@ -818,8 +923,20 @@ func _connected_peers_supported(raw_players: Variant) -> bool:
 func _peer_client_version_supported(entry: Dictionary) -> bool:
 	var player_id := str(entry.get("player_id", entry.get("id", "")))
 	var role := str(entry.get("role", "")).to_lower()
-	if player_id.is_empty() or player_id == own_player_id or player_id == _host_player_id or role == "host":
+	if player_id.is_empty() or player_id == own_player_id:
 		return true
+	var is_host := player_id == _host_player_id or role == "host"
+	if is_host:
+		# Dedicated hosts are server processes rather than game clients.  A P2P
+		# host, however, is the authority for the whole world and must advertise
+		# a supported client when that metadata is available.  Discovery already
+		# rejects listings with no host version; this runtime check covers a
+		# stale/racing listing without breaking older dedicated gateways.
+		var host_version := str(entry.get("client_version", ""))
+		return dedicated_server or host_version.is_empty() or Contract.client_version_at_least(
+			host_version,
+			Contract.MIN_SUPPORTED_CLIENT_VERSION,
+		)
 	return Contract.client_version_at_least(
 		str(entry.get("client_version", "")),
 		Contract.MIN_SUPPORTED_CLIENT_VERSION,

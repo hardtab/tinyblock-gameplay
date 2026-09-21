@@ -25,6 +25,15 @@ const DEFAULT_SESSION_COOLDOWN_SECONDS := 300.0
 const DEFAULT_MAX_SESSION_SECONDS := 1800.0
 const DEFAULT_RETRY_BASE_SECONDS := 5.0
 const DEFAULT_RETRY_MAX_SECONDS := 300.0
+## Community servers are operated by us but are reported by the backend as
+## `official`.  They are safe for the bot because they use the dedicated
+## server protocol; first-party official worlds must still remain excluded.
+const MANAGED_COMMUNITY_WORLD_IDS := [
+	"world_skyloft",
+	"world_pandora",
+	"world_b612",
+	"world_wonderland",
+]
 
 var backend: Object
 var network_client: Object
@@ -240,11 +249,19 @@ func filter_public_sessions(sessions: Array, expected_protocol_version: int = DE
 		var recent_at := int(recently_visited_sessions.get(world_id, recently_visited_sessions.get(session_id, 0)))
 		var current_now := now_msec if now_msec > 0 else Time.get_ticks_msec()
 		var official := bool(entry.get("official", entry.get("is_official", false)))
+		var dedicated_server := bool(entry.get("dedicated_server", false))
 		if session_id.is_empty() or access_mode != "public" or world_mode == "duel":
 			continue
-		# The bot speaks the dedicated-server protocol only. Never put it in a
-		# legacy/P2P world, and never join the first-party official worlds.
-		if not bool(entry.get("dedicated_server", false)) or official:
+		# Managed community worlds are marked `official` by the backend even
+		# though they are intended to be visible in the community pool.  Keep
+		# first-party official worlds out, but allow those known dedicated worlds.
+		var managed_community := dedicated_server and world_id in MANAGED_COMMUNITY_WORLD_IDS
+		if official and not managed_community:
+			continue
+		# P2P worlds are host-authoritative.  Only join when the listing carries
+		# the host/creator version proving it understands the current protocol;
+		# an absent version is deliberately rejected rather than guessed.
+		if not dedicated_server and not _p2p_host_supported(entry):
 			continue
 		var minimum_client_version := str(entry.get("minimum_client_version", entry.get("min_client_version", "")))
 		if not minimum_client_version.is_empty() and not Contract.client_version_at_least(
@@ -260,6 +277,35 @@ func filter_public_sessions(sessions: Array, expected_protocol_version: int = DE
 			continue
 		result.append(entry)
 	return result
+
+
+func _p2p_host_supported(entry: Dictionary) -> bool:
+	var host_version := _session_host_client_version(entry)
+	if host_version.strip_edges().is_empty():
+		return false
+	return Contract.client_version_at_least(host_version, Contract.MIN_SUPPORTED_CLIENT_VERSION)
+
+
+func _session_host_client_version(entry: Dictionary) -> String:
+	for key in [
+		"host_client_version",
+		"creator_client_version",
+		"owner_client_version",
+		"host_version",
+		"creator_version",
+		"owner_version",
+	]:
+		if entry.has(key):
+			return str(entry.get(key, ""))
+	for container_key in ["host", "creator", "owner", "host_player", "creator_player"]:
+		var nested: Variant = entry.get(container_key, null)
+		if not nested is Dictionary:
+			continue
+		var nested_entry := nested as Dictionary
+		for key in ["client_version", "version"]:
+			if nested_entry.has(key):
+				return str(nested_entry.get(key, ""))
+	return ""
 
 
 func filter_sessions(sessions: Array, expected_protocol_version: int = DEFAULT_PROTOCOL_VERSION, now_msec: int = 0, recently_visited_sessions: Dictionary = {}) -> Array:
