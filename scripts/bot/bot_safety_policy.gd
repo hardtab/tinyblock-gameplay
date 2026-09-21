@@ -94,7 +94,11 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 			if target_id.is_empty() and _first_target_id(observation.get("threats", []), target_id).is_empty():
 				return _rejected(decision, "flee_target_missing")
 		Contract.ACTION_MINE:
-			if not _reachable_resource_exists(observation.get("visible_resources", []), target_id):
+			var mine_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+			if bool(mine_target.get("dig_route", false)):
+				if not _valid_dig_route_target(decision, observation):
+					return _rejected(decision, "dig_target_unsafe")
+			elif not _reachable_resource_exists(observation.get("visible_resources", []), target_id):
 				return _rejected(decision, "mine_target_not_reachable")
 		Contract.ACTION_OPEN_CONTAINER:
 			if not _reachable_container_exists(observation.get("visible_containers", []), target_id):
@@ -174,6 +178,33 @@ func _reachable_container_exists(raw_targets: Variant, target_id: String) -> boo
 		var target := raw_target as Dictionary
 		if str(target.get("id", "")) == target_id:
 			return bool(target.get("reachable", false))
+	return false
+
+
+func _valid_dig_route_target(decision: Dictionary, observation: Dictionary) -> bool:
+	var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+	if not bool(target.get("dig_route", false)) or not target.has("x") or not target.has("y"):
+		return false
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	var hand := str(equipment.get("hand", ""))
+	if not (hand.contains("pickaxe") or hand == "stone_axe"):
+		return false
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var origin_x := floori((float(self_state.get("x", 0.0)) + 10.0) / 32.0)
+	var origin_y := floori((float(self_state.get("y", 0.0)) + 28.0) / 32.0)
+	var target_x := int(target.get("x", 0))
+	var target_y := int(target.get("y", 0))
+	if abs(target_x - origin_x) > 2 or abs(target_y - origin_y) > 2:
+		return false
+	var terrain: Array = observation.get("terrain_tiles", []) if observation.get("terrain_tiles", []) is Array else []
+	for raw_tile in terrain:
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		if int(tile.get("x", 0)) != target_x or int(tile.get("y", 0)) != target_y:
+			continue
+		var block_name := str(tile.get("block_name", ""))
+		return not block_name.is_empty() and block_name not in ["air", "core.air"]
 	return false
 
 

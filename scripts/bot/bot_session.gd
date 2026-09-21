@@ -1194,6 +1194,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["craft_pending_output"] = _craft_pending_output
 	snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
 	snapshot["craft_blocked_outputs"] = _craft_blocked_outputs.keys()
+	snapshot["terrain_tiles"] = _terrain_observation(snapshot["self"] as Dictionary)
 	snapshot["visible_containers"] = _visible_containers_from_snapshot(snapshot, snapshot["self"] as Dictionary)
 	var achievements := get_node_or_null("/root/Achievements")
 	snapshot["achievements"] = {"unlocked": achievements.call("unlocked_ids") if achievements != null and achievements.has_method("unlocked_ids") else []}
@@ -1202,6 +1203,26 @@ func _build_observation(now_msec: int) -> Dictionary:
 	else:
 		snapshot["social_emoji"] = ""
 	return Perception.build(snapshot, own_player_id, observation_radius, now_msec)
+
+
+func _terrain_observation(self_state: Dictionary) -> Array:
+	var result: Array = []
+	var origin := Contract.target_position(self_state)
+	var center_x := floori((origin.x + 10.0) / float(BlockDefs.TILE))
+	var center_y := floori((origin.y + 28.0) / float(BlockDefs.TILE))
+	# Digging is local and one action at a time. Keep this compact so the
+	# observation remains cheap even when the initial snapshot contains a whole
+	# region, while still covering a short staircase/bridge route.
+	for key in _terrain_tiles:
+		var parts := str(key).split(":")
+		if parts.size() != 2:
+			continue
+		var tile_x := int(parts[0])
+		var tile_y := int(parts[1])
+		if abs(tile_x - center_x) > 10 or abs(tile_y - center_y) > 8:
+			continue
+		result.append({"x": tile_x, "y": tile_y, "block_name": str(_terrain_tiles[key])})
+	return result
 
 
 func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -> Array:

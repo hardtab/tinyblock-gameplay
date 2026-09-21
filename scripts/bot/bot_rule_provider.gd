@@ -1,6 +1,8 @@
 class_name BotRuleProvider
 extends BotDecisionProvider
 
+const DigPlanner = preload("res://gameplay/scripts/bot/bot_dig_planner.gd")
+
 var _rng := RandomNumberGenerator.new()
 var _build_step := 0
 
@@ -62,6 +64,16 @@ func decide(observation: Dictionary) -> Dictionary:
 		var creature := _first_dictionary(threats)
 		if float(creature.get("distance", 9999.0)) <= float(observation.get("creature_attack_distance", 48.0)):
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_ATTACK_CREATURE, creature, 500, 0.78)
+
+	# When a player or a valuable resource is just beyond a solid column, make
+	# one safe excavation/step action before falling back to ordinary movement.
+	# The planner is intentionally after equip and combat priorities, so it only
+	# digs with a tool already in hand and never tunnels while under threat.
+	var dig_step := DigPlanner.next_step(observation)
+	if not dig_step.is_empty():
+		var dig_action := str(dig_step.get("action", ""))
+		if dig_action in legal:
+			return Contract.normalize_decision(dig_step)
 
 	var build_target := _build_target(observation)
 	if not build_target.is_empty() and Contract.ACTION_PLACE in legal:
