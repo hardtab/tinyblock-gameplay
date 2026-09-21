@@ -83,15 +83,13 @@ func start(raw_decision: Variant, observation: Dictionary, now_msec: int) -> boo
 		_send_mine_progress(now_msec, 0)
 		return true
 
-	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER]:
+	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER, Contract.ACTION_EQUIP]:
 		if not _send_network_action(action, decision):
 			_fail("command_rejected")
 			return false
 		# These are acknowledged optimistically; action_result/snapshot updates
 		# will be observed by the next decision cycle.
 		_finish("command_sent")
-	elif action == Contract.ACTION_EQUIP:
-		_finish("equipped")
 	return true
 
 
@@ -166,6 +164,9 @@ func _send_network_action(action: String, decision: Dictionary) -> bool:
 		Contract.ACTION_OPEN_CONTAINER:
 			command = "open_container"
 			payload = _tile_payload(decision)
+		Contract.ACTION_EQUIP:
+			command = "equip_item"
+			payload = {"item": str(decision.get("target_id", ""))}
 		_:
 			return true
 	var sent := _send_command(command, payload)

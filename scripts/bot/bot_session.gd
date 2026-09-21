@@ -1457,13 +1457,12 @@ func _on_decision_started(decision: Dictionary) -> void:
 	var action := str(decision.get("action", ""))
 	if action == Contract.ACTION_EQUIP:
 		var item_name := str(decision.get("target_id", ""))
+		# Equipment is now applied by the authoritative host through equip_item.
+		# Do not overwrite the replicated inventory optimistically: an older host
+		# snapshot would otherwise clear the slot and make the provider equip the
+		# same boots/pickaxe forever.
 		if not item_name.is_empty():
-			if item_name.contains("boots") or item_name.contains("sandals"):
-				_equipment_slots["feet"] = item_name
-			else:
-				_equipment_slots["hand"] = item_name
-		_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
-		_send_inventory_snapshot()
+			_pending_action_targets["equip"] = {"action": action, "item": item_name, "sent_at_msec": now_msec}
 	elif action == Contract.ACTION_MINE or action == Contract.ACTION_PLACE:
 		var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
 		var key := "%d:%d" % [int(target.get("x", 0)), int(target.get("y", 0))]
@@ -1490,6 +1489,12 @@ func _on_decision_started(decision: Dictionary) -> void:
 
 func _handle_action_result(payload: Dictionary) -> void:
 	var action := str(payload.get("action", ""))
+	if action == "equip_item":
+		_pending_action_targets.erase("equip")
+		if bool(payload.get("accepted", false)) and payload.get("equipment_slots", null) is Dictionary:
+			_equipment_slots = (payload.get("equipment_slots") as Dictionary).duplicate(true)
+			_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+		return
 	if action == "open_container":
 		var container_key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
 		_pending_action_targets.erase(container_key)

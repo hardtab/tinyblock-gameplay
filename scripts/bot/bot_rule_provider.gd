@@ -64,6 +64,10 @@ func decide(observation: Dictionary) -> Dictionary:
 		if not _has_pvp_loadout(observation) and Contract.ACTION_MOVE_TO in legal:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, pvp_chest, 1800, 0.94)
 
+	var bridge_step := _pvp_bridge_step(observation)
+	if not bridge_step.is_empty() and Contract.ACTION_PLACE in legal:
+		return Contract.normalize_decision(bridge_step)
+
 	# Equip battle gear before choosing the combat action. The pvp-aware helper
 	# keeps the bot from cycling through every tool after the chest is looted.
 	var equip_target := _equipable_tool(observation)
@@ -313,6 +317,65 @@ func _pvp_loadout_container(observation: Dictionary) -> Dictionary:
 		if str(container.get("kind", "")) == "chest":
 			return container
 	return {}
+
+
+func _pvp_bridge_step(observation: Dictionary) -> Dictionary:
+	if not bool(observation.get("pvp_world", false)):
+		return {}
+	var enemy_id := str(observation.get("enemy_player_id", ""))
+	if enemy_id.is_empty():
+		return {}
+	var enemy: Dictionary = {}
+	for raw_player in _as_array(observation.get("players", [])):
+		if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == enemy_id:
+			enemy = raw_player as Dictionary
+			break
+	if enemy.is_empty() or float(enemy.get("distance", 0.0)) <= float(BlockDefs.TILE) * 2.5:
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var origin := Vector2i(floori((float(self_state.get("x", 0.0)) + 10.0) / float(BlockDefs.TILE)), floori((float(self_state.get("y", 0.0)) + 28.0) / float(BlockDefs.TILE)))
+	var enemy_tile := Vector2i(floori((float(enemy.get("position", [0.0, 0.0])[0]) + 10.0) / float(BlockDefs.TILE)), floori((float(enemy.get("position", [0.0, 0.0])[1]) + 28.0) / float(BlockDefs.TILE)))
+	var direction := signi(enemy_tile.x - origin.x)
+	if direction == 0:
+		return {}
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var current_key := "%d:%d" % [origin.x, origin.y]
+	var next_x := origin.x + direction
+	var next_key := "%d:%d" % [next_x, origin.y]
+	# Only bridge from a known solid support into a known empty adjacent cell.
+	# This bounds each placement to one tile and leaves reach/collision checks to
+	# the authoritative host.
+	if not _terrain_solid(terrain, current_key) or terrain.has(next_key) and not str(terrain[next_key]).is_empty():
+		return {}
+	var inventory := _inventory(observation)
+	for block_name in ["cobblestone", "planks", "palm_planks", "pine_planks", "weeping_planks", "stone", "dirt"]:
+		if int(inventory.get(block_name, 0)) > 0:
+			return {
+				"action": Contract.ACTION_PLACE,
+				"goal": Contract.GOAL_SELF_DEFENSE,
+				"target_id": "bridge:%d:%d" % [next_x, origin.y],
+				"target": {"id": "bridge:%d:%d" % [next_x, origin.y], "x": next_x, "y": origin.y, "reachable": true},
+				"block": block_name,
+				"commit_for_ms": 700,
+				"confidence": 0.92,
+			}
+	return {}
+
+
+func _terrain_map(raw: Variant) -> Dictionary:
+	var result := {}
+	if not raw is Array:
+		return result
+	for raw_tile in raw:
+		if raw_tile is Dictionary:
+			var tile := raw_tile as Dictionary
+			result["%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]] = str(tile.get("block_name", ""))
+	return result
+
+
+func _terrain_solid(terrain: Dictionary, key: String) -> bool:
+	var name := str(terrain.get(key, "")).to_lower()
+	return not name.is_empty() and name not in ["air", "core.air", "water", "lava"]
 
 
 func _mining_tool_for_target(observation: Dictionary, target: Dictionary) -> String:
