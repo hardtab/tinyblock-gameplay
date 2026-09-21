@@ -353,6 +353,13 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 		var resource := raw_value as Dictionary
 		if resource.has("solid") and not bool(resource.get("solid", true)):
 			continue
+		# A resource marked unreachable is not a movement waypoint.  Following its
+		# coordinates makes the physics controller hold into a wall or an empty
+		# drop, then the next observation selects the same tile again.  DigPlanner
+		# runs before resource selection and owns the cases where a bounded route
+		# can actually make this block reachable.
+		if not bool(resource.get("reachable", false)):
+			continue
 		# A solid block that needs a tool must never become a movement target when
 		# the bot cannot mine it.  Chasing the block centre makes the physics
 		# controller push into the wall, finish the action, and select the same
