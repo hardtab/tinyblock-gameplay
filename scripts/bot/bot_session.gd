@@ -529,7 +529,7 @@ func _pvp_gap_ahead(origin: Vector2, destination: Vector2) -> bool:
 	# Duel arenas have two fixed six-block islands centered at -18 and 18.
 	# Stop at the edge before the next input can carry the bot into the void;
 	# the next provider decision can then place a bounded bridge block.
-	return (direction < 0.0 and support.x == 12) or (direction > 0.0 and support.x == -12)
+	return (direction < 0.0 and support.x <= 13 and support.x >= 10) or (direction > 0.0 and support.x >= -13 and support.x <= -10)
 
 
 func _set_desired_input(move_left: bool, move_right: bool, jump: bool) -> void:
