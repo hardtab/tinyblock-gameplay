@@ -996,9 +996,19 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_world_snapshot = snapshot.duplicate(true)
 	_rebuild_terrain_index(_world_snapshot.get("tiles", []))
 	world_id = str(snapshot.get("world_id", world_id))
-	var local_state: Dictionary = snapshot.get("player", {}) if snapshot.get("player", {}) is Dictionary else {}
 	var multiplayer_state: Dictionary = snapshot.get("multiplayer", {}) if snapshot.get("multiplayer", {}) is Dictionary else {}
 	var player_states: Dictionary = multiplayer_state.get("player_states", {}) if multiplayer_state.get("player_states", {}) is Dictionary else {}
+	# `player` is the host's local avatar in a P2P snapshot. A guest bot must
+	# start from its own authoritative state in multiplayer.player_states or it
+	# inherits the host coordinates and immediately falls through the terrain.
+	var local_state: Dictionary = player_states.get(own_player_id, {}) if player_states.get(own_player_id, {}) is Dictionary else {}
+	if local_state.is_empty():
+		local_state = snapshot.get("player", {}) if snapshot.get("player", {}) is Dictionary else {}
+	else:
+		var template: Dictionary = snapshot.get("player", {}) if snapshot.get("player", {}) is Dictionary else {}
+		for field in ["w", "h", "max_health"]:
+			if not local_state.has(field) and template.has(field):
+				local_state[field] = template[field]
 	_roster.clear()
 	for raw_id in player_states:
 		var player_id := str(raw_id)
@@ -1144,6 +1154,8 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 		entry["id"] = player_id
 		entry["alive"] = int(entry.get("health", 10)) > 0
 		_roster[player_id] = entry
+	if _is_pvp_world() and _pvp_enemy_player_id.is_empty() and not _roster.is_empty():
+		_pvp_enemy_player_id = str(_roster.keys()[0])
 	_update_human_count()
 
 
