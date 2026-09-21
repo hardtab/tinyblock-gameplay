@@ -5,6 +5,7 @@ const DigPlanner = preload("res://gameplay/scripts/bot/bot_dig_planner.gd")
 
 var _rng := RandomNumberGenerator.new()
 var _build_step := 0
+var _last_build_msec := -1
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 const WANDER_RADIUS := 96.0
@@ -13,6 +14,7 @@ const BOW_ARROW_MIN_SPEED := 250.0
 const BOW_ARROW_MAX_SPEED := 560.0
 const BOW_ARROW_GRAVITY := 310.0
 const CREATURE_DANGER_RADIUS := 224.0
+const BUILD_ACTION_COOLDOWN_MSEC := 8_000
 const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stone", "cobblestone", "workbench", "chest", "furnace", "glass", "stone_bricks"]
 
 
@@ -766,6 +768,9 @@ func _pvp_target(observation: Dictionary) -> Dictionary:
 
 
 func _build_target(observation: Dictionary) -> Dictionary:
+	var now_msec := int(observation.get("observed_at_msec", 0))
+	if _last_build_msec >= 0 and now_msec - _last_build_msec < BUILD_ACTION_COOLDOWN_MSEC:
+		return {}
 	var inventory := _inventory(observation)
 	var block_name := ""
 	for preferred in ["planks", "palm_planks", "pine_planks", "weeping_planks", "stone_bricks", "cobblestone", "stone", "dirt"]:
@@ -778,6 +783,20 @@ func _build_target(observation: Dictionary) -> Dictionary:
 	var tile_x := floori(float(self_state.get("x", 0.0)) / 32.0)
 	var tile_y := floori((float(self_state.get("y", 0.0)) + 28.0) / 32.0)
 	var offsets := [Vector2i(1, 0), Vector2i(2, 0), Vector2i(1, -1), Vector2i(2, -1), Vector2i(0, -1), Vector2i(3, 0)]
-	var offset: Vector2i = offsets[_build_step % offsets.size()]
-	_build_step += 1
-	return {"id": "build:%d" % _build_step, "block": block_name, "x": tile_x + offset.x, "y": tile_y + offset.y}
+	var occupied: Dictionary = {}
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		occupied["%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]] = str(tile.get("block_name", ""))
+	for offset_index in range(offsets.size()):
+		var offset: Vector2i = offsets[(_build_step + offset_index) % offsets.size()]
+		var target_x := tile_x + offset.x
+		var target_y := tile_y + offset.y
+		var occupied_name := str(occupied.get("%d:%d" % [target_x, target_y], ""))
+		if not occupied_name.is_empty() and occupied_name.to_lower() not in ["air", "core.air"]:
+			continue
+		_build_step = (_build_step + offset_index + 1) % offsets.size()
+		_last_build_msec = now_msec
+		return {"id": "build:%d" % now_msec, "block": block_name, "x": target_x, "y": target_y}
+	return {}
