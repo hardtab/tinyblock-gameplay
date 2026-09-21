@@ -1238,8 +1238,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["pvp_world"] = str(generation.get("mode", "")) == "duel"
 	snapshot["enemy_player_id"] = _enemy_player_id()
 	snapshot["bow_attack_distance"] = BlockDefs.TILE * 10.0
-	var achievements := get_node_or_null("/root/Achievements")
-	snapshot["achievements"] = {"unlocked": achievements.call("unlocked_ids") if achievements != null and achievements.has_method("unlocked_ids") else []}
+	snapshot["achievements"] = _achievement_observation()
 	if _welcome_emoji_pending and now_msec >= _welcome_emoji_due_msec:
 		snapshot["social_emoji"] = "👋"
 	else:
@@ -1590,6 +1589,17 @@ func _expire_craft_pending(now_msec: int) -> void:
 	_craft_blocked_outputs[_craft_pending_output] = true
 	_craft_pending_output = ""
 	_craft_retry_after_msec = -1
+
+
+func _achievement_observation() -> Dictionary:
+	var achievements := get_node_or_null("/root/Achievements")
+	if achievements != null and achievements.has_method("observation_for_bot"):
+		var payload: Variant = achievements.call("observation_for_bot")
+		if payload is Dictionary:
+			return (payload as Dictionary).duplicate(true)
+	if achievements != null and achievements.has_method("unlocked_ids"):
+		return {"unlocked": achievements.call("unlocked_ids"), "open": []}
+	return {"unlocked": [], "open": []}
 
 
 func _set_state(next_state: String) -> void:
