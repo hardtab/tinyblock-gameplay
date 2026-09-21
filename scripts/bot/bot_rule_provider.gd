@@ -27,6 +27,8 @@ func decide(observation: Dictionary) -> Dictionary:
 	var legal := Contract.normalize_legal_actions(observation.get("legal_actions", Contract.ALL_ACTIONS))
 	if legal.is_empty():
 		legal = PackedStringArray([Contract.ACTION_WAIT])
+	if bool(observation.get("pvp_world", false)) and not bool(observation.get("duel_started", true)):
+		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.99)
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var health := int(self_state.get("health", 10))
 	var max_health := maxi(1, int(self_state.get("max_health", 10)))

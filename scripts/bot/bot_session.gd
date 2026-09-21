@@ -88,6 +88,8 @@ var _support_place_attempted := false
 var _support_place_last_attempt_msec := -1
 var _host_player_id := ""
 var _pvp_enemy_player_id := ""
+var _duel_started := false
+var _last_duel_ready_msec := -1
 var _craft_pending_output := ""
 var _craft_retry_after_msec := -1
 var _craft_blocked_outputs: Dictionary = {}
@@ -189,6 +191,8 @@ func join_session(record: Dictionary) -> void:
 	_support_place_last_attempt_msec = -1
 	_host_player_id = ""
 	_pvp_enemy_player_id = ""
+	_duel_started = false
+	_last_duel_ready_msec = -1
 	_session_world_mode = str(record.get("world_mode", record.get("mode", ""))).to_lower()
 	_craft_pending_output = ""
 	_craft_retry_after_msec = -1
@@ -323,6 +327,7 @@ func handle_message(message: Dictionary) -> void:
 		return
 	if message_type == "duel_start":
 		_record_event("duel_start", payload)
+		_duel_started = true
 		# The host can open the lobby with a generic world snapshot and only then
 		# switch the simulation to the duel ruleset. Promote that transition here
 		# so the bot does not spend the match mining or wandering before it pins
@@ -356,6 +361,8 @@ func _process(delta: float) -> void:
 		return
 	_expire_craft_pending(now_msec)
 	var observation := _build_observation(now_msec)
+	if _is_pvp_world() and not _duel_started and now_msec - _last_duel_ready_msec >= 1000:
+		_send_duel_ready(now_msec)
 	# The brain may run at a much lower cadence than physics. Reset the held
 	# controls every frame; a movement executor reasserts them for this frame.
 	_desired_input = {"left": false, "right": false, "jump": false}
@@ -1068,10 +1075,18 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_send_inventory_snapshot()
 	_welcome_emoji_pending = human_player_count > 0
 	_welcome_emoji_due_msec = Time.get_ticks_msec() + 900 if _welcome_emoji_pending else -1
-	if _is_pvp_world() and network_client != null and network_client.has_method("send_command"):
-		network_client.call("send_command", "duel_ready", {"world_id": world_id})
+	_send_duel_ready(Time.get_ticks_msec())
 	behavior.request_decision(Time.get_ticks_msec())
 	session_ready.emit(session_id, own_player_id)
+
+
+func _send_duel_ready(now_msec: int) -> void:
+	if not _is_pvp_world() or network_client == null or not network_client.has_method("send_command"):
+		return
+	if _last_duel_ready_msec >= 0 and now_msec - _last_duel_ready_msec < 1000:
+		return
+	_last_duel_ready_msec = now_msec
+	network_client.call("send_command", "duel_ready", {"world_id": world_id})
 
 
 func _block_name_for_content_id(content_id: String) -> String:
@@ -1272,6 +1287,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["visible_resources"] = _filter_blocked_resources(snapshot.get("visible_resources", []), now_msec)
 	var generation: Dictionary = snapshot.get("generation", {}) if snapshot.get("generation", {}) is Dictionary else {}
 	snapshot["pvp_world"] = _is_pvp_world()
+	snapshot["duel_started"] = _duel_started
 	snapshot["enemy_player_id"] = _enemy_player_id()
 	snapshot["bow_attack_distance"] = BlockDefs.TILE * 10.0
 	snapshot["achievements"] = _achievement_observation()
