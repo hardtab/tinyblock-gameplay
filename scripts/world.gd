@@ -724,7 +724,9 @@ func create_duel_world(seed: int = 0) -> void:
 		# Put the battle cache on the inside edge of each island.  The outer
 		# half contains the biome tree and fluid hazards; keeping the cache and
 		# spawn on the bridge-facing side gives both players a clear combat lane.
-		var chest_pos := Vector2i(center.x + (4 if island_index == 0 else -4), center.y - 1)
+		# Keep the cache beside, not above, the spawn cell.  A chest directly over
+		# the avatar overlaps its head hitbox and traps a duel guest under it.
+		var chest_pos := Vector2i(center.x + (3 if island_index == 0 else -3), center.y - 1)
 		set_block(chest_pos.x, chest_pos.y, int(BlockDefs.BLOCKS.chest.id))
 		containers[chest_pos] = {
 			"contents": shared_contents.duplicate(true),
