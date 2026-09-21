@@ -51,7 +51,15 @@ func decide(observation: Dictionary) -> Dictionary:
 	var social_distance := float(social_target.get("distance", 9999.0))
 	var preferred_distance := float(observation.get("preferred_player_distance", PREFERRED_PLAYER_DISTANCE))
 	var welcome_emoji := str(observation.get("social_emoji", ""))
-	if not welcome_emoji.is_empty() and Contract.ACTION_SEND_EMOJI in legal:
+	var bridge_step := _approach_bridge_step(observation, social_target)
+	# A pending wave should wait until the bot can actually reach the player.
+	# Crossing the gap comes first; the same emoji stays available next decision.
+	var social_bridge_ready := (
+		not bridge_step.is_empty()
+		and str(bridge_step.get("goal", "")) == Contract.GOAL_SOCIAL_FOLLOW
+		and Contract.ACTION_PLACE in legal
+	)
+	if not welcome_emoji.is_empty() and Contract.ACTION_SEND_EMOJI in legal and not social_bridge_ready:
 		return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_SEND_EMOJI, {"id": social_target_id, "emoji": welcome_emoji}, 500, 0.78)
 
 	# Duel arenas provide a shared battle chest. Loot it before committing to the
@@ -64,7 +72,6 @@ func decide(observation: Dictionary) -> Dictionary:
 		if not _has_pvp_loadout(observation) and Contract.ACTION_MOVE_TO in legal:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, pvp_chest, 1800, 0.94)
 
-	var bridge_step := _pvp_bridge_step(observation)
 	if not bridge_step.is_empty() and Contract.ACTION_PLACE in legal:
 		return Contract.normalize_decision(bridge_step)
 
@@ -319,23 +326,22 @@ func _pvp_loadout_container(observation: Dictionary) -> Dictionary:
 	return {}
 
 
-func _pvp_bridge_step(observation: Dictionary) -> Dictionary:
-	if not bool(observation.get("pvp_world", false)):
-		return {}
-	var enemy_id := str(observation.get("enemy_player_id", ""))
-	if enemy_id.is_empty():
-		return {}
-	var enemy: Dictionary = {}
-	for raw_player in _as_array(observation.get("players", [])):
-		if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == enemy_id:
-			enemy = raw_player as Dictionary
-			break
-	if enemy.is_empty() or float(enemy.get("distance", 0.0)) <= float(BlockDefs.TILE) * 2.5:
+func _approach_bridge_step(observation: Dictionary, social_target: Dictionary) -> Dictionary:
+	var approach := social_target
+	var goal := Contract.GOAL_SOCIAL_FOLLOW
+	var min_distance := float(observation.get("preferred_player_distance", PREFERRED_PLAYER_DISTANCE))
+	if bool(observation.get("pvp_world", false)):
+		approach = _pvp_target(observation)
+		goal = Contract.GOAL_SELF_DEFENSE
+		min_distance = float(BlockDefs.TILE) * 2.5
+	if approach.is_empty() or float(approach.get("distance", 0.0)) <= min_distance:
 		return {}
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
-	var origin := Vector2i(floori((float(self_state.get("x", 0.0)) + 10.0) / float(BlockDefs.TILE)), floori((float(self_state.get("y", 0.0)) + 28.0) / float(BlockDefs.TILE)))
-	var enemy_tile := Vector2i(floori((float(enemy.get("position", [0.0, 0.0])[0]) + 10.0) / float(BlockDefs.TILE)), floori((float(enemy.get("position", [0.0, 0.0])[1]) + 28.0) / float(BlockDefs.TILE)))
-	var direction := signi(enemy_tile.x - origin.x)
+	var tile := float(BlockDefs.TILE)
+	var origin := Vector2i(floori((float(self_state.get("x", 0.0)) + 10.0) / tile), floori((float(self_state.get("y", 0.0)) + 28.0) / tile))
+	var approach_position := Contract.target_position(approach)
+	var approach_tile := Vector2i(floori((approach_position.x + 10.0) / tile), floori((approach_position.y + 28.0) / tile))
+	var direction := signi(approach_tile.x - origin.x)
 	if direction == 0:
 		return {}
 	var terrain := _terrain_map(observation.get("terrain_tiles", []))
@@ -344,7 +350,8 @@ func _pvp_bridge_step(observation: Dictionary) -> Dictionary:
 	var next_key := "%d:%d" % [next_x, origin.y]
 	# Only bridge from a known solid support into a known empty adjacent cell.
 	# This bounds each placement to one tile and leaves reach/collision checks to
-	# the authoritative host.
+	# the authoritative host. The same step is used to close a duel gap and to
+	# walk up to another player for a wave.
 	if not _terrain_solid(terrain, current_key) or terrain.has(next_key) and not str(terrain[next_key]).is_empty():
 		return {}
 	var inventory := _inventory(observation)
@@ -352,12 +359,12 @@ func _pvp_bridge_step(observation: Dictionary) -> Dictionary:
 		if int(inventory.get(block_name, 0)) > 0:
 			return {
 				"action": Contract.ACTION_PLACE,
-				"goal": Contract.GOAL_SELF_DEFENSE,
+				"goal": goal,
 				"target_id": "bridge:%d:%d" % [next_x, origin.y],
 				"target": {"id": "bridge:%d:%d" % [next_x, origin.y], "x": next_x, "y": origin.y, "reachable": true},
 				"block": block_name,
 				"commit_for_ms": 700,
-				"confidence": 0.92,
+				"confidence": 0.92 if goal == Contract.GOAL_SELF_DEFENSE else 0.8,
 			}
 	return {}
 
