@@ -68,7 +68,7 @@ func decide(observation: Dictionary) -> Dictionary:
 	# pinned opponent: otherwise the bot can start the match empty-handed and
 	# never get a chance to equip the bow, weapon, pickaxe, footwear, or blocks.
 	var pvp_chest := _pvp_loadout_container(observation)
-	if not pvp_chest.is_empty() and bool(observation.get("pvp_world", false)):
+	if not pvp_chest.is_empty() and bool(observation.get("pvp_world", false)) and not bool(observation.get("pvp_chest_opened", false)) and not _has_pvp_loadout(observation):
 		if bool(pvp_chest.get("reachable", false)) and Contract.ACTION_OPEN_CONTAINER in legal:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_OPEN_CONTAINER, pvp_chest, 900, 0.98)
 		if not _has_pvp_loadout(observation) and Contract.ACTION_MOVE_TO in legal:

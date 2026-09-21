@@ -89,6 +89,7 @@ var _support_place_last_attempt_msec := -1
 var _host_player_id := ""
 var _pvp_enemy_player_id := ""
 var _duel_started := false
+var _pvp_chest_opened := false
 var _last_duel_ready_msec := -1
 var _craft_pending_output := ""
 var _craft_retry_after_msec := -1
@@ -192,6 +193,7 @@ func join_session(record: Dictionary) -> void:
 	_host_player_id = ""
 	_pvp_enemy_player_id = ""
 	_duel_started = false
+	_pvp_chest_opened = false
 	_last_duel_ready_msec = -1
 	_session_world_mode = str(record.get("world_mode", record.get("mode", ""))).to_lower()
 	_craft_pending_output = ""
@@ -1276,7 +1278,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["craft_blocked_outputs"] = _craft_blocked_outputs.keys()
 	snapshot["terrain_tiles"] = _terrain_observation(snapshot["self"] as Dictionary)
 	snapshot["visible_containers"] = _visible_containers_from_snapshot(snapshot, snapshot["self"] as Dictionary)
-	if _is_pvp_world() and _duel_fallback_container(snapshot["self"] as Dictionary).size() > 0:
+	if _is_pvp_world() and not _pvp_chest_opened and _duel_fallback_container(snapshot["self"] as Dictionary).size() > 0:
 		var has_chest := false
 		for raw_container in snapshot["visible_containers"]:
 			if raw_container is Dictionary and str((raw_container as Dictionary).get("kind", "")) == "chest":
@@ -1288,6 +1290,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	var generation: Dictionary = snapshot.get("generation", {}) if snapshot.get("generation", {}) is Dictionary else {}
 	snapshot["pvp_world"] = _is_pvp_world()
 	snapshot["duel_started"] = _duel_started
+	snapshot["pvp_chest_opened"] = _pvp_chest_opened
 	snapshot["enemy_player_id"] = _enemy_player_id()
 	snapshot["bow_attack_distance"] = BlockDefs.TILE * 10.0
 	snapshot["achievements"] = _achievement_observation()
@@ -1573,8 +1576,14 @@ func _handle_action_result(payload: Dictionary) -> void:
 	if action == "open_container":
 		var container_key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
 		_pending_action_targets.erase(container_key)
-		_apply_tile_batch({"tiles": [payload]})
-		_update_snapshot_container(container_key, payload.get("container", null))
+		if bool(payload.get("accepted", false)) and _is_pvp_world():
+			_pvp_chest_opened = true
+			# The authoritative inventory snapshot follows this acknowledgement. Do
+			# not let a stale chest payload trigger another open before it arrives.
+			_update_snapshot_container(container_key, {"contents": {}, "loot_generated": true})
+		else:
+			_apply_tile_batch({"tiles": [payload]})
+			_update_snapshot_container(container_key, payload.get("container", null))
 		return
 	if action == "craft_recipe":
 		var accepted := bool(payload.get("accepted", false))
