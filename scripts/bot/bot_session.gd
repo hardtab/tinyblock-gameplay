@@ -59,6 +59,7 @@ var _snapshot_chunks: Array[String] = []
 var _world_snapshot: Dictionary = {}
 var _roster: Dictionary = {}
 var _recent_events: Array[Dictionary] = []
+var _action_history: Array[Dictionary] = []
 var _last_emoji_sent_msec := -1
 var _previous_emoji := ""
 var _social_last_sent_msec := -1
@@ -127,6 +128,8 @@ func _init() -> void:
 	behavior.decision_proposed.connect(_on_decision_proposed)
 	behavior.decision_rejected.connect(_on_decision_rejected)
 	behavior.decision_started.connect(_on_decision_started)
+	executor.action_finished.connect(_on_executor_action_finished)
+	executor.action_failed.connect(_on_executor_action_failed)
 
 
 func configure(backend_adapter: Object = null, multiplayer_adapter: Object = null, options: Dictionary = {}) -> void:
@@ -1442,6 +1445,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["own_player_id"] = own_player_id
 	snapshot["players"] = _roster.values()
 	snapshot["recent_events"] = _recent_events.duplicate(true)
+	snapshot["action_history"] = _action_history.duplicate(true)
 	snapshot["world_id"] = world_id
 	snapshot["legal_actions"] = Contract.ALL_ACTIONS
 	snapshot["self_defense"] = safety.observation_state(now_msec)
@@ -1700,11 +1704,13 @@ func _on_decision_proposed(decision: Dictionary) -> void:
 
 
 func _on_decision_rejected(decision: Dictionary, reason: String) -> void:
+	_record_action_history("rejected", decision, reason)
 	decision_logged.emit({"event": "decision_rejected", "decision": decision.duplicate(true), "reason": reason, "at_msec": Time.get_ticks_msec()})
 
 
 func _on_decision_started(decision: Dictionary) -> void:
 	var now_msec := Time.get_ticks_msec()
+	_record_action_history("started", decision)
 	var action := str(decision.get("action", ""))
 	if action == Contract.ACTION_EQUIP:
 		var item_name := str(decision.get("target_id", ""))
@@ -1743,8 +1749,35 @@ func _on_decision_started(decision: Dictionary) -> void:
 	decision_logged.emit({"event": "decision_started", "decision": decision.duplicate(true), "at_msec": now_msec})
 
 
+func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
+	_record_action_history("finished", decision, reason)
+
+
+func _on_executor_action_failed(decision: Dictionary, reason: String) -> void:
+	_record_action_history("failed", decision, reason)
+
+
+func _record_action_history(phase: String, decision: Dictionary, reason: String = "") -> void:
+	var entry := {
+		"at_msec": Time.get_ticks_msec(),
+		"phase": phase,
+		"action": str(decision.get("action", "")),
+		"goal": str(decision.get("goal", "")),
+		"target_id": str(decision.get("target_id", "")),
+	}
+	if not reason.is_empty():
+		entry["reason"] = reason
+	_action_history.append(entry)
+	while _action_history.size() > Perception.DEFAULT_MAX_EVENTS:
+		_action_history.pop_front()
+
+
 func _handle_action_result(payload: Dictionary) -> void:
 	var action := str(payload.get("action", ""))
+	_record_action_history("result", {
+		"action": action,
+		"target_id": str(payload.get("target_id", "")),
+	}, "accepted" if bool(payload.get("accepted", false)) else "rejected")
 	if action == "equip_item":
 		_pending_action_targets.erase("equip")
 		if bool(payload.get("accepted", false)) and payload.get("equipment_slots", null) is Dictionary:

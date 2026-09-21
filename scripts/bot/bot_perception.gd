@@ -35,6 +35,7 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 		"legal_actions": Contract.normalize_legal_actions(snapshot.get("legal_actions", Contract.ALL_ACTIONS)),
 		"current_goal": str(snapshot.get("current_goal", Contract.GOAL_IDLE)),
 		"recent_events": recent_events,
+		"action_history": _bounded_events(snapshot.get("action_history", []), DEFAULT_MAX_EVENTS),
 		"loaded_radius": radius,
 		"world_id": str(snapshot.get("world_id", "")),
 		"own_player_id": own_player_id,

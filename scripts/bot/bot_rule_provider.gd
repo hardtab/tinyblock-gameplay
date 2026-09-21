@@ -163,10 +163,6 @@ func decide(observation: Dictionary) -> Dictionary:
 		if dig_action in legal:
 			return Contract.normalize_decision(dig_step)
 
-	var build_target := _build_target(observation)
-	if not build_target.is_empty() and Contract.ACTION_PLACE in legal:
-		return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, build_target, 700, 0.61)
-
 	var resources: Array = _as_array(observation.get("visible_resources", []))
 	if not resources.is_empty() and Contract.ACTION_MINE in legal:
 		var resource := _best_resource(resources, observation)
@@ -193,6 +189,13 @@ func decide(observation: Dictionary) -> Dictionary:
 				continue
 			if bool(container.get("reachable", false)):
 				return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_OPEN_CONTAINER, container, 900, 0.76)
+
+	# Building is a low-frequency background activity.  Resource gathering and
+	# containers always win first; otherwise the bot can place dirt on top of the
+	# same local mining target and look idle while it repeats PLACE commands.
+	var build_target := _build_target(observation)
+	if not build_target.is_empty() and Contract.ACTION_PLACE in legal:
+		return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, build_target, 700, 0.61)
 
 	# Social proximity is a context, not the bot's whole job.  Only follow after
 	# the nearby achievement, gathering, and building opportunities have been
@@ -795,6 +798,16 @@ func _build_target(observation: Dictionary) -> Dictionary:
 		var target_y := tile_y + offset.y
 		var occupied_name := str(occupied.get("%d:%d" % [target_x, target_y], ""))
 		if not occupied_name.is_empty() and occupied_name.to_lower() not in ["air", "core.air"]:
+			continue
+		var conflicts_with_resource := false
+		for raw_resource in _as_array(observation.get("visible_resources", [])):
+			if not raw_resource is Dictionary:
+				continue
+			var resource := raw_resource as Dictionary
+			if int(resource.get("x", 2147483647)) == target_x and int(resource.get("y", 2147483647)) == target_y:
+				conflicts_with_resource = true
+				break
+		if conflicts_with_resource:
 			continue
 		_build_step = (_build_step + offset_index + 1) % offsets.size()
 		_last_build_msec = now_msec
