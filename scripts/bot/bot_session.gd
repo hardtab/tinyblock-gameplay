@@ -482,7 +482,11 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
 		_world_snapshot["self"] = self_state
-		return {"done": false, "reason": "edge_guard"}
+		# Finish the movement action at a safe edge so the rule provider can
+		# re-evaluate the next step. In PvP this hands control to the bounded
+		# bridge planner instead of holding MOVE_TO until the bot walks/falls off
+		# the island.
+		return {"done": true, "reason": "edge_guard"}
 	_set_desired_input(direction < 0.0, direction > 0.0, false)
 	_advance_local_physics(self_state, delta, false)
 	var next_position := Contract.target_position(self_state)
