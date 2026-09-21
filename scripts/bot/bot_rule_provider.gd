@@ -297,6 +297,11 @@ func _equipable_tool(observation: Dictionary) -> String:
 				return footwear
 	var current := str(equipment.get("hand", ""))
 	if pvp_world:
+		# A loaded bow is the bot's preferred PvP weapon. Do not immediately
+		# switch to a melee tool on the next decision or the bot oscillates between
+		# bow and axe before it ever gets a shot off.
+		if current == "bow" and int(inventory.get("arrow", 0)) > 0:
+			return ""
 		if int(inventory.get("bow", 0)) > 0 and int(inventory.get("arrow", 0)) > 0 and current != "bow":
 			return "bow"
 		for preferred in ["stone_sword", "stone_axe", "wooden_pickaxe", "stone_pickaxe", "copper_pickaxe"]:
