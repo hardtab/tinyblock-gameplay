@@ -102,6 +102,7 @@ const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
 const PLAYER_INPUT_INTERVAL_MSEC := 50
 const DUEL_PROTOCOL_VERSION := 3
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
+const TREE_CLIMB_SPEED := -3.2
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
 const ACTION_RETRY_BLOCK_MSEC := 8_000
@@ -997,6 +998,9 @@ func _climb_step(self_state: Dictionary, destination: Vector2, delta: float) -> 
 	var origin := Contract.target_position(self_state)
 	if not _local_climb_contact(self_state):
 		_climb_active = false
+		self_state["tree_ghost"] = false
+		self_state["climbing"] = false
+		self_state["climb_col"] = -1
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
 		_world_snapshot["self"] = self_state
@@ -1006,8 +1010,14 @@ func _climb_step(self_state: Dictionary, destination: Vector2, delta: float) -> 
 		_climb_column = floori((origin.x + 10.0 + direction * 18.0) / float(BlockDefs.TILE))
 		_climb_active = true
 		_climb_time_left_msec = 1_200
+	# Mirror WorldSim's climb state in the legacy player snapshot.  Without
+	# these flags the host treats the foliage as an ordinary solid block and
+	# immediately pushes the bot back into the same cell after every frame.
+	self_state["tree_ghost"] = true
+	self_state["climbing"] = true
+	self_state["climb_col"] = _climb_column
 	_climb_time_left_msec -= int(maxf(delta, 0.0) * 1000.0)
-	var climb_step := 3.2 * maxf(delta, 0.0) * NETWORK_PHYSICS_TICKS_PER_SECOND
+	var climb_step := absf(TREE_CLIMB_SPEED) * maxf(delta, 0.0) * NETWORK_PHYSICS_TICKS_PER_SECOND
 	var next_x := lerpf(origin.x, float(_climb_column * BlockDefs.TILE + 6), clampf(delta * 8.0, 0.0, 1.0))
 	var next_y := origin.y - climb_step
 	var still_on_tree := _terrain_climbable_at(_climb_column, floori((next_y + 14.0) / float(BlockDefs.TILE))) or _terrain_climbable_at(_climb_column, floori((next_y + 30.0) / float(BlockDefs.TILE)))
@@ -1016,11 +1026,14 @@ func _climb_step(self_state: Dictionary, destination: Vector2, delta: float) -> 
 	if _climb_active:
 		self_state["x"] = next_x
 		self_state["y"] = next_y
-		self_state["vx"] = (next_x - origin.x) / NETWORK_PHYSICS_TICKS_PER_SECOND
-		self_state["vy"] = -3.2
+		self_state["vx"] = 0.0
+		self_state["vy"] = TREE_CLIMB_SPEED
 		self_state["facing"] = 1 if destination.x >= origin.x else -1
 		self_state["on_ground"] = false
 	else:
+		self_state["tree_ghost"] = false
+		self_state["climbing"] = false
+		self_state["climb_col"] = -1
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
 	_world_snapshot["self"] = self_state
