@@ -471,6 +471,12 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		destination = Navigator.preferred_follow_target(Vector2(target.x, origin.y), origin, float(observation.get("preferred_player_distance", 84.0)))
 	elif action == Contract.ACTION_FLEE_FROM:
 		destination = Navigator.step_away_from(origin, Vector2(target.x, origin.y), 120.0)
+	elif action == Contract.ACTION_MOVE_TO and _is_pvp_world():
+		# Preserve the enemy's vertical position in a duel. The previous generic
+		# movement branch flattened every destination to the bot's current Y, so a
+		# player who jumped onto a block looked horizontally reachable and the bot
+		# waited instead of starting a jump.
+		destination = target
 	else:
 		destination.y = origin.y
 	# In a duel, never let the short-horizon jump planner consume an input at
@@ -493,7 +499,11 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	var route_kind := str(route_step.get("kind", ""))
 	if not route_step.is_empty():
 		destination = route_step.get("position", destination)
-	var hint := "" if _is_pvp_world() else (route_kind if route_kind in ["jump", "climb"] else _movement_hint(origin, destination))
+	var hint := ""
+	if _is_pvp_world():
+		hint = _pvp_jump_hint(origin, destination)
+	else:
+		hint = route_kind if route_kind in ["jump", "climb"] else _movement_hint(origin, destination)
 	if _climb_active or hint == "climb":
 		_set_desired_input(signf(destination.x - origin.x) < 0.0, signf(destination.x - origin.x) > 0.0, true)
 		return _climb_step(self_state, destination, delta)
@@ -547,6 +557,19 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		self_state["vx"] = 0.0
 	_world_snapshot["self"] = self_state
 	return {"done": done, "reason": "movement_step"}
+
+
+func _pvp_jump_hint(origin: Vector2, destination: Vector2) -> String:
+	# The edge guard above still owns void traversal and bridge placement. Once
+	# the bot is on a solid island, use the same collision-aware jump hint as
+	# ordinary worlds and additionally jump when the pinned opponent is visibly
+	# above us. This keeps duel traversal grounded without disabling pursuit.
+	var terrain_hint := _movement_hint(origin, destination)
+	if terrain_hint in ["jump", "climb"]:
+		return terrain_hint
+	if destination.y < origin.y - float(BlockDefs.TILE) * 0.45:
+		return "jump"
+	return ""
 
 
 func _pvp_gap_ahead(origin: Vector2, destination: Vector2) -> bool:

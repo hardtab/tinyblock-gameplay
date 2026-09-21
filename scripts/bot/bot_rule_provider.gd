@@ -9,6 +9,9 @@ var _build_step := 0
 const PREFERRED_PLAYER_DISTANCE := 84.0
 const WANDER_RADIUS := 96.0
 const WANDER_COMMIT_MSEC := 1800
+const BOW_ARROW_MIN_SPEED := 250.0
+const BOW_ARROW_MAX_SPEED := 560.0
+const BOW_ARROW_GRAVITY := 310.0
 const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stone", "cobblestone", "workbench", "chest", "furnace", "glass", "stone_bricks"]
 
 
@@ -90,7 +93,11 @@ func decide(observation: Dictionary) -> Dictionary:
 	if not ranged_target.is_empty() and Contract.ACTION_FIRE_BOW in legal:
 		var self_position := Contract.target_position(self_state)
 		var target_position := Contract.target_position(ranged_target)
-		var direction := target_position - self_position
+		# Arrow physics applies gravity after release. Aim at the player's center
+		# with a ballistic compensation instead of pointing at the stale top-left
+		# snapshot coordinate; otherwise long shots consistently pass underneath.
+		var relative_target := (target_position + Vector2(10.0, 14.0)) - (self_position + Vector2(10.0, 11.76))
+		var direction := bow_aim_direction(relative_target, 1.0)
 		return _decision(
 			Contract.GOAL_SELF_DEFENSE if bool(observation.get("pvp_world", false)) else Contract.GOAL_SURVIVE,
 			Contract.ACTION_FIRE_BOW,
@@ -504,6 +511,26 @@ func _ranged_target(observation: Dictionary) -> Dictionary:
 		if bool(threat.get("alive", true)) and float(threat.get("distance", 9999.0)) <= max_distance:
 			return threat
 	return {}
+
+
+static func bow_aim_direction(relative_target: Vector2, charge: float = 1.0, arrow_speed: float = BOW_ARROW_MAX_SPEED, gravity: float = BOW_ARROW_GRAVITY) -> Vector2:
+	if relative_target.length() < 0.1:
+		return Vector2.RIGHT
+	var speed := lerpf(BOW_ARROW_MIN_SPEED, arrow_speed, clampf(charge, 0.0, 1.0) if arrow_speed > BOW_ARROW_MIN_SPEED else 1.0)
+	var horizontal_distance := absf(relative_target.x)
+	if horizontal_distance < 0.1 or speed <= 0.0:
+		return relative_target.normalized()
+	# Iterate once: the initial horizontal flight estimate gives a useful drop,
+	# then the compensated angle gives a better flight-time estimate for the
+	# second drop correction. Coordinates use +Y downward, so compensation is
+	# upward (more negative Y).
+	var flight_time := horizontal_distance / speed
+	var compensated_y := relative_target.y - 0.5 * gravity * flight_time * flight_time
+	var direction := Vector2(relative_target.x, compensated_y).normalized()
+	var horizontal_speed := maxf(absf(direction.x) * speed, 1.0)
+	flight_time = horizontal_distance / horizontal_speed
+	compensated_y = relative_target.y - 0.5 * gravity * flight_time * flight_time
+	return Vector2(relative_target.x, compensated_y).normalized()
 
 
 func _pvp_target(observation: Dictionary) -> Dictionary:
