@@ -409,6 +409,7 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var best_score := INF
 	var inventory := _inventory(observation)
 	var needs_wood := _needs_wood_progression(inventory)
+	var needs_leaves := _needs_leaf_progression(inventory)
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var nourishment := clampi(int(self_state.get("nourishment", MAX_NOURISHMENT)), 0, MAX_NOURISHMENT)
 	var needs_food := nourishment <= HUNGER_FORAGE_THRESHOLD and _best_food_in_inventory(observation).is_empty()
@@ -439,11 +440,16 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			score += 80.0
 		var block_name := str(resource.get("block_name", "")).to_lower()
 		if needs_wood and _is_wood_log_name(block_name):
-			score -= 70.0
+			score -= 220.0
 		elif needs_wood and _is_leaf_name(block_name):
-			score -= 40.0
-		elif needs_wood and block_name in ["dirt", "grass", "sand", "gravel"]:
-			score += 35.0
+			score -= 160.0
+		elif needs_leaves and _is_leaf_name(block_name):
+			score -= 200.0
+		elif needs_wood or needs_leaves:
+			# Ice/dirt/sand dominate tiny starter islands by proximity. Keep them
+			# available, but never ahead of the progression tree/leaves.
+			if block_name in ["ice", "dirt", "grass", "sand", "gravel", "snow", "cobblestone", "stone"]:
+				score += 180.0
 		# Leaves are the ordinary forage path for wild berries. Prefer them when
 		# hungry and the inventory has no ready food, otherwise the bot starves
 		# while happily mining dirt beside berry bushes.
@@ -600,6 +606,19 @@ func _needs_wood_progression(inventory: Dictionary) -> bool:
 	if int(inventory.get("stone_pickaxe", 0)) > 0 or int(inventory.get("copper_pickaxe", 0)) > 0:
 		return false
 	return _max_named_stack(inventory, PLANK_OUTPUTS) < 3 or _count_named(inventory, WOOD_BLOCK_NAMES) < 1
+
+
+func _needs_leaf_progression(inventory: Dictionary) -> bool:
+	# Trail boots need two leaves once a wooden tool path is underway.
+	if int(inventory.get("trail_boots", 0)) > 0:
+		return false
+	if _count_named(inventory, LEAF_BLOCK_NAMES) >= 2:
+		return false
+	return (
+		int(inventory.get("wooden_pickaxe", 0)) > 0
+		or _max_named_stack(inventory, PLANK_OUTPUTS) >= 1
+		or _count_named(inventory, WOOD_BLOCK_NAMES) >= 1
+	)
 
 
 func _count_named(inventory: Dictionary, names: Array) -> int:

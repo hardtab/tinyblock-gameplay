@@ -1793,6 +1793,13 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["craft_blocked_outputs"] = _active_craft_blocked_outputs(now_msec)
 	snapshot["food_eat_cooldown_until_msec"] = _food_eat_cooldown_until_msec
 	snapshot["terrain_tiles"] = _terrain_observation(snapshot["self"] as Dictionary)
+	# Rebuild every tick from the live terrain index. A one-shot list from the
+	# join snapshot froze the bot on nearby ice while the starter tree grew and
+	# stayed out of the stale resource set.
+	snapshot["visible_resources"] = _filter_blocked_resources(
+		_visible_resources_from_terrain(snapshot["self"] as Dictionary),
+		now_msec,
+	)
 	snapshot["visible_containers"] = _visible_containers_from_snapshot(snapshot, snapshot["self"] as Dictionary)
 	if _is_pvp_world() and not _pvp_chest_opened and _duel_fallback_container(snapshot["self"] as Dictionary).size() > 0:
 		var has_chest := false
@@ -1802,7 +1809,6 @@ func _build_observation(now_msec: int) -> Dictionary:
 				break
 		if not has_chest:
 			snapshot["visible_containers"].append(_duel_fallback_container(snapshot["self"] as Dictionary))
-	snapshot["visible_resources"] = _filter_blocked_resources(snapshot.get("visible_resources", []), now_msec)
 	var generation: Dictionary = snapshot.get("generation", {}) if snapshot.get("generation", {}) is Dictionary else {}
 	snapshot["pvp_world"] = _is_pvp_world()
 	snapshot["duel_started"] = _duel_started
@@ -1893,6 +1899,41 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 			"hardness": float(block.get("hardness", 0.0)),
 		})
 	return result
+
+
+func _visible_resources_from_terrain(self_state: Dictionary) -> Array:
+	var resources: Array = []
+	var origin := Contract.target_position(self_state)
+	var max_distance := observation_radius + float(BlockDefs.TILE)
+	for key in _terrain_tiles:
+		var parts := str(key).split(":")
+		if parts.size() != 2:
+			continue
+		var tile_x := int(parts[0])
+		var tile_y := int(parts[1])
+		var block_name := str(_terrain_tiles[key])
+		var block_definition: Dictionary = _block_entry(block_name)
+		var solid := bool(block_definition.get("solid", false)) and not bool(block_definition.get("fluid", false))
+		if block_name.is_empty() or block_name == "air" or not solid:
+			continue
+		var position := Vector2((float(tile_x) + 0.5) * BlockDefs.TILE, (float(tile_y) + 0.5) * BlockDefs.TILE)
+		if origin.distance_to(position) > max_distance:
+			continue
+		var content_id := str(block_definition.get("content_id", "core.%s" % block_name))
+		resources.append({
+			"id": "tile:%d:%d" % [tile_x, tile_y],
+			"x": tile_x,
+			"y": tile_y,
+			"content_id": content_id,
+			"block_name": block_name,
+			"harvest_tier": _block_harvest_tier(block_definition),
+			"hardness": float(block_definition.get("hardness", 0.0)),
+			"position": [position.x, position.y],
+			"reachable": origin.distance_to(position) <= float(BlockDefs.TILE) * 2.5,
+		})
+		if resources.size() >= 256:
+			break
+	return resources
 
 
 func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -> Array:
