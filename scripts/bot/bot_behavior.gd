@@ -108,14 +108,20 @@ func _is_aggressive_player_decision(decision: Dictionary, observation: Dictionar
 		(not target_id.is_empty() and target_id in [enemy_id, attacker_id])
 		or _observation_has_player(observation, target_id)
 	)
+	var goal := str(decision.get("goal", ""))
+	# Friendly social follow must not use the duel chase cadence. Treating every
+	# MOVE_NEAR_PLAYER toward a nearby human as "aggressive" re-decided every
+	# ~450ms and produced the endless jump-beside-player loop on community.
+	if goal == Contract.GOAL_SOCIAL_FOLLOW:
+		return false
 	if action in [Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER]:
 		return targets_player
 	if action in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_MOVE_TO, Contract.ACTION_FOLLOW]:
-		if targets_player:
+		if targets_player and (goal == Contract.GOAL_SELF_DEFENSE or target_id in [enemy_id, attacker_id]):
 			return true
-		return str(decision.get("goal", "")) == Contract.GOAL_SELF_DEFENSE and (not enemy_id.is_empty() or not attacker_id.is_empty())
+		return goal == Contract.GOAL_SELF_DEFENSE and (not enemy_id.is_empty() or not attacker_id.is_empty())
 	if action in [Contract.ACTION_PLACE, Contract.ACTION_EQUIP]:
-		return str(decision.get("goal", "")) == Contract.GOAL_SELF_DEFENSE and (
+		return goal == Contract.GOAL_SELF_DEFENSE and (
 			targets_player or not enemy_id.is_empty() or not attacker_id.is_empty()
 		)
 	return false

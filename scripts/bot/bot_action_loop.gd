@@ -12,10 +12,24 @@ const ALWAYS_LEGAL: PackedStringArray = [
 	Contract.ACTION_LOOK_AT,
 ]
 
+## Social chase actions alternate in the rule provider; treat them as one streak
+## so MOVE_NEAR_PLAYER ↔ FOLLOW cannot bypass the cooldown forever.
+const SOCIAL_MOVE_FAMILY: PackedStringArray = [
+	Contract.ACTION_MOVE_NEAR_PLAYER,
+	Contract.ACTION_FOLLOW,
+]
+
+
+static func _streak_family(action: String) -> PackedStringArray:
+	if action in SOCIAL_MOVE_FAMILY:
+		return SOCIAL_MOVE_FAMILY
+	return PackedStringArray([action])
+
 
 static func consecutive_started_streak(history: Array, action: String) -> int:
 	if action.is_empty():
 		return 0
+	var family := _streak_family(action)
 	var streak := 0
 	for index in range(history.size() - 1, -1, -1):
 		if not history[index] is Dictionary:
@@ -23,7 +37,7 @@ static func consecutive_started_streak(history: Array, action: String) -> int:
 		var entry := history[index] as Dictionary
 		if str(entry.get("phase", "")) != "started":
 			continue
-		if str(entry.get("action", "")) != action:
+		if str(entry.get("action", "")) not in family:
 			break
 		streak += 1
 	return streak
@@ -43,7 +57,9 @@ static func refresh_blocked_actions(
 		if action in ALWAYS_LEGAL:
 			continue
 		if consecutive_started_streak(history, action) >= STREAK_LIMIT:
-			result[action] = maxi(int(result.get(action, 0)), now_msec + COOLDOWN_MSEC)
+			var until := maxi(int(result.get(action, 0)), now_msec + COOLDOWN_MSEC)
+			for related in _streak_family(action):
+				result[str(related)] = maxi(int(result.get(str(related), 0)), until)
 	return result
 
 

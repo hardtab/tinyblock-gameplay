@@ -2,9 +2,11 @@ class_name BotPerception
 extends RefCounted
 
 const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
+const BlockDefs = preload("res://gameplay/scripts/block_defs.gd")
 
 const DEFAULT_RADIUS := 256.0
 const DEFAULT_MAX_EVENTS := 12
+const REACHABLE_DISTANCE := float(BlockDefs.TILE) * 2.5
 
 
 static func build(snapshot: Dictionary, own_player_id: String, radius: float = DEFAULT_RADIUS, now_msec: int = 0) -> Dictionary:
@@ -17,7 +19,10 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 	var threats := _normalize_entities(snapshot.get("threats", snapshot.get("creatures", [])), "", self_position, radius, true)
 	var resources := _normalize_entities(snapshot.get("visible_resources", snapshot.get("resources", [])), "", self_position, radius, false)
 	for resource in resources:
-		resource["reachable"] = bool(resource.get("reachable", false))
+		# Recalculate reachability from the current self position. Snapshot tiles are
+		# built once and would otherwise keep a stale reachable=true after the bot
+		# walks or falls away from the block.
+		resource["reachable"] = float(resource.get("distance", 9999.0)) <= REACHABLE_DISTANCE
 	players.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.get("distance", 9999.0)) < float(b.get("distance", 9999.0)))
 	threats.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.get("distance", 9999.0)) < float(b.get("distance", 9999.0)))
 	resources.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.get("distance", 9999.0)) < float(b.get("distance", 9999.0)))

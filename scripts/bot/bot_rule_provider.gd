@@ -9,6 +9,11 @@ var _build_step := 0
 var _last_build_msec := -1
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
+## Only chase a player once they are clearly farther than the preferred gap.
+## Without slack, distance 84.6 forever re-issues MOVE_NEAR / FOLLOW and the
+## bot looks like it is only hopping beside the player.
+const SOCIAL_FOLLOW_START_SLACK := 48.0
+const SOCIAL_IDLE_EMOJI_COOLDOWN_MSEC := 18_000
 const WANDER_RADIUS := 96.0
 const WANDER_COMMIT_MSEC := 1800
 const BOW_ARROW_MIN_SPEED := 250.0
@@ -18,6 +23,8 @@ const CREATURE_DANGER_RADIUS := 224.0
 const BUILD_ACTION_COOLDOWN_MSEC := 8_000
 const MAX_CONSECUTIVE_MINING_ACTIONS := 3
 const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stone", "cobblestone", "workbench", "chest", "furnace", "glass", "stone_bricks"]
+
+var _last_idle_emoji_msec := -1
 
 
 func _init(seed: int = 0) -> void:
@@ -225,11 +232,26 @@ func decide(observation: Dictionary) -> Dictionary:
 	# the nearby achievement, gathering, and building opportunities have been
 	# checked; otherwise a player standing beside the bot would starve all useful
 	# actions and leave the avatar idling at their shoulder.
-	if not social_target_id.is_empty() and social_distance > preferred_distance:
+	var follow_threshold := preferred_distance + SOCIAL_FOLLOW_START_SLACK
+	if not social_target_id.is_empty() and social_distance > follow_threshold:
 		if Contract.ACTION_MOVE_NEAR_PLAYER in legal:
 			return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_MOVE_NEAR_PLAYER, social_target, 2400, 0.58)
 		if Contract.ACTION_FOLLOW in legal:
 			return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_FOLLOW, social_target, 2400, 0.58)
+
+	# Occasional friendly wave while hanging out near a player. Welcome emoji is
+	# handled earlier; this is a low-priority idle signal so the bot does not
+	# look mute after the initial greeting.
+	var now_msec := int(observation.get("observed_at_msec", 0))
+	if (
+		not social_target_id.is_empty()
+		and social_distance <= follow_threshold
+		and Contract.ACTION_SEND_EMOJI in legal
+		and (_last_idle_emoji_msec < 0 or now_msec - _last_idle_emoji_msec >= SOCIAL_IDLE_EMOJI_COOLDOWN_MSEC)
+		and _rng.randf() < 0.22
+	):
+		_last_idle_emoji_msec = now_msec
+		return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_SEND_EMOJI, {"id": social_target_id, "emoji": "😀"}, 500, 0.52)
 
 	# Do not freeze once the bot has reached the comfortable social distance.
 	# Small, non-combat wander steps make the avatar feel alive while keeping it
@@ -377,12 +399,12 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 		var resource := raw_value as Dictionary
 		if resource.has("solid") and not bool(resource.get("solid", true)):
 			continue
-		# A resource marked unreachable is not a movement waypoint.  Following its
-		# coordinates makes the physics controller hold into a wall or an empty
-		# drop, then the next observation selects the same tile again.  DigPlanner
-		# runs before resource selection and owns the cases where a bounded route
-		# can actually make this block reachable.
-		if not bool(resource.get("reachable", false)):
+		# Reachable tiles are preferred for MINE; farther tiles stay candidates so
+		# MOVE_TO can walk toward them. DigPlanner already ran for true blocked
+		# routes, so skipping every unreachable resource left the bot with nothing
+		# to gather and fell through to endless social hopping.
+		var distance := float(resource.get("distance", 9999.0))
+		if distance > 288.0:
 			continue
 		# A solid block that needs a tool must never become a movement target when
 		# the bot cannot mine it.  Chasing the block centre makes the physics
@@ -393,9 +415,9 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			var required_tier := int(resource.get("harvest_tier", 0))
 			if required_tier > 0 and not _has_required_mining_tier(observation, resource) and _mining_tool_for_target(observation, resource).is_empty():
 				continue
-		var score := float(resource.get("distance", 9999.0))
+		var score := distance
 		if not bool(resource.get("reachable", false)):
-			score += 1000.0
+			score += 80.0
 		# Prefer harvestable targets over blocks that require a better tool.
 		if int(resource.get("harvest_tier", 0)) > 0:
 			score -= 2.0
