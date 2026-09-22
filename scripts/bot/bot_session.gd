@@ -1963,7 +1963,8 @@ func _apply_inventory_snapshot(payload: Dictionary) -> void:
 		_inventory_host_revision = maxi(0, int(payload.get("inventory_host_revision", 0)))
 	if payload.has("inventory_client_revision"):
 		_inventory_client_revision = maxi(_inventory_client_revision, int(payload.get("inventory_client_revision", 0)))
-	_equipment_slots = payload.get("equipment_slots", _equipment_slots).duplicate(true) if payload.get("equipment_slots", _equipment_slots) is Dictionary else _equipment_slots
+	var incoming_equipment: Dictionary = payload.get("equipment_slots", _equipment_slots).duplicate(true) if payload.get("equipment_slots", _equipment_slots) is Dictionary else _equipment_slots.duplicate(true)
+	_equipment_slots = _merge_equipment_with_pending(incoming_equipment, normalized)
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	if payload.has("nourishment"):
 		var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
@@ -1977,6 +1978,25 @@ func _apply_inventory_snapshot(payload: Dictionary) -> void:
 		_craft_blocked_outputs.erase(_craft_pending_output)
 		_craft_pending_output = ""
 		_craft_retry_after_msec = Time.get_ticks_msec() + CRAFT_RETRY_DELAY_MSEC
+
+
+func _merge_equipment_with_pending(incoming_equipment: Dictionary, inventory: Dictionary) -> Dictionary:
+	var merged := {
+		"hand": str(incoming_equipment.get("hand", "")),
+		"feet": str(incoming_equipment.get("feet", "")),
+	}
+	var pending_equip: Dictionary = _pending_action_targets.get("equip", {}) if _pending_action_targets.get("equip", {}) is Dictionary else {}
+	var pending_item := str(pending_equip.get("item", ""))
+	if not pending_item.is_empty() and int(inventory.get(pending_item, 0)) > 0:
+		var slot_name := "feet" if pending_item.ends_with("_boots") or pending_item.ends_with("_sandals") else "hand"
+		merged[slot_name] = pending_item
+	# Keep a locally equipped progression item when a stale craft snapshot clears
+	# the slot but the item is still owned.
+	for slot_name in ["hand", "feet"]:
+		var local_item := str(_equipment_slots.get(slot_name, ""))
+		if merged[slot_name].is_empty() and not local_item.is_empty() and int(inventory.get(local_item, 0)) > 0:
+			merged[slot_name] = local_item
+	return merged
 
 
 func _apply_local_craft(output_name: String) -> bool:
@@ -2628,6 +2648,10 @@ func _on_decision_started(decision: Dictionary) -> void:
 			var slot_name := "feet" if item_name.ends_with("_boots") or item_name.ends_with("_sandals") else "hand"
 			_equipment_slots[slot_name] = item_name
 			_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+			# Persist the optimistic slot through inventory_snapshot. A craft that
+			# lands just before this EQUIP otherwise echoes feet/hand empty and
+			# the bot spam-equips forever on community hosts.
+			_send_inventory_snapshot()
 	elif action == Contract.ACTION_MINE or action == Contract.ACTION_PLACE:
 		var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
 		var key := "%d:%d" % [int(target.get("x", 0)), int(target.get("y", 0))]
