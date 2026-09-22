@@ -909,8 +909,73 @@ func _terrain_solid_at(tx: int, ty: int) -> bool:
 
 
 func _terrain_climbable_at(tx: int, ty: int) -> bool:
-	var name := _terrain_name_at(tx, ty)
-	return name in ["wood", "leaves", "shagot_scaffold"] or name.ends_with("_wood") or name.ends_with("_leaves")
+	var name := _terrain_name_at(tx, ty).to_lower()
+	if name.is_empty():
+		name = str(_plant_tiles.get("%d:%d" % [tx, ty], "")).to_lower()
+	if name.is_empty():
+		return false
+	return (
+		name in ["wood", "leaves", "pine_needles", "shagot_scaffold"]
+		or name.ends_with("_wood")
+		or name.ends_with("_leaves")
+		or name.ends_with("_needles")
+	)
+
+
+func _local_ignores_trees(self_state: Dictionary) -> bool:
+	return bool(self_state.get("tree_ghost", false)) or bool(self_state.get("climbing", false)) or _climb_active
+
+
+func _local_overlaps_climbable(self_state: Dictionary) -> bool:
+	var px := float(self_state.get("x", 0.0))
+	var py := float(self_state.get("y", 0.0))
+	var width := float(self_state.get("w", 20.0))
+	var height := float(self_state.get("h", 28.0))
+	var left := floori(px / float(BlockDefs.TILE))
+	var right := floori((px + width - 0.001) / float(BlockDefs.TILE))
+	var top := floori(py / float(BlockDefs.TILE))
+	var bottom := floori((py + height - 0.001) / float(BlockDefs.TILE))
+	for tile_y in range(top, bottom + 1):
+		for tile_x in range(left, right + 1):
+			if _terrain_climbable_at(tile_x, tile_y):
+				return true
+	return false
+
+
+func _side_climbable_hit(self_state: Dictionary, direction: float) -> bool:
+	if is_zero_approx(direction):
+		return false
+	var width := float(self_state.get("w", 20.0))
+	var height := float(self_state.get("h", 28.0))
+	var probe := 3.0
+	var next_x := float(self_state.get("x", 0.0)) + (probe if direction > 0.0 else -probe)
+	var hit := _local_collision(next_x, float(self_state.get("y", 0.0)), width, height, false)
+	if hit.is_empty():
+		return false
+	var tile_x := floori(float(hit.get("bx", 0.0)) / float(BlockDefs.TILE))
+	var tile_y := floori(float(hit.get("by", 0.0)) / float(BlockDefs.TILE))
+	return _terrain_climbable_at(tile_x, tile_y)
+
+
+func _update_local_tree_ghost(self_state: Dictionary, direction: float) -> void:
+	"""Mirror WorldSim tree traversal so foliage is passable instead of a cage.
+
+	Seeded tree-growth cells and live leaf batches are solid for normal walking.
+	Without tree_ghost the bot wedges inside the canopy while mining or climbing.
+	"""
+	if _local_ignores_trees(self_state):
+		if not _climb_active and not _local_overlaps_climbable(self_state) and not _side_climbable_hit(self_state, direction):
+			self_state["tree_ghost"] = false
+			self_state["climbing"] = false
+			self_state["climb_col"] = -1
+		return
+	if bool(self_state.get("on_ground", false)) and _side_climbable_hit(self_state, direction):
+		self_state["tree_ghost"] = true
+		return
+	# Already embedded in foliage (mining, host snap, growth seed) — ghost instead
+	# of fighting the canopy as an ordinary wall.
+	if _local_overlaps_climbable(self_state):
+		self_state["tree_ghost"] = true
 
 
 func _movement_hint(origin: Vector2, destination: Vector2) -> String:
@@ -973,6 +1038,8 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 	var vy := float(self_state.get("vy", 0.0))
 	var on_ground := bool(self_state.get("on_ground", false))
 	var direction := (-1.0 if bool(_desired_input.get("left", false)) else (1.0 if bool(_desired_input.get("right", false)) else 0.0))
+	_update_local_tree_ghost(self_state, direction)
+	var ignore_trees := _local_ignores_trees(self_state)
 	var target_vx := direction * BlockDefs.MOVE
 	vx = lerpf(vx, target_vx, clampf(step, 0.0, 1.0)) if on_ground else target_vx
 	if jump_pressed and on_ground:
@@ -988,26 +1055,44 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 	for _index in substeps:
 		if not is_zero_approx(vx):
 			var next_x := x + vx * substep
-			var horizontal_hit := _local_collision(next_x, y, width, height)
+			var horizontal_hit := _local_collision(next_x, y, width, height, ignore_trees)
 			if horizontal_hit.is_empty():
 				x = next_x
 			else:
-				x = float(horizontal_hit.get("bx", x)) - width if vx > 0.0 else float(horizontal_hit.get("bx", x)) + float(BlockDefs.TILE)
-				vx = 0.0
+				# Walking into a tree trunk/foliage should ghost, not pin the
+				# avatar against the canopy like a stone wall.
+				var hit_tx := floori(float(horizontal_hit.get("bx", 0.0)) / float(BlockDefs.TILE))
+				var hit_ty := floori(float(horizontal_hit.get("by", 0.0)) / float(BlockDefs.TILE))
+				if not ignore_trees and _terrain_climbable_at(hit_tx, hit_ty):
+					self_state["tree_ghost"] = true
+					ignore_trees = true
+					x = next_x
+				else:
+					x = float(horizontal_hit.get("bx", x)) - width if vx > 0.0 else float(horizontal_hit.get("bx", x)) + float(BlockDefs.TILE)
+					vx = 0.0
 		var next_y := y + vy * substep
-		var vertical_hit := _local_collision(x, next_y, width, height)
+		var vertical_hit := _local_collision(x, next_y, width, height, ignore_trees)
 		if vertical_hit.is_empty():
 			y = next_y
-			on_ground = is_zero_approx(vy) and not _local_collision(x, y + 1.5, width, height).is_empty()
+			on_ground = is_zero_approx(vy) and not _local_collision(x, y + 1.5, width, height, ignore_trees).is_empty()
 		else:
-			var hit_y := float(vertical_hit.get("by", y))
-			if vy >= 0.0:
-				y = hit_y - height
-				on_ground = true
-			else:
-				y = hit_y + float(BlockDefs.TILE)
+			var hit_tx := floori(float(vertical_hit.get("bx", 0.0)) / float(BlockDefs.TILE))
+			var hit_ty := floori(float(vertical_hit.get("by", 0.0)) / float(BlockDefs.TILE))
+			if not ignore_trees and _terrain_climbable_at(hit_tx, hit_ty) and vy < 0.0:
+				# Rising into foliage (jump/climb) ghosts instead of ceiling-sticking.
+				self_state["tree_ghost"] = true
+				ignore_trees = true
+				y = next_y
 				on_ground = false
-			vy = 0.0
+			else:
+				var hit_y := float(vertical_hit.get("by", y))
+				if vy >= 0.0:
+					y = hit_y - height
+					on_ground = true
+				else:
+					y = hit_y + float(BlockDefs.TILE)
+					on_ground = false
+				vy = 0.0
 
 	self_state["x"] = x
 	self_state["y"] = y
@@ -1015,6 +1100,7 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 	self_state["vy"] = vy
 	self_state["facing"] = -1 if direction < 0.0 else (1 if direction > 0.0 else int(self_state.get("facing", 1)))
 	self_state["on_ground"] = on_ground
+	_update_local_tree_ghost(self_state, direction)
 	if on_ground:
 		# A support placement is scoped to one airborne arc.  Re-arm only after
 		# the authoritative/local collision adapter has put the bot on ground.
@@ -1085,14 +1171,27 @@ func _eject_local_self_from_solid(self_state: Dictionary) -> void:
 	per-axis resolution then walks through the wall one cell at a time and older
 	hosts that still trust player_snapshot show the bot clipping.
 	"""
+	# Foliage/wood use WorldSim's tree-ghost passage. Prefer that over shoving the
+	# avatar out of a canopy cell, which left the bot oscillating inside leaves.
+	if _local_overlaps_climbable(self_state) and _local_collision(
+		float(self_state.get("x", 0.0)),
+		float(self_state.get("y", 0.0)),
+		float(self_state.get("w", 20.0)),
+		float(self_state.get("h", 28.0)),
+		true,
+	).is_empty():
+		self_state["tree_ghost"] = true
+		return
 	var width := float(self_state.get("w", 20.0))
 	var height := float(self_state.get("h", 28.0))
+	var ignore_trees := _local_ignores_trees(self_state)
 	for _attempt in 8:
 		var hit := _local_collision(
 			float(self_state.get("x", 0.0)),
 			float(self_state.get("y", 0.0)),
 			width,
 			height,
+			ignore_trees,
 		)
 		if hit.is_empty():
 			return
@@ -1102,7 +1201,7 @@ func _eject_local_self_from_solid(self_state: Dictionary) -> void:
 			self_state["x"] = float(hit.get("bx", self_state.get("x", 0.0))) - width
 		else:
 			self_state["x"] = float(hit.get("bx", self_state.get("x", 0.0))) + float(BlockDefs.TILE)
-		var vertical := _local_collision(float(self_state.get("x", 0.0)), float(self_state.get("y", 0.0)), width, height)
+		var vertical := _local_collision(float(self_state.get("x", 0.0)), float(self_state.get("y", 0.0)), width, height, ignore_trees)
 		if not vertical.is_empty():
 			var feet := float(self_state.get("y", 0.0)) + height
 			var block_top := float(vertical.get("by", feet))
@@ -1112,9 +1211,6 @@ func _eject_local_self_from_solid(self_state: Dictionary) -> void:
 				self_state["y"] = float(vertical.get("by", self_state.get("y", 0.0))) + float(BlockDefs.TILE)
 		self_state["vx"] = 0.0
 		self_state["vy"] = 0.0
-		self_state["tree_ghost"] = false
-		self_state["climbing"] = false
-		self_state["climb_col"] = -1
 
 
 func _try_place_support_block(self_state: Dictionary) -> bool:
@@ -1215,15 +1311,18 @@ func _support_block_name() -> String:
 	return ""
 
 
-func _local_collision(px: float, py: float, width: float, height: float) -> Dictionary:
+func _local_collision(px: float, py: float, width: float, height: float, ignore_trees: bool = false) -> Dictionary:
 	var left := floori(px / float(BlockDefs.TILE))
 	var right := floori((px + width - 0.001) / float(BlockDefs.TILE))
 	var top := floori(py / float(BlockDefs.TILE))
 	var bottom := floori((py + height - 0.001) / float(BlockDefs.TILE))
 	for tile_y in range(top, bottom + 1):
 		for tile_x in range(left, right + 1):
-			if _terrain_solid_at(tile_x, tile_y):
-				return {"bx": tile_x * BlockDefs.TILE, "by": tile_y * BlockDefs.TILE}
+			if not _terrain_solid_at(tile_x, tile_y):
+				continue
+			if ignore_trees and _terrain_climbable_at(tile_x, tile_y):
+				continue
+			return {"bx": tile_x * BlockDefs.TILE, "by": tile_y * BlockDefs.TILE}
 	return {}
 
 
