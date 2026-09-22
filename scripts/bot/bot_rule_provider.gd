@@ -7,6 +7,8 @@ const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 var _rng := RandomNumberGenerator.new()
 var _build_step := 0
 var _last_build_msec := -1
+var _plant_step := 0
+var _last_plant_msec := -1
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 ## Only chase a player once they are clearly farther than the preferred gap.
@@ -20,12 +22,14 @@ const BOW_ARROW_MAX_SPEED := 560.0
 const BOW_ARROW_GRAVITY := 310.0
 const CREATURE_DANGER_RADIUS := 224.0
 const BUILD_ACTION_COOLDOWN_MSEC := 8_000
+const PLANT_ACTION_COOLDOWN_MSEC := 6_000
 const MAX_CONSECUTIVE_MINING_ACTIONS := 3
 const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stick", "stone", "cobblestone", "workbench", "chest", "furnace", "glass", "stone_bricks"]
 const PROGRESSION_CRAFTS := ["wooden_pickaxe", "workbench", "stone_pickaxe", "stone_axe", "trail_boots", "stone_sword", "chest"]
 const WOOD_BLOCK_NAMES := ["wood", "palm_wood", "pine_wood", "weeping_wood"]
 const LEAF_BLOCK_NAMES := ["leaves", "palm_leaves", "pine_needles", "weeping_leaves"]
 const PLANK_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks"]
+const PLANT_SUBSTRATE_NAMES := ["dirt", "grass", "sand"]
 const KNOWN_FOODS := ["wild_berries", "prepared_meal"]
 const PROGRESSION_HAND_TOOLS := ["crystal_pickaxe", "copper_pickaxe", "stone_pickaxe", "wooden_pickaxe"]
 const HUNGER_EAT_THRESHOLD := 55
@@ -218,6 +222,13 @@ func decide(observation: Dictionary) -> Dictionary:
 			return Contract.normalize_decision(dig_step)
 
 	var resources: Array = _as_array(observation.get("visible_resources", []))
+	# When wood progression is blocked and no tree is visible, plant a seed before
+	# burning the mining streak on ice filler.
+	if Contract.ACTION_PLACE in legal and _should_prioritize_planting(observation, resources):
+		var urgent_plant := _plant_target(observation)
+		if not urgent_plant.is_empty():
+			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, urgent_plant, 900, 0.86)
+
 	var mining_streak := _consecutive_action_streak(observation, Contract.ACTION_MINE)
 	# Mining is useful background work, but an endless stream of nearby MINE
 	# decisions makes the avatar look frozen even when every command succeeds.
@@ -254,6 +265,12 @@ func decide(observation: Dictionary) -> Dictionary:
 				continue
 			if bool(container.get("reachable", false)):
 				return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_OPEN_CONTAINER, container, 900, 0.76)
+
+	# Regrow wood by planting surplus leaves/saplings on soil before decorative
+	# building. On ice pads this restarts a tree after mining the starter plant.
+	var plant_target := _plant_target(observation)
+	if not plant_target.is_empty() and Contract.ACTION_PLACE in legal:
+		return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, plant_target, 900, 0.74)
 
 	# Building is a low-frequency background activity.  Resource gathering and
 	# containers always win first; otherwise the bot can place dirt on top of the
@@ -1114,4 +1131,142 @@ func _build_target(observation: Dictionary) -> Dictionary:
 		_build_step = (_build_step + offset_index + 1) % offsets.size()
 		_last_build_msec = now_msec
 		return {"id": "build:%d" % now_msec, "block": block_name, "x": target_x, "y": target_y}
+	return {}
+
+
+func _should_prioritize_planting(observation: Dictionary, resources: Array) -> bool:
+	var inventory := _inventory(observation)
+	if not _needs_wood_progression(inventory):
+		return false
+	if _plantable_seed(inventory).is_empty() and int(inventory.get("dirt", 0)) <= 0:
+		return false
+	for raw_resource in resources:
+		if not raw_resource is Dictionary:
+			continue
+		var block_name := str((raw_resource as Dictionary).get("block_name", "")).to_lower()
+		if _is_wood_log_name(block_name) or _is_leaf_name(block_name):
+			return false
+	return true
+
+
+func _plantable_seed(inventory: Dictionary) -> String:
+	# Prefer dedicated saplings so leaves stay available for trail boots.
+	for raw_name in inventory.keys():
+		var name := str(raw_name)
+		if int(inventory.get(name, 0)) <= 0:
+			continue
+		if _is_tree_sapling(name):
+			return name
+	var reserved_leaves := 2 if _needs_leaf_progression(inventory) else 0
+	var leaf_total := _count_named(inventory, LEAF_BLOCK_NAMES)
+	if leaf_total <= reserved_leaves:
+		return ""
+	for leaf_name in LEAF_BLOCK_NAMES:
+		if int(inventory.get(leaf_name, 0)) > 0:
+			return leaf_name
+	return ""
+
+
+func _is_tree_sapling(block_name: String) -> bool:
+	var entry := _block_entry(block_name)
+	if entry.is_empty():
+		var lowered := block_name.to_lower()
+		return lowered.contains("plant.oak") or lowered.contains("plant.pine") or lowered.contains("plant.palm") or lowered.contains("plant.weeping") or lowered.contains("sapling")
+	if not bool(entry.get("plant", false)):
+		return false
+	var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
+	var growth: Dictionary = definition.get("growth", {}) if definition.get("growth", {}) is Dictionary else {}
+	if str(growth.get("form", "")) == "tree":
+		return true
+	var content_id := str(entry.get("content_id", definition.get("content_id", ""))).to_lower()
+	return content_id.contains("plant.oak") or content_id.contains("plant.pine") or content_id.contains("plant.palm") or content_id.contains("plant.weeping")
+
+
+func _is_plant_substrate(block_name: String) -> bool:
+	var lowered := block_name.to_lower()
+	if lowered in PLANT_SUBSTRATE_NAMES:
+		return true
+	return lowered.contains("dirt") or lowered.contains("grass") or lowered == "sand" or lowered.contains("soil")
+
+
+func _terrain_occupied_map(observation: Dictionary) -> Dictionary:
+	var occupied: Dictionary = {}
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		occupied["%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]] = str(tile.get("block_name", ""))
+	for raw_resource in _as_array(observation.get("visible_resources", [])):
+		if not raw_resource is Dictionary:
+			continue
+		var resource := raw_resource as Dictionary
+		var key := "%d:%d" % [int(resource.get("x", 2147483647)), int(resource.get("y", 2147483647))]
+		if key.contains("2147483647"):
+			continue
+		if not occupied.has(key):
+			occupied[key] = str(resource.get("block_name", ""))
+	return occupied
+
+
+func _plant_target(observation: Dictionary) -> Dictionary:
+	var now_msec := int(observation.get("observed_at_msec", 0))
+	if _last_plant_msec >= 0 and now_msec - _last_plant_msec < PLANT_ACTION_COOLDOWN_MSEC:
+		return {}
+	var inventory := _inventory(observation)
+	var seed_name := _plantable_seed(inventory)
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var tile_x := floori(float(self_state.get("x", 0.0)) / 32.0)
+	var tile_y := floori((float(self_state.get("y", 0.0)) + 28.0) / 32.0)
+	var occupied := _terrain_occupied_map(observation)
+	var offsets := [
+		Vector2i(1, -1), Vector2i(2, -1), Vector2i(-1, -1), Vector2i(3, -1),
+		Vector2i(1, 0), Vector2i(2, 0), Vector2i(-1, 0), Vector2i(0, -1),
+	]
+	if not seed_name.is_empty():
+		for offset_index in range(offsets.size()):
+			var offset: Vector2i = offsets[(_plant_step + offset_index) % offsets.size()]
+			var target_x := tile_x + offset.x
+			var target_y := tile_y + offset.y
+			var cell_name := str(occupied.get("%d:%d" % [target_x, target_y], ""))
+			if not cell_name.is_empty() and cell_name.to_lower() not in ["air", "core.air"]:
+				continue
+			var support_name := str(occupied.get("%d:%d" % [target_x, target_y + 1], "")).to_lower()
+			if not _is_plant_substrate(support_name):
+				continue
+			if _tile_overlaps_player(Vector2i(target_x, target_y), self_state):
+				continue
+			_plant_step = (_plant_step + offset_index + 1) % offsets.size()
+			_last_plant_msec = now_msec
+			return {
+				"id": "plant:%d" % now_msec,
+				"block": seed_name,
+				"x": target_x,
+				"y": target_y,
+				"reason": "plant_tree",
+			}
+		# Ice pads often lack dirt/grass. Lay a dirt bed first, then plant next tick.
+		if int(inventory.get("dirt", 0)) > 0:
+			for offset_index in range(offsets.size()):
+				var offset: Vector2i = offsets[(_plant_step + offset_index) % offsets.size()]
+				var target_x := tile_x + offset.x
+				var target_y := tile_y + offset.y
+				var cell_name := str(occupied.get("%d:%d" % [target_x, target_y], ""))
+				if not cell_name.is_empty() and cell_name.to_lower() not in ["air", "core.air"]:
+					continue
+				var support_name := str(occupied.get("%d:%d" % [target_x, target_y + 1], "")).to_lower()
+				if support_name.is_empty():
+					continue
+				if _is_plant_substrate(support_name):
+					continue
+				if _tile_overlaps_player(Vector2i(target_x, target_y), self_state):
+					continue
+				_plant_step = (_plant_step + offset_index + 1) % offsets.size()
+				_last_plant_msec = now_msec
+				return {
+					"id": "plant-bed:%d" % now_msec,
+					"block": "dirt",
+					"x": target_x,
+					"y": target_y,
+					"reason": "plant_bed",
+				}
 	return {}
