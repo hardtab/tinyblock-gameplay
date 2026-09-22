@@ -216,10 +216,13 @@ func decide(observation: Dictionary) -> Dictionary:
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_CRAFT, {"id": meal_target}, 700, 0.93)
 	if not craft_target.is_empty() and Contract.ACTION_CRAFT in legal:
 		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_CRAFT, {"id": craft_target}, 700, 0.9)
-	# After crafting a pickaxe (or looting one), put it in hand before gathering.
-	# Soft resources like wood do not require a harvest tier, so the old mining
-	# path never equipped anything and the avatar stayed bare-handed.
+	# Outside PvP the bot crafts trail boots but never wore them — feet stayed
+	# empty while mining continued. Equip footwear before the hand tool so both
+	# progression items end up on the avatar.
 	if not bool(observation.get("pvp_world", false)):
+		var progression_feet := _empty_feet_progression_footwear(observation)
+		if not progression_feet.is_empty() and Contract.ACTION_EQUIP in legal:
+			return _decision(Contract.GOAL_GATHER, Contract.ACTION_EQUIP, {"id": progression_feet}, 350, 0.92)
 		var progression_hand := _empty_hand_progression_tool(observation)
 		if not progression_hand.is_empty() and Contract.ACTION_EQUIP in legal:
 			return _decision(Contract.GOAL_GATHER, Contract.ACTION_EQUIP, {"id": progression_hand}, 350, 0.91)
@@ -841,6 +844,17 @@ func _empty_hand_progression_tool(observation: Dictionary) -> String:
 	if not str(equipment.get("hand", "")).is_empty():
 		return ""
 	return _best_owned_mining_tool(observation)
+
+
+func _empty_feet_progression_footwear(observation: Dictionary) -> String:
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	if not str(equipment.get("feet", "")).is_empty():
+		return ""
+	var inventory := _inventory(observation)
+	for footwear in ["trail_boots", "palm_sandals", "ice_boots", "moonstone_boots"]:
+		if int(inventory.get(footwear, 0)) > 0:
+			return footwear
+	return ""
 
 
 func _best_owned_mining_tool(observation: Dictionary) -> String:
