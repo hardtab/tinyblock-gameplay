@@ -222,10 +222,14 @@ func decide(observation: Dictionary) -> Dictionary:
 	if not pvp_target.is_empty():
 		var pvp_distance := float(pvp_target.get("distance", 9999.0))
 		var melee_distance := float(observation.get("retaliation_distance", 52.0))
-		if pvp_distance <= melee_distance and Contract.ACTION_ATTACK_PLAYER in legal:
+		var target_is_fresh := not bool(pvp_target.get("stale", pvp_target.get("last_known", false)))
+		if target_is_fresh and pvp_distance <= melee_distance and Contract.ACTION_ATTACK_PLAYER in legal:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_ATTACK_PLAYER, pvp_target, 550, 0.98)
 		if Contract.ACTION_MOVE_TO in legal:
-			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, pvp_target, 1800, 0.94)
+			# A last-known target keeps pathfinding pointed at the pinned enemy's
+			# authoritative position while a partial snapshot is repaired. Attacks
+			# still require a fresh entry, so stale data cannot deal damage.
+			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, pvp_target, 900 if not target_is_fresh else 1800, 0.84 if not target_is_fresh else 0.94)
 	var craft_target := _craftable_output(observation)
 	if foraging:
 		var meal_target := _craftable_food_output(observation)
@@ -1181,7 +1185,7 @@ func _ranged_target(observation: Dictionary, require_clear_path: bool = true) ->
 		for raw_player in _as_array(observation.get("players", [])):
 			if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == enemy_id:
 				var enemy := raw_player as Dictionary
-				if bool(enemy.get("alive", true)) and float(enemy.get("distance", 9999.0)) <= max_distance and (not require_clear_path or Perception.has_clear_bow_line_of_sight(observation, enemy)):
+				if not bool(enemy.get("stale", enemy.get("last_known", false))) and bool(enemy.get("alive", true)) and float(enemy.get("distance", 9999.0)) <= max_distance and (not require_clear_path or Perception.has_clear_bow_line_of_sight(observation, enemy)):
 					return enemy
 		return {}
 	var threats := _as_array(observation.get("threats", []))

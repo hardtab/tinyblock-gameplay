@@ -104,6 +104,8 @@ var _guest_defeat_pending := false
 var _guest_defeat_retry_after_msec := -1
 var _host_player_id := ""
 var _pvp_enemy_player_id := ""
+var _pvp_enemy_last_known_state: Dictionary = {}
+var _pvp_enemy_last_seen_msec := -1
 var _duel_started := false
 var _pvp_chest_opened := false
 var _last_duel_ready_msec := -1
@@ -261,6 +263,8 @@ func join_session(record: Dictionary) -> void:
 	_guest_defeat_retry_after_msec = -1
 	_host_player_id = ""
 	_pvp_enemy_player_id = ""
+	_pvp_enemy_last_known_state.clear()
+	_pvp_enemy_last_seen_msec = -1
 	_duel_started = false
 	_pvp_chest_opened = false
 	_last_duel_ready_msec = -1
@@ -366,6 +370,9 @@ func handle_message(message: Dictionary) -> void:
 	if kind == "control" and message_type == "player_left":
 		var left_id := str(message.get("player_id", ""))
 		_roster.erase(left_id)
+		if left_id == _pvp_enemy_player_id:
+			_pvp_enemy_last_known_state.clear()
+			_pvp_enemy_last_seen_msec = -1
 		_record_event("player_left", {"player_id": left_id})
 		_update_human_count()
 		return
@@ -1572,6 +1579,8 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		_roster[player_id] = player_state.duplicate(true)
 	if _is_pvp_world() and _pvp_enemy_player_id.is_empty() and not _roster.is_empty():
 		_pvp_enemy_player_id = str(_roster.keys()[0])
+	if _is_pvp_world() and _roster.get(_pvp_enemy_player_id, null) is Dictionary:
+		_remember_pvp_enemy(_pvp_enemy_player_id, _roster[_pvp_enemy_player_id] as Dictionary)
 	# A guest that reconnects after the host has already started the duel will
 	# not receive the one-shot `duel_start` control message. The host's world
 	# snapshot is authoritative and only exists for an active game, so a duel
@@ -1802,6 +1811,10 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 		_roster[player_id] = entry
 	if _is_pvp_world() and _pvp_enemy_player_id.is_empty() and not _roster.is_empty():
 		_pvp_enemy_player_id = str(_roster.keys()[0])
+	if _is_pvp_world() and _roster.get(_pvp_enemy_player_id, null) is Dictionary:
+		_remember_pvp_enemy(_pvp_enemy_player_id, _roster[_pvp_enemy_player_id] as Dictionary)
+	else:
+		_retain_last_known_pvp_enemy()
 	_update_human_count()
 
 
@@ -2271,6 +2284,39 @@ func _expire_stale_action_targets(now_msec: int) -> void:
 
 func _enemy_player_id() -> String:
 	return _pvp_enemy_player_id if _is_pvp_world() else ""
+
+
+func _remember_pvp_enemy(player_id: String, raw_state: Dictionary) -> void:
+	if not _is_pvp_world() or player_id.is_empty() or raw_state.is_empty():
+		return
+	if _pvp_enemy_player_id.is_empty():
+		_pvp_enemy_player_id = player_id
+	if player_id != _pvp_enemy_player_id:
+		return
+	var remembered := raw_state.duplicate(true)
+	remembered["id"] = player_id
+	remembered["alive"] = int(remembered.get("health", 10)) > 0
+	remembered["stale"] = false
+	remembered["last_known"] = false
+	remembered.erase("snapshot_age_msec")
+	_pvp_enemy_last_known_state = remembered
+	_pvp_enemy_last_seen_msec = Time.get_ticks_msec()
+
+
+func _retain_last_known_pvp_enemy() -> void:
+	if (
+		not _is_pvp_world()
+		or _pvp_enemy_player_id.is_empty()
+		or _roster.has(_pvp_enemy_player_id)
+		or _pvp_enemy_last_known_state.is_empty()
+	):
+		return
+	var fallback := _pvp_enemy_last_known_state.duplicate(true)
+	fallback["id"] = _pvp_enemy_player_id
+	fallback["stale"] = true
+	fallback["last_known"] = true
+	fallback["snapshot_age_msec"] = maxi(0, Time.get_ticks_msec() - _pvp_enemy_last_seen_msec) if _pvp_enemy_last_seen_msec >= 0 else 0
+	_roster[_pvp_enemy_player_id] = fallback
 
 
 func _is_pvp_world() -> bool:

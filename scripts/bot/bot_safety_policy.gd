@@ -93,6 +93,8 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 				return _rejected(decision, "pvp_only_action")
 			if str(observation.get("enemy_player_id", "")) != target_id:
 				return _rejected(decision, "pvp_enemy_target_required")
+			if _target_snapshot_is_stale(observation.get("players", []), target_id):
+				return _rejected(decision, "pvp_enemy_snapshot_stale")
 			if not _player_is_near(observation, target_id, float(observation.get("retaliation_distance", 52.0))):
 				return _rejected(decision, "enemy_out_of_range")
 		Contract.ACTION_ATTACK_CREATURE:
@@ -108,6 +110,8 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 					return _rejected(decision, "pvp_enemy_target_required")
 				if not _target_exists(observation.get("players", []), target_id):
 					return _rejected(decision, "pvp_enemy_not_visible")
+				if _target_snapshot_is_stale(observation.get("players", []), target_id):
+					return _rejected(decision, "pvp_enemy_snapshot_stale")
 			else:
 				if not _target_exists(observation.get("threats", []), target_id):
 					return _rejected(decision, "ranged_target_not_visible")
@@ -193,6 +197,14 @@ func _player_is_near(observation: Dictionary, player_id: String, max_distance: f
 		var player := raw_player as Dictionary
 		if str(player.get("id", "")) == player_id:
 			return float(player.get("distance", 9999.0)) <= max_distance
+	return false
+
+
+func _target_snapshot_is_stale(raw_targets: Variant, target_id: String) -> bool:
+	for raw_target in _as_array(raw_targets):
+		if not raw_target is Dictionary or str((raw_target as Dictionary).get("id", "")) != target_id:
+			continue
+		return bool((raw_target as Dictionary).get("stale", (raw_target as Dictionary).get("last_known", false)))
 	return false
 
 
