@@ -19,6 +19,19 @@ const SOCIAL_MOVE_FAMILY: PackedStringArray = [
 	Contract.ACTION_FOLLOW,
 ]
 
+## Repeating these actions is expected while a combat target is active. A duel
+## bridge can require many PLACE steps and pursuit can require many MOVE_TO
+## windows; cooling either one makes the bot stand still in the middle of PvP.
+## Equipment remains guarded because repeated EQUIP is never useful progress.
+const CONTINUOUS_SELF_DEFENSE_ACTIONS: PackedStringArray = [
+	Contract.ACTION_MOVE_TO,
+	Contract.ACTION_PLACE,
+	Contract.ACTION_FIRE_BOW,
+	Contract.ACTION_ATTACK_PLAYER,
+	Contract.ACTION_RETALIATE_ONCE,
+	Contract.ACTION_FLEE_FROM,
+]
+
 
 static func _streak_family(action: String) -> PackedStringArray:
 	if action in SOCIAL_MOVE_FAMILY:
@@ -37,8 +50,13 @@ static func consecutive_started_streak(history: Array, action: String) -> int:
 		var entry := history[index] as Dictionary
 		if str(entry.get("phase", "")) != "started":
 			continue
-		if str(entry.get("action", "")) not in family:
+		var entry_action := str(entry.get("action", ""))
+		if entry_action not in family:
 			break
+		if str(entry.get("goal", "")) == Contract.GOAL_SELF_DEFENSE and entry_action in CONTINUOUS_SELF_DEFENSE_ACTIONS:
+			# The current streak is a deliberate combat sequence, not a stuck
+			# background loop. Reset rather than inheriting an older peaceful streak.
+			return 0
 		streak += 1
 	return streak
 
