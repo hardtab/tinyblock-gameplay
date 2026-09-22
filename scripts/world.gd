@@ -11186,6 +11186,18 @@ func _update_harmful_fluid_contact(in_harmful_fluid: bool) -> void:
 	_player_was_in_harmful_fluid = in_harmful_fluid
 
 
+func capture_harmful_fluid_contact_state() -> Dictionary:
+	return {
+		"was_in": _player_was_in_harmful_fluid,
+		"cooldown": _harmful_fluid_damage_cooldown,
+	}
+
+
+func restore_harmful_fluid_contact_state(state: Dictionary) -> void:
+	_player_was_in_harmful_fluid = bool(state.get("was_in", false))
+	_harmful_fluid_damage_cooldown = maxf(0.0, float(state.get("cooldown", 0.0)))
+
+
 func move_player(move_left: bool, move_right: bool, jump: bool, delta: float = 1.0 / 60.0) -> void:
 	var movement_origin_x := float(player["x"])
 	var jumped_this_step := false

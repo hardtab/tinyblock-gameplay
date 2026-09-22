@@ -97,6 +97,10 @@ var _climb_column := 0
 var _climb_time_left_msec := 0
 var _support_place_attempted := false
 var _support_place_last_attempt_msec := -1
+var _was_in_harmful_fluid := false
+var _harmful_fluid_damage_cooldown := 0.0
+var _guest_defeat_pending := false
+var _guest_defeat_retry_after_msec := -1
 var _host_player_id := ""
 var _pvp_enemy_player_id := ""
 var _duel_started := false
@@ -113,6 +117,8 @@ var _inventory_client_revision := 0
 var _population_logged := false
 const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
 const PLAYER_INPUT_INTERVAL_MSEC := 50
+const HARMFUL_FLUID_DAMAGE_INTERVAL := 20.0 / 60.0
+const GUEST_DEFEAT_RETRY_MSEC := 400
 const DUEL_PROTOCOL_VERSION := 3
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const TREE_CLIMB_SPEED := -3.2
@@ -243,6 +249,10 @@ func join_session(record: Dictionary) -> void:
 	_climb_time_left_msec = 0
 	_support_place_attempted = false
 	_support_place_last_attempt_msec = -1
+	_was_in_harmful_fluid = false
+	_harmful_fluid_damage_cooldown = 0.0
+	_guest_defeat_pending = false
+	_guest_defeat_retry_after_msec = -1
 	_host_player_id = ""
 	_pvp_enemy_player_id = ""
 	_duel_started = false
@@ -433,6 +443,19 @@ func _process(delta: float) -> void:
 	if state != STATE_PLAYING:
 		return
 	_expire_craft_pending(now_msec)
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	# Hazard contact must tick even while WAIT/idle, otherwise a bot standing in
+	# lava only takes damage when a movement action happens to run physics.
+	_apply_local_harmful_fluid(self_state, delta)
+	_world_snapshot["self"] = self_state
+	var self_alive := int(self_state.get("health", 10)) > 0
+	if not self_alive:
+		_set_desired_input(false, false, false)
+		_send_guest_defeat_if_due(now_msec)
+		_send_player_input_if_due(now_msec)
+		_send_player_snapshot_if_due(now_msec)
+		return
+	_guest_defeat_pending = false
 	var observation := _build_observation(now_msec)
 	if _is_pvp_world() and not _duel_started and now_msec - _last_duel_ready_msec >= 1000:
 		_send_duel_ready(now_msec)
@@ -1000,6 +1023,61 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 		_try_place_support_block(self_state)
 
 
+func _local_touches_harmful_fluid(self_state: Dictionary) -> bool:
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var left := floori(float(self_state.get("x", 0.0)) / float(BlockDefs.TILE))
+	var right := floori((float(self_state.get("x", 0.0)) + width - 0.001) / float(BlockDefs.TILE))
+	var top := floori(float(self_state.get("y", 0.0)) / float(BlockDefs.TILE))
+	var bottom := floori((float(self_state.get("y", 0.0)) + height - 0.001) / float(BlockDefs.TILE))
+	for tile_y in range(top, bottom + 1):
+		for tile_x in range(left, right + 1):
+			var name := _terrain_name_at(tile_x, tile_y).to_lower()
+			if name == "lava" or name.ends_with(".lava"):
+				return true
+			var entry := _block_entry(name)
+			if bool(entry.get("fluid", false)) and float(entry.get("temperature", 0.0)) >= 0.8:
+				return true
+	return false
+
+
+func _apply_local_harmful_fluid(self_state: Dictionary, delta: float) -> void:
+	_harmful_fluid_damage_cooldown = maxf(0.0, _harmful_fluid_damage_cooldown - maxf(delta, 0.0))
+	var touching := _local_touches_harmful_fluid(self_state)
+	if touching and (not _was_in_harmful_fluid or _harmful_fluid_damage_cooldown <= 0.0):
+		var health := maxi(0, int(self_state.get("health", 10)) - 1)
+		self_state["health"] = health
+		_harmful_fluid_damage_cooldown = HARMFUL_FLUID_DAMAGE_INTERVAL
+		if health <= 0:
+			_guest_defeat_pending = true
+			_guest_defeat_retry_after_msec = 0
+			structured_log.emit({
+				"event": "local_lava_defeat",
+				"health": health,
+				"at_msec": Time.get_ticks_msec(),
+			})
+	_was_in_harmful_fluid = touching
+
+
+func _send_guest_defeat_if_due(now_msec: int) -> void:
+	if not _guest_defeat_pending:
+		return
+	if _guest_defeat_retry_after_msec >= 0 and now_msec < _guest_defeat_retry_after_msec:
+		return
+	if network_client == null or not network_client.has_method("send_command"):
+		return
+	var local: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	network_client.call("send_command", "player_defeated", {
+		"respawn_revision": int(local.get("respawn_revision", 0)),
+	})
+	_guest_defeat_retry_after_msec = now_msec + GUEST_DEFEAT_RETRY_MSEC
+	structured_log.emit({
+		"event": "guest_defeat_requested",
+		"respawn_revision": int(local.get("respawn_revision", 0)),
+		"at_msec": now_msec,
+	})
+
+
 func _eject_local_self_from_solid(self_state: Dictionary) -> void:
 	"""Stop local prediction from tunneling once already overlapping a solid tile.
 
@@ -1528,7 +1606,16 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 			# mid-jump: a late players_snapshot would yank the local prediction back
 			# to the previous edge and look like a teleport.
 			var local_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
-			var reconcile_motion := not _jump_active and not _climb_active
+			var host_revision := int(entry.get("respawn_revision", local_state.get("respawn_revision", 0)))
+			var local_revision := int(local_state.get("respawn_revision", 0))
+			var respawned := host_revision > local_revision
+			var reconcile_motion := respawned or (not _jump_active and not _climb_active)
+			if respawned:
+				_was_in_harmful_fluid = false
+				_harmful_fluid_damage_cooldown = 0.0
+				_guest_defeat_pending = false
+				_jump_active = false
+				_climb_active = false
 			for field in ["x", "y", "facing", "vx", "vy", "on_ground", "health", "nourishment", "respawn_revision", "tree_ghost", "climbing", "climb_col"]:
 				if not entry.has(field):
 					continue
@@ -1538,6 +1625,14 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 				# local eat and make the bot spam EAT while berries are still present.
 				if field == "nourishment":
 					local_state[field] = clampi(int(local_state.get("nourishment", entry[field])), 0, 100)
+					continue
+				if field == "health":
+					if respawned:
+						local_state[field] = clampi(int(entry[field]), 0, 10)
+					else:
+						# Keep the more damaged reading so a late full-health echo cannot
+						# cancel an in-progress local lava death before the host respawns.
+						local_state[field] = mini(int(local_state.get("health", entry[field])), int(entry[field]))
 					continue
 				local_state[field] = entry[field]
 			_world_snapshot["self"] = local_state
