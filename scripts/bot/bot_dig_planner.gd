@@ -74,6 +74,11 @@ static func _target_tile(observation: Dictionary, origin: Vector2i) -> Vector2i:
 		var candidate := _support_tile(player)
 		if abs(candidate.x - origin.x) <= MAX_TARGET_DISTANCE_TILES and abs(candidate.y - origin.y) <= MAX_TARGET_DISTANCE_TILES:
 			return candidate
+	# During a duel excavation is only allowed toward the currently observed
+	# opponent. A missing player snapshot must not make the planner reinterpret a
+	# nearby ore block as a useful combat route.
+	if bool(observation.get("pvp_world", false)):
+		return _invalid_tile()
 	# Resource entries are intentionally chosen only when they are not already
 	# reachable.  Reachable resources continue through the regular MINE action.
 	var resources: Array = observation.get("visible_resources", []) if observation.get("visible_resources", []) is Array else []
@@ -104,6 +109,7 @@ static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, obser
 			"x": x,
 			"y": y,
 			"dig_route": true,
+			"combat_route": bool(observation.get("pvp_world", false)),
 			"route_target": [target.x, target.y],
 			"origin": [origin.x, origin.y],
 			"reachable": true,
@@ -128,6 +134,7 @@ static func _place_step(x: int, y: int, origin: Vector2i, target: Vector2i, obse
 			"x": x,
 			"y": y,
 			"dig_route": true,
+			"combat_route": bool(observation.get("pvp_world", false)),
 			"route_target": [target.x, target.y],
 			"origin": [origin.x, origin.y],
 		},

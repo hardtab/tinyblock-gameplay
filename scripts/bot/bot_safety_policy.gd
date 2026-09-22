@@ -124,6 +124,8 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 				return _rejected(decision, "flee_target_missing")
 		Contract.ACTION_MINE:
 			var mine_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+			if _player_combat_focus_active(observation) and not bool(mine_target.get("combat_route", false)):
+				return _rejected(decision, "combat_target_has_priority")
 			if not Perception.mine_target_is_safe(observation, mine_target):
 				return _rejected(decision, "mine_target_unsafe_support")
 			if bool(mine_target.get("dig_route", false)):
@@ -160,6 +162,14 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 func is_low_health(self_state: Dictionary) -> bool:
 	var maximum := maxi(1, int(self_state.get("max_health", 10)))
 	return float(int(self_state.get("health", maximum))) / float(maximum) <= LOW_HEALTH_RATIO
+
+
+func _player_combat_focus_active(observation: Dictionary) -> bool:
+	if bool(observation.get("pvp_world", false)) and bool(observation.get("duel_started", false)):
+		return true
+	var defense: Dictionary = observation.get("self_defense", {}) if observation.get("self_defense", {}) is Dictionary else {}
+	var attacker_id := str(defense.get("attacker_player_id", ""))
+	return not attacker_id.is_empty() and _target_exists(observation.get("players", []), attacker_id)
 
 
 static func defensive_window_active(attacker_player_id: String, hit_msec: int, target_player_id: String, now_msec: int, window_msec: int = DEFAULT_RETALIATION_WINDOW_MSEC) -> bool:

@@ -133,6 +133,8 @@ func tick(delta: float, observation: Dictionary, now_msec: int) -> void:
 
 func cancel(reason: String = "cancelled") -> void:
 	if _busy:
+		if current_action() == Contract.ACTION_MINE and not _mine_final_sent and _mine_progress_stage >= 0:
+			_send_mine_cancel()
 		_finish(reason)
 	current_decision.clear()
 	current_observation.clear()
@@ -257,6 +259,15 @@ func _send_mine_progress(now_msec: int, stage: int) -> void:
 	if _send_command("mine_progress", payload):
 		_mine_progress_stage = stage
 		command_sent.emit("mine_progress", payload.duplicate(true))
+
+
+func _send_mine_cancel() -> void:
+	var payload := _tile_payload(current_decision)
+	payload["event"] = "mine_cancel"
+	var target: Dictionary = current_decision.get("target", {}) if current_decision.get("target", {}) is Dictionary else {}
+	payload["block_name"] = str(target.get("block_name", target.get("content_id", "")))
+	if _send_command("world_action_event", payload):
+		command_sent.emit("world_action_event", payload.duplicate(true))
 
 
 func _tile_payload(decision: Dictionary) -> Dictionary:

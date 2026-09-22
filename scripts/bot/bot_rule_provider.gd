@@ -226,7 +226,6 @@ func decide(observation: Dictionary) -> Dictionary:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_ATTACK_PLAYER, pvp_target, 550, 0.98)
 		if Contract.ACTION_MOVE_TO in legal:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, pvp_target, 1800, 0.94)
-
 	var craft_target := _craftable_output(observation)
 	if foraging:
 		var meal_target := _craftable_food_output(observation)
@@ -258,6 +257,13 @@ func decide(observation: Dictionary) -> Dictionary:
 		var dig_action := str(dig_step.get("action", ""))
 		if dig_action in legal:
 			return Contract.normalize_decision(dig_step)
+	# Generic resource mining is disabled during an active PvP duel. The bot
+	# should pursue the opponent, not mine filler blocks. DigPlanner steps
+	# are still allowed because they excavate toward a blocked player path.
+	if bool(observation.get("pvp_world", false)) and bool(observation.get("duel_started", false)):
+		if Contract.ACTION_WAIT in legal:
+			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.88)
+
 
 	var resources: Array = _as_array(observation.get("visible_resources", []))
 	# When wood progression is blocked and no tree is visible, plant a seed before

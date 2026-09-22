@@ -58,6 +58,13 @@ func reset(now_msec: int = 0) -> void:
 
 
 func tick(observation: Dictionary, delta: float, now_msec: int) -> void:
+	# Mining can last several seconds. A duel opponent or a recent player
+	# attacker may become actionable after the mining decision started, so do not
+	# let the busy executor hide that combat state until the block is destroyed.
+	# Route excavation can opt in explicitly when it is the only way to reach the
+	# target; ordinary resource gathering is always interrupted.
+	if _combat_should_preempt_mining(observation):
+		executor.cancel("combat_preempted")
 	executor.tick(delta, observation, now_msec)
 	if executor.is_busy() or now_msec < _next_decision_msec:
 		return
@@ -92,6 +99,25 @@ func tick(observation: Dictionary, delta: float, now_msec: int) -> void:
 	decision_started.emit(decision.duplicate(true))
 	var next_interval_msec := AGGRESSIVE_PLAYER_DECISION_INTERVAL_MSEC if aggressive_player else decision_interval_msec
 	_next_decision_msec = now_msec + maxi(next_interval_msec, int(decision.get("commit_for_ms", 0)))
+
+
+func _combat_should_preempt_mining(observation: Dictionary) -> bool:
+	if executor == null or executor.current_action() != Contract.ACTION_MINE:
+		return false
+	var target: Dictionary = executor.current_decision.get("target", {}) if executor.current_decision.get("target", {}) is Dictionary else {}
+	if bool(target.get("combat_route", false)):
+		return false
+	return _player_combat_focus_active(observation)
+
+
+func _player_combat_focus_active(observation: Dictionary) -> bool:
+	if bool(observation.get("pvp_world", false)) and bool(observation.get("duel_started", false)):
+		# The duel enemy is pinned for the match lifetime. Treat a temporarily
+		# missing roster entry as network jitter, not permission to go mining.
+		return true
+	var defense: Dictionary = observation.get("self_defense", {}) if observation.get("self_defense", {}) is Dictionary else {}
+	var attacker_id := str(defense.get("attacker_player_id", ""))
+	return not attacker_id.is_empty() and _observation_has_player(observation, attacker_id)
 
 
 func _is_aggressive_player_decision(decision: Dictionary, observation: Dictionary) -> bool:
