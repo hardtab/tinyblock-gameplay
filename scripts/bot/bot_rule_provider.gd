@@ -24,8 +24,16 @@ const CREATURE_DANGER_RADIUS := 224.0
 const BUILD_ACTION_COOLDOWN_MSEC := 8_000
 const PLANT_ACTION_COOLDOWN_MSEC := 6_000
 const MAX_CONSECUTIVE_MINING_ACTIONS := 3
-const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stick", "stone", "cobblestone", "workbench", "chest", "furnace", "glass", "stone_bricks"]
-const PROGRESSION_CRAFTS := ["wooden_pickaxe", "workbench", "stone_pickaxe", "stone_axe", "trail_boots", "stone_sword", "chest"]
+# Only outputs `_apply_local_craft` can fulfill. Generic station crafts like
+# furnace/glass fail immediately and starved gather/equip for seconds each cycle.
+const LOCAL_OPTIMISTIC_CRAFTS := [
+	"planks", "palm_planks", "pine_planks", "weeping_planks",
+	"stick", "wooden_pickaxe", "workbench", "chest", "trail_boots",
+]
+const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stick", "workbench", "chest"]
+# Boots right after the wooden pickaxe so leaf/plank gear is proven before
+# station-gated stone tools the optimistic craft path cannot complete.
+const PROGRESSION_CRAFTS := ["wooden_pickaxe", "trail_boots", "workbench", "chest"]
 const WOOD_BLOCK_NAMES := ["wood", "palm_wood", "pine_wood", "weeping_wood"]
 const LEAF_BLOCK_NAMES := ["leaves", "palm_leaves", "pine_needles", "weeping_leaves"]
 const PLANK_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks"]
@@ -648,6 +656,8 @@ func _craftable_output(observation: Dictionary) -> String:
 	for wanted in PROGRESSION_CRAFTS:
 		if wanted in blocked_outputs:
 			continue
+		if wanted not in LOCAL_OPTIMISTIC_CRAFTS:
+			continue
 		if wanted == "stone_pickaxe" and "stone_age" in unlocked:
 			continue
 		if int(inventory.get(wanted, 0)) > 0:
@@ -668,7 +678,7 @@ func _craftable_output(observation: Dictionary) -> String:
 		var output: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
 		for raw_name in output:
 			var name := str(raw_name)
-			if name in GENERIC_OUTPUTS and name not in blocked_outputs and int(inventory.get(name, 0)) <= 0 and _recipe_inputs_available(recipe, inventory):
+			if name in GENERIC_OUTPUTS and name in LOCAL_OPTIMISTIC_CRAFTS and name not in blocked_outputs and int(inventory.get(name, 0)) <= 0 and _recipe_inputs_available(recipe, inventory):
 				return name
 	return ""
 

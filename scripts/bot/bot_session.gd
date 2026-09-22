@@ -115,6 +115,10 @@ var _food_eat_cooldown_until_msec := -1
 var _inventory_host_revision := 0
 var _inventory_client_revision := 0
 var _population_logged := false
+## One-shot: drop wooden_pickaxe + trail_boots after join so craft+equip can be
+## proven from scratch on a community world that still had leftover gear.
+var _strip_progression_gear := false
+var _progression_gear_stripped := false
 const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
 const PLAYER_INPUT_INTERVAL_MSEC := 50
 const HARMFUL_FLUID_DAMAGE_INTERVAL := 20.0 / 60.0
@@ -163,6 +167,7 @@ func configure(backend_adapter: Object = null, multiplayer_adapter: Object = nul
 	protocol_version = int(options.get("protocol_version", protocol_version))
 	empty_grace_msec = maxi(0, int(float(options.get("empty_grace_seconds", float(empty_grace_msec) / 1000.0)) * 1000.0))
 	observation_radius = maxf(32.0, float(options.get("observation_radius", observation_radius)))
+	_strip_progression_gear = bool(options.get("strip_progression_gear", _strip_progression_gear))
 	_movement_step_callable = options.get("movement_step", Callable(self, "_default_movement_step")) if options.get("movement_step", Callable(self, "_default_movement_step")) is Callable else Callable(self, "_default_movement_step")
 	if options.get("response_enabled", true) is bool:
 		safety.response_enabled = bool(options.get("response_enabled", true))
@@ -266,6 +271,7 @@ func join_session(record: Dictionary) -> void:
 	_inventory_host_revision = 0
 	_inventory_client_revision = 0
 	_population_logged = false
+	_progression_gear_stripped = false
 	safety.reset_session()
 	_world_snapshot.clear()
 	_equipment_slots = {"hand": "", "feet": ""}
@@ -1581,6 +1587,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_snapshot_chunks.clear()
 	_update_human_count()
 	_set_state(STATE_PLAYING)
+	_maybe_strip_progression_gear()
 	_send_inventory_snapshot()
 	_welcome_emoji_pending = human_player_count > 0
 	_welcome_emoji_due_msec = Time.get_ticks_msec() + 900 if _welcome_emoji_pending else -1
@@ -1889,6 +1896,40 @@ func _send_inventory_snapshot() -> void:
 		"nourishment": int((_world_snapshot.get("self", {}) as Dictionary).get("nourishment", 100)),
 		"craft_slots": [null, null, null, null],
 		"craft_slot_durability": [0, 0, 0, 0],
+	})
+
+
+func _maybe_strip_progression_gear() -> void:
+	if not _strip_progression_gear or _progression_gear_stripped:
+		return
+	_progression_gear_stripped = true
+	var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+	var next := inventory.duplicate(true)
+	var removed: Array[String] = []
+	for item_name in ["wooden_pickaxe", "trail_boots"]:
+		if int(next.get(item_name, 0)) > 0:
+			next.erase(item_name)
+			removed.append(item_name)
+	var cleared_slots: Array[String] = []
+	for slot_name in ["hand", "feet"]:
+		var equipped := str(_equipment_slots.get(slot_name, ""))
+		if equipped in ["wooden_pickaxe", "trail_boots"]:
+			_equipment_slots[slot_name] = ""
+			cleared_slots.append(slot_name)
+	if removed.is_empty() and cleared_slots.is_empty():
+		structured_log.emit({
+			"event": "progression_gear_strip_skipped",
+			"reason": "already_empty",
+			"at_msec": Time.get_ticks_msec(),
+		})
+		return
+	_world_snapshot["inventory_summary"] = next
+	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+	structured_log.emit({
+		"event": "progression_gear_stripped",
+		"removed": removed,
+		"cleared_slots": cleared_slots,
+		"at_msec": Time.get_ticks_msec(),
 	})
 
 

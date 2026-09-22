@@ -52,6 +52,7 @@ var kill_switch := false
 var response_enabled := true
 var allow_world_ids: PackedStringArray = []
 var ai_options: Dictionary = {}
+var strip_progression_gear := false
 var recently_visited: Dictionary = {}
 var blacklisted_sessions: Dictionary = {}
 var _rng := RandomNumberGenerator.new()
@@ -80,6 +81,7 @@ func configure(backend_adapter: Object = null, multiplayer_adapter: Object = nul
 	enabled = bool(options.get("enabled", enabled))
 	kill_switch = bool(options.get("kill_switch", kill_switch))
 	response_enabled = bool(options.get("response_enabled", response_enabled))
+	strip_progression_gear = bool(options.get("strip_progression_gear", strip_progression_gear))
 	allow_world_ids = _normalize_string_array(options.get("allow_world_ids", options.get("allowed_world_ids", [])))
 	if options.get("ai_options", {}) is Dictionary:
 		ai_options = (options.get("ai_options", {}) as Dictionary).duplicate(true)
@@ -167,6 +169,7 @@ func _create_session(selected_protocol_version: int = -1) -> void:
 		"protocol_version": selected_protocol_version if selected_protocol_version > 0 else protocol_version,
 		"response_enabled": response_enabled,
 		"ai_options": ai_options,
+		"strip_progression_gear": strip_progression_gear,
 	})
 	session.session_ready.connect(_on_session_ready)
 	session.sync_started.connect(_on_session_sync_started)
