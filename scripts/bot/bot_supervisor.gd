@@ -139,6 +139,7 @@ func _discover() -> void:
 	if not response is Dictionary or not bool((response as Dictionary).get("ok", false)):
 		_schedule_retry(str((response as Dictionary).get("error", "discovery_failed")) if response is Dictionary else "discovery_failed")
 		return
+	_record_successful_listing()
 	var body: Dictionary = (response as Dictionary).get("body", {}) if (response as Dictionary).get("body", {}) is Dictionary else {}
 	var candidates := filter_public_sessions(body.get("sessions", []), protocol_version, Time.get_ticks_msec(), recently_visited)
 	if not allow_world_ids.is_empty():
@@ -243,6 +244,14 @@ func _schedule_retry(reason: String) -> void:
 	_next_discovery_msec = Time.get_ticks_msec() + int(delay * 1000.0)
 	_set_state(STATE_DISCOVERING)
 	_log("discovery_retry", {"attempt": _retry_attempt, "delay_seconds": delay, "reason": reason})
+
+
+func _record_successful_listing() -> void:
+	# Empty-but-successful listings prove the transport is healthy. Do not carry
+	# their no-world retry count into the next transient HTTP/WebSocket failure:
+	# doing so turned one error after a quiet period into a multi-minute pause
+	# exactly when a newly-created public world needed the bot.
+	_retry_attempt = 0
 
 
 func _set_state(next_state: String) -> void:
