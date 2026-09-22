@@ -62,9 +62,14 @@ func decide(observation: Dictionary) -> Dictionary:
 	# Immediate survival has priority over social or gathering behaviour.
 	var threats: Array = _as_array(observation.get("threats", []))
 	var creature_threat := _dangerous_creature_threat(observation, threats)
+	var lava_threat := _lava_threat(observation)
 	var arrow_cover := _incoming_arrow_cover_decision(observation)
 	if not arrow_cover.is_empty() and Contract.ACTION_PLACE in legal:
 		return arrow_cover
+	# Lava is lethal terrain, not a combat target. Flee before creatures/crafting
+	# so the bot does not keep mining/wandering while standing in a pool.
+	if not lava_threat.is_empty() and Contract.ACTION_FLEE_FROM in legal:
+		return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, lava_threat, 1400, 0.99)
 	if low_health and not creature_threat.is_empty() and Contract.ACTION_FLEE_FROM in legal:
 		return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, creature_threat, 1600, 0.96)
 
@@ -133,6 +138,18 @@ func decide(observation: Dictionary) -> Dictionary:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_OPEN_CONTAINER, pvp_chest, 900, 0.98)
 		if not _has_pvp_loadout(observation) and Contract.ACTION_MOVE_TO in legal:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, pvp_chest, 1800, 0.94)
+
+	# Death / one-use caches outrank mining and crafting. After a respawn the
+	# bot often sees wood and its own cache in the same radius; without this
+	# early pass it keeps chopping and never recovers the dropped inventory.
+	# Owner does not matter — multiplayer recovery intentionally allows anyone
+	# nearby to collect a cache.
+	var loot_cache := _priority_loot_cache(observation)
+	if not loot_cache.is_empty():
+		if bool(loot_cache.get("reachable", false)) and Contract.ACTION_OPEN_CONTAINER in legal:
+			return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_OPEN_CONTAINER, loot_cache, 900, 0.93)
+		if Contract.ACTION_MOVE_TO in legal:
+			return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, loot_cache, 1800, 0.9)
 
 	if not bridge_step.is_empty() and Contract.ACTION_PLACE in legal:
 		return Contract.normalize_decision(bridge_step)
@@ -362,6 +379,69 @@ func _dangerous_creature_threat(observation: Dictionary, threats: Array) -> Dict
 			continue
 		if distance < best_distance:
 			best = threat
+			best_distance = distance
+	return best
+
+
+func _lava_threat(observation: Dictionary) -> Dictionary:
+	# Flee only when lava overlaps the avatar (or sits underfoot). Nearby pools
+	# beside chests / trees must not cancel death-cache recovery forever —
+	# ordinary MOVE_TO already refuses to step onto lava columns.
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var px := float(self_state.get("x", 0.0))
+	var py := float(self_state.get("y", 0.0))
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var left := floori(px / float(BlockDefs.TILE))
+	var right := floori((px + width - 0.001) / float(BlockDefs.TILE))
+	var top := floori(py / float(BlockDefs.TILE))
+	var bottom := floori((py + height - 0.001) / float(BlockDefs.TILE))
+	var support_y := floori((py + height) / float(BlockDefs.TILE))
+	var best := {}
+	var best_score := INF
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		var name := str(tile.get("block_name", "")).to_lower()
+		if name != "lava" and not name.ends_with(".lava"):
+			continue
+		var tile_x := int(tile.get("x", 0))
+		var tile_y := int(tile.get("y", 0))
+		var overlapping := tile_x >= left and tile_x <= right and tile_y >= top and tile_y <= bottom
+		var underfoot := tile_x >= left and tile_x <= right and tile_y >= support_y and tile_y <= support_y + 1
+		if not overlapping and not underfoot:
+			continue
+		var score := 0.0 if overlapping else 1.0
+		if score >= best_score:
+			continue
+		var origin := Contract.target_position(self_state)
+		var position := Vector2((float(tile_x) + 0.5) * BlockDefs.TILE, (float(tile_y) + 0.5) * BlockDefs.TILE)
+		best = {
+			"id": "lava:%d:%d" % [tile_x, tile_y],
+			"x": tile_x,
+			"y": tile_y,
+			"position": [position.x, position.y],
+			"kind": "lava",
+			"distance": origin.distance_to(position),
+		}
+		best_score = score
+	return best
+
+
+func _priority_loot_cache(observation: Dictionary) -> Dictionary:
+	var best := {}
+	var best_distance := INF
+	for raw_container in _as_array(observation.get("visible_containers", [])):
+		if not raw_container is Dictionary:
+			continue
+		var container := raw_container as Dictionary
+		var kind := str(container.get("kind", ""))
+		if kind != "death_cache" and kind != "one_use_cache" and not bool(container.get("death_cache", false)) and not bool(container.get("one_use_cache", false)):
+			continue
+		var distance := float(container.get("distance", Contract.distance_between(observation.get("self", {}), container)))
+		if distance < best_distance:
+			best = container
 			best_distance = distance
 	return best
 

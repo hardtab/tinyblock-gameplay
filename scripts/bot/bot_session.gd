@@ -624,6 +624,13 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		# bridge planner instead of holding MOVE_TO until the bot walks/falls off
 		# the island.
 		return {"done": true, "reason": "edge_guard"}
+	# Flee may still need to step out of lava underfoot. Ordinary MOVE_TO /
+	# FOLLOW / wander must not walk onto a known lava column.
+	if action != Contract.ACTION_FLEE_FROM and bool(self_state.get("on_ground", false)) and _would_step_into_lava(origin, destination):
+		_set_desired_input(false, false, false)
+		_advance_local_physics(self_state, delta, false)
+		_world_snapshot["self"] = self_state
+		return {"done": true, "reason": "lava_guard"}
 	_set_desired_input(direction < 0.0, direction > 0.0, false)
 	_advance_local_physics(self_state, delta, false)
 	var next_position := Contract.target_position(self_state)
@@ -884,7 +891,9 @@ func _apply_tile_batch(payload: Dictionary) -> void:
 		if not raw_tile is Dictionary:
 			continue
 		var tile := raw_tile as Dictionary
-		var key := "%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]
+		var tile_x := int(tile.get("x", 0))
+		var tile_y := int(tile.get("y", 0))
+		var key := "%d:%d" % [tile_x, tile_y]
 		var name := _block_name_for_content_id(str(tile.get("content_id", "")))
 		if name.is_empty():
 			name = str(tile.get("block_name", ""))
@@ -896,6 +905,11 @@ func _apply_tile_batch(payload: Dictionary) -> void:
 			_terrain_tiles.erase(key)
 		elif not name.is_empty():
 			_terrain_tiles[key] = name
+		# Host death caches / chests arrive on the same tile_batch as terrain.
+		# Without this merge the bot never learns about a cache created after join
+		# (including its own drop after lava/combat defeat).
+		if tile.has("container"):
+			_update_snapshot_container(key, tile.get("container", null))
 	_physics_route_replan_msec = 0
 
 
@@ -1343,6 +1357,30 @@ func _would_step_into_void(origin: Vector2, destination: Vector2) -> bool:
 	if _terrain_solid_at(next_x, support.y + 1) or _terrain_solid_at(next_x, support.y + 2):
 		return false
 	return true
+
+
+func _terrain_is_lava_at(tx: int, ty: int) -> bool:
+	var name := _terrain_name_at(tx, ty).to_lower()
+	if name == "lava" or name.ends_with(".lava"):
+		return true
+	var entry := _block_entry(name)
+	return bool(entry.get("fluid", false)) and float(entry.get("temperature", 0.0)) >= 0.8
+
+
+func _would_step_into_lava(origin: Vector2, destination: Vector2) -> bool:
+	if _terrain_tiles.is_empty():
+		return false
+	var direction := signf(destination.x - origin.x)
+	if is_zero_approx(direction):
+		return false
+	var support := _support_tile_for_position(origin)
+	var next_x := floori((origin.x + 10.0 + direction * 18.0) / float(BlockDefs.TILE))
+	# Feet of the next column, plus the immediate drop, match how lava pools
+	# sit relative to a standing avatar on Skyblock pads.
+	for dy in range(-1, 3):
+		if _terrain_is_lava_at(next_x, support.y + dy):
+			return true
+	return false
 
 
 func _climb_step(self_state: Dictionary, destination: Vector2, delta: float) -> Dictionary:
@@ -2725,7 +2763,8 @@ func _handle_action_result(payload: Dictionary) -> void:
 func _update_snapshot_container(key: String, raw_container: Variant) -> void:
 	var raw_containers: Variant = _world_snapshot.get("containers", [])
 	if not raw_containers is Array:
-		return
+		raw_containers = []
+		_world_snapshot["containers"] = raw_containers
 	var parts := key.split(":")
 	if parts.size() != 2:
 		return
