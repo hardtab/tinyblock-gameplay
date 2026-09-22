@@ -29,11 +29,15 @@ const MAX_CONSECUTIVE_MINING_ACTIONS := 3
 const LOCAL_OPTIMISTIC_CRAFTS := [
 	"planks", "palm_planks", "pine_planks", "weeping_planks",
 	"stick", "wooden_pickaxe", "workbench", "chest", "trail_boots",
+	"stone_pickaxe", "stone_axe", "stone_sword",
 ]
 const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stick", "workbench", "chest"]
 # Boots right after the wooden pickaxe so leaf/plank gear is proven before
-# station-gated stone tools the optimistic craft path cannot complete.
-const PROGRESSION_CRAFTS := ["wooden_pickaxe", "trail_boots", "workbench", "chest"]
+# station-gated stone tools.
+const PROGRESSION_CRAFTS := [
+	"wooden_pickaxe", "trail_boots", "workbench",
+	"stone_pickaxe", "stone_axe", "stone_sword", "chest",
+]
 const WOOD_BLOCK_NAMES := ["wood", "palm_wood", "pine_wood", "weeping_wood"]
 const LEAF_BLOCK_NAMES := ["leaves", "palm_leaves", "pine_needles", "weeping_leaves"]
 const PLANK_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks"]
