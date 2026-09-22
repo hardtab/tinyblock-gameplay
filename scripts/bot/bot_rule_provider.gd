@@ -548,6 +548,14 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			if required_tier > 0 and not _has_required_mining_tier(observation, resource) and _mining_tool_for_target(observation, resource).is_empty():
 				continue
 		var block_name := str(resource.get("block_name", "")).to_lower()
+		# Never treat the bot's own crafted placements as gather targets. Mining
+		# planks/chests/workbenches it just placed looks like being stuck and
+		# starves real wood/leaf progression.
+		if block_name in [
+			"planks", "palm_planks", "pine_planks", "weeping_planks",
+			"stick", "workbench", "chest", "furnace", "torch",
+		]:
+			continue
 		# Only skip ice filler when a real tree/leaf target is also visible.
 		# Otherwise keep mining soft terrain so activity tests and empty pads
 		# still make progress.

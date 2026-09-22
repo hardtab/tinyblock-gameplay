@@ -4,12 +4,17 @@ extends RefCounted
 const EmojiReactions = preload("res://gameplay/scripts/emoji_reactions.gd")
 
 const TRANSPORT_COOLDOWN_MSEC := EmojiReactions.SEND_COOLDOWN_MSEC
-const SOCIAL_COOLDOWN_MSEC := 15_000
+## Keep reactions sparse. A short social cooldown still let the bot feel chatty
+## once the send gate raced ahead of the cooldown bookkeeping.
+const SOCIAL_COOLDOWN_MSEC := 45_000
 
 
 func emoji_can_send(last_sent_msec: int, now_msec: int, emoji: String, previous_emoji: String = "", social_last_sent_msec: int = -1) -> bool:
 	var sanitized := EmojiReactions.sanitize(emoji)
-	if sanitized.is_empty() or (not previous_emoji.is_empty() and sanitized == previous_emoji):
+	if sanitized.is_empty():
+		return false
+	# Never repeat the immediately previous reaction. Players already saw it.
+	if not previous_emoji.is_empty() and sanitized == previous_emoji:
 		return false
 	if last_sent_msec >= 0 and now_msec - last_sent_msec < TRANSPORT_COOLDOWN_MSEC:
 		return false

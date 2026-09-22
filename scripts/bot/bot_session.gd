@@ -2132,14 +2132,31 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["enemy_player_id"] = _enemy_player_id()
 	snapshot["bow_attack_distance"] = BlockDefs.TILE * 10.0
 	snapshot["achievements"] = _achievement_observation()
+	var candidate_emoji := ""
 	if _welcome_emoji_pending and now_msec >= _welcome_emoji_due_msec:
-		snapshot["social_emoji"] = "👋"
+		candidate_emoji = "👋"
 	elif not _pending_social_emoji.is_empty():
-		snapshot["social_emoji"] = _pending_social_emoji
+		candidate_emoji = _pending_social_emoji
 		if not _pending_social_emoji_target_id.is_empty():
 			snapshot["social_target_id"] = _pending_social_emoji_target_id
+	# Only expose a reaction when the social gate would actually allow a send.
+	# Otherwise the rule provider keeps selecting SEND_EMOJI, the executor
+	# transmits before the cooldown check runs, and the pending emoji never
+	# clears — producing a wave every ~700 ms.
+	if not candidate_emoji.is_empty() and _social.emoji_can_send(
+		_last_emoji_sent_msec,
+		now_msec,
+		candidate_emoji,
+		_previous_emoji,
+		_social_last_sent_msec,
+	):
+		snapshot["social_emoji"] = candidate_emoji
 	else:
 		snapshot["social_emoji"] = ""
+		# Same-as-previous can never become legal; drop it. Cooldown-only
+		# failures keep the pending reply until the social window reopens.
+		if not candidate_emoji.is_empty() and not _previous_emoji.is_empty() and candidate_emoji == _previous_emoji:
+			_clear_social_emoji_queue()
 	# Duel arenas may place the pinned opponent farther away than the ordinary
 	# social observation radius. The provider still filters to the single pinned
 	# enemy, so expanding only this read radius cannot authorize random PvP.
@@ -2472,6 +2489,11 @@ func _queue_emoji_reply(event: Dictionary) -> void:
 		return
 	var incoming := str(event.get("emoji", ""))
 	var sender_id := str(event.get("player_id", ""))
+	# Ignore echo/same-as-last reactions so a player's wave cannot re-arm the
+	# bot to spam the identical emoji once the social cooldown expires.
+	var fallback := Social.reply_emoji(incoming)
+	if not fallback.is_empty() and fallback == _previous_emoji:
+		return
 	var context := {
 		"incoming_emoji": incoming,
 		"player_id": sender_id,
@@ -2483,7 +2505,7 @@ func _queue_emoji_reply(event: Dictionary) -> void:
 			structured_log.emit({"event": "emoji_ai_requested", "incoming_emoji": incoming, "player_id": sender_id, "at_msec": Time.get_ticks_msec()})
 			return
 		_emoji_reply_inflight = false
-	_pending_social_emoji = Social.reply_emoji(incoming)
+	_pending_social_emoji = fallback
 	_pending_social_emoji_target_id = sender_id
 	structured_log.emit({
 		"event": "emoji_reply_queued",
@@ -2499,9 +2521,10 @@ func _on_ai_emoji_reply(emoji: String, context: Dictionary) -> void:
 	_emoji_reply_inflight = false
 	var sanitized := EmojiReactions.sanitize(emoji)
 	if sanitized.is_empty():
-		_pending_social_emoji = Social.reply_emoji(str(context.get("incoming_emoji", "")))
-	else:
-		_pending_social_emoji = sanitized
+		sanitized = Social.reply_emoji(str(context.get("incoming_emoji", "")))
+	if sanitized.is_empty() or sanitized == _previous_emoji:
+		return
+	_pending_social_emoji = sanitized
 	_pending_social_emoji_target_id = str(context.get("player_id", ""))
 	structured_log.emit({
 		"event": "emoji_reply_queued",
@@ -2515,7 +2538,10 @@ func _on_ai_emoji_reply(emoji: String, context: Dictionary) -> void:
 
 func _on_ai_emoji_failed(reason: String, context: Dictionary) -> void:
 	_emoji_reply_inflight = false
-	_pending_social_emoji = Social.reply_emoji(str(context.get("incoming_emoji", "")))
+	var fallback := Social.reply_emoji(str(context.get("incoming_emoji", "")))
+	if fallback.is_empty() or fallback == _previous_emoji:
+		return
+	_pending_social_emoji = fallback
 	_pending_social_emoji_target_id = str(context.get("player_id", ""))
 	structured_log.emit({
 		"event": "emoji_ai_failed",
@@ -2551,12 +2577,14 @@ func _on_decision_started(decision: Dictionary) -> void:
 	var action := str(decision.get("action", ""))
 	if action == Contract.ACTION_EQUIP:
 		var item_name := str(decision.get("target_id", ""))
-		# Equipment is now applied by the authoritative host through equip_item.
-		# Do not overwrite the replicated inventory optimistically: an older host
-		# snapshot would otherwise clear the slot and make the provider equip the
-		# same boots/pickaxe forever.
+		# Apply a local optimistic slot so the rule provider does not re-select
+		# EQUIP every 350 ms while the host ack is in flight. Host snapshots still
+		# overwrite these slots when they arrive.
 		if not item_name.is_empty():
 			_pending_action_targets["equip"] = {"action": action, "item": item_name, "sent_at_msec": now_msec}
+			var slot_name := "feet" if item_name.ends_with("_boots") or item_name.ends_with("_sandals") else "hand"
+			_equipment_slots[slot_name] = item_name
+			_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	elif action == Contract.ACTION_MINE or action == Contract.ACTION_PLACE:
 		var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
 		var key := "%d:%d" % [int(target.get("x", 0)), int(target.get("y", 0))]
@@ -2606,16 +2634,26 @@ func _on_decision_started(decision: Dictionary) -> void:
 			_pvp_chest_opened = true
 	if action == Contract.ACTION_SEND_EMOJI:
 		var emoji := str(decision.get("emoji", ""))
+		# The executor already transmitted. Only bookkeep + clear the queue here;
+		# the observation gate above must prevent unsendable reactions from
+		# reaching start() in the first place.
 		if _social.emoji_can_send(_last_emoji_sent_msec, now_msec, emoji, _previous_emoji, _social_last_sent_msec):
 			_last_emoji_sent_msec = now_msec
 			_social_last_sent_msec = now_msec
 			_previous_emoji = emoji
-			_welcome_emoji_pending = false
-			_pending_social_emoji = ""
-			_pending_social_emoji_target_id = ""
+			_clear_social_emoji_queue()
 		else:
+			_clear_social_emoji_queue()
 			behavior.executor.cancel("emoji_cooldown")
 	decision_logged.emit({"event": "decision_started", "decision": decision.duplicate(true), "at_msec": now_msec})
+
+
+func _clear_social_emoji_queue() -> void:
+	_welcome_emoji_pending = false
+	_welcome_emoji_due_msec = -1
+	_pending_social_emoji = ""
+	_pending_social_emoji_target_id = ""
+	_emoji_reply_inflight = false
 
 
 func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
@@ -2696,9 +2734,18 @@ func _handle_action_result(payload: Dictionary) -> void:
 		"target_id": str(payload.get("target_id", "")),
 	}, "accepted" if bool(payload.get("accepted", false)) else "rejected")
 	if action == "equip_item":
+		var pending_equip: Dictionary = _pending_action_targets.get("equip", {}) if _pending_action_targets.get("equip", {}) is Dictionary else {}
 		_pending_action_targets.erase("equip")
 		if bool(payload.get("accepted", false)) and payload.get("equipment_slots", null) is Dictionary:
 			_equipment_slots = (payload.get("equipment_slots") as Dictionary).duplicate(true)
+			_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+		elif not bool(payload.get("accepted", false)):
+			# Roll back the optimistic hand/feet slot so a rejected equip does not
+			# permanently look equipped and starve later tool swaps.
+			var rejected_item := str(pending_equip.get("item", ""))
+			for slot_name in ["hand", "feet"]:
+				if str(_equipment_slots.get(slot_name, "")) == rejected_item:
+					_equipment_slots[slot_name] = ""
 			_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 		return
 	if action == "open_container":
