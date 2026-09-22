@@ -109,11 +109,13 @@ func decide(observation: Dictionary) -> Dictionary:
 	if not bridge_step.is_empty() and Contract.ACTION_PLACE in legal:
 		return Contract.normalize_decision(bridge_step)
 
-	# Equip battle gear before choosing the combat action. The pvp-aware helper
-	# keeps the bot from cycling through every tool after the chest is looted.
-	var equip_target := _equipable_tool(observation)
-	if not equip_target.is_empty() and Contract.ACTION_EQUIP in legal:
-		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_EQUIP, {"id": equip_target}, 350, 0.96)
+	# Equip battle gear before choosing the combat action. Outside PvP, tools are
+	# equipped only when mining or fighting creatures so the bot does not spin
+	# through every pickaxe and bow in an empty starter inventory.
+	if bool(observation.get("pvp_world", false)):
+		var equip_target := _equipable_tool(observation)
+		if not equip_target.is_empty() and Contract.ACTION_EQUIP in legal:
+			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_EQUIP, {"id": equip_target}, 350, 0.96)
 
 	# A bow is a deliberate ranged activity.  In a PvP world the enemy is
 	# pinned for the lifetime of the session; outside PvP, only hostile creatures
@@ -505,9 +507,6 @@ func _equipable_tool(observation: Dictionary) -> String:
 			if int(inventory.get(preferred, 0)) > 0:
 				return "" if current == preferred else preferred
 		return ""
-	for preferred in ["bow", "stone_pickaxe", "copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "resonance_pickaxe", "stone_axe", "stone_sword"]:
-		if int(inventory.get(preferred, 0)) > 0 and current != preferred:
-			return preferred
 	return ""
 
 

@@ -11,6 +11,7 @@ const BehaviorClass = preload("res://gameplay/scripts/bot/bot_behavior.gd")
 const RuleProviderClass = preload("res://gameplay/scripts/bot/bot_rule_provider.gd")
 const SafetyClass = preload("res://gameplay/scripts/bot/bot_safety_policy.gd")
 const ExecutorClass = preload("res://gameplay/scripts/bot/bot_executor.gd")
+const ActionLoop = preload("res://gameplay/scripts/bot/bot_action_loop.gd")
 
 signal state_changed(state: String)
 signal sync_started(session_id: String)
@@ -62,6 +63,7 @@ var _roster: Dictionary = {}
 var _recent_events: Array[Dictionary] = []
 var _recent_emoji_events: Array[Dictionary] = []
 var _action_history: Array[Dictionary] = []
+var _action_loop_blocked_until: Dictionary = {}
 var _last_emoji_sent_msec := -1
 var _previous_emoji := ""
 var _social_last_sent_msec := -1
@@ -184,6 +186,7 @@ func join_session(record: Dictionary) -> void:
 	_desired_input = {"left": false, "right": false, "jump": false}
 	_pending_action_targets.clear()
 	_blocked_action_targets.clear()
+	_action_loop_blocked_until.clear()
 	_terrain_tiles.clear()
 	_physics_route.clear()
 	_physics_route_target = Vector2i(2147483647, 2147483647)
@@ -210,6 +213,7 @@ func join_session(record: Dictionary) -> void:
 	_population_logged = false
 	safety.reset_session()
 	_world_snapshot.clear()
+	_equipment_slots = {"hand": "", "feet": ""}
 	world_id = str(record.get("world_id", ""))
 	_set_state(STATE_JOINING)
 	if backend == null or not backend.has_method("join_multiplayer_session"):
@@ -444,7 +448,7 @@ func _send_player_snapshot_if_due(now_msec: int) -> void:
 		"nourishment": clampi(int(local.get("nourishment", 100)), 0, 100),
 		"respawn_revision": int(local.get("respawn_revision", 0)),
 		"skin": BOT_SKIN.duplicate(true),
-		"equipment_slots": _equipment_slots.duplicate(true),
+		"equipment_slots": _replicated_equipment_slots(),
 	})
 
 
@@ -1173,9 +1177,11 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		_duel_started = true
 		_record_event("duel_start_inferred", {"reason": "active_duel_snapshot"})
 	_world_snapshot["self"] = local_state.duplicate(true)
-	_world_snapshot["inventory_summary"] = _inventory_by_name(snapshot.get("inventory", {}))
+	# Root-level inventory/equipment belong to the host avatar. A guest bot must
+	# start empty unless its own multiplayer.player_states entry already exists.
+	_world_snapshot["inventory_summary"] = _inventory_summary_from_player_state(local_state)
 	_world_snapshot["recipes"] = _recipe_catalog(snapshot)
-	_equipment_slots = _equipment_by_name(snapshot.get("equipment_slots", {}))
+	_equipment_slots = _equipment_from_player_state(local_state)
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	_world_snapshot["craft_pending_output"] = _craft_pending_output
 	_world_snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
@@ -1233,6 +1239,50 @@ func _inventory_by_name(raw_inventory: Variant) -> Dictionary:
 		var name := _block_name_for_content_id(str(raw_id))
 		if not name.is_empty():
 			result[name] = int((raw_inventory as Dictionary)[raw_id])
+	return result
+
+
+func _inventory_summary_from_player_state(player_state: Dictionary) -> Dictionary:
+	var raw_inventory = player_state.get("inventory", {})
+	if not raw_inventory is Dictionary:
+		return {}
+	var result := {}
+	for raw_key in raw_inventory:
+		var amount := int((raw_inventory as Dictionary)[raw_key])
+		if amount <= 0:
+			continue
+		var key := str(raw_key)
+		var name := _block_name_for_content_id(key)
+		if name.is_empty():
+			name = key
+		if not name.is_empty():
+			result[name] = amount
+	return result
+
+
+func _replicated_equipment_slots() -> Dictionary:
+	var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+	var slots := _equipment_slots.duplicate(true)
+	for slot_name in ["hand", "feet"]:
+		var item_name := str(slots.get(slot_name, ""))
+		if not item_name.is_empty() and int(inventory.get(item_name, 0)) <= 0:
+			slots[slot_name] = ""
+	return slots
+
+
+func _equipment_from_player_state(player_state: Dictionary) -> Dictionary:
+	var result := {"hand": "", "feet": ""}
+	var raw_equipment = player_state.get("equipment_slots", {})
+	if not raw_equipment is Dictionary:
+		return result
+	for slot_name in result:
+		var raw_value := str((raw_equipment as Dictionary).get(slot_name, ""))
+		if raw_value.is_empty():
+			continue
+		var name := _block_name_for_content_id(raw_value)
+		if name.is_empty():
+			name = raw_value
+		result[slot_name] = name
 	return result
 
 
@@ -1473,7 +1523,17 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["emoji_events"] = _active_emoji_events(now_msec)
 	snapshot["action_history"] = _action_history.duplicate(true)
 	snapshot["world_id"] = world_id
-	snapshot["legal_actions"] = Contract.ALL_ACTIONS
+	_action_loop_blocked_until = ActionLoop.refresh_blocked_actions(
+		_action_history,
+		_action_loop_blocked_until,
+		now_msec,
+	)
+	snapshot["legal_actions"] = ActionLoop.filter_legal_actions(
+		Contract.ALL_ACTIONS,
+		_action_loop_blocked_until,
+		now_msec,
+	)
+	snapshot["action_loop_blocked"] = ActionLoop.active_blocks(_action_loop_blocked_until, now_msec)
 	snapshot["self_defense"] = safety.observation_state(now_msec)
 	snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	snapshot["craft_pending_output"] = _craft_pending_output
