@@ -27,6 +27,7 @@ const WOOD_BLOCK_NAMES := ["wood", "palm_wood", "pine_wood", "weeping_wood"]
 const LEAF_BLOCK_NAMES := ["leaves", "palm_leaves", "pine_needles", "weeping_leaves"]
 const PLANK_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks"]
 const KNOWN_FOODS := ["wild_berries", "prepared_meal"]
+const PROGRESSION_HAND_TOOLS := ["crystal_pickaxe", "copper_pickaxe", "stone_pickaxe", "wooden_pickaxe"]
 const HUNGER_EAT_THRESHOLD := 55
 const HUNGER_FORAGE_THRESHOLD := 70
 const MAX_NOURISHMENT := 100
@@ -97,7 +98,8 @@ func decide(observation: Dictionary) -> Dictionary:
 	var nourishment := clampi(int(self_state.get("nourishment", MAX_NOURISHMENT)), 0, MAX_NOURISHMENT)
 	var hungry := nourishment <= HUNGER_EAT_THRESHOLD
 	var foraging := nourishment <= HUNGER_FORAGE_THRESHOLD
-	if hungry and Contract.ACTION_EAT in legal:
+	var eat_cooling := int(observation.get("observed_at_msec", 0)) < int(observation.get("food_eat_cooldown_until_msec", -1))
+	if hungry and not eat_cooling and Contract.ACTION_EAT in legal:
 		var food_name := _best_food_in_inventory(observation)
 		if not food_name.is_empty():
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_EAT, {"id": food_name}, 500, 0.97)
@@ -193,6 +195,13 @@ func decide(observation: Dictionary) -> Dictionary:
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_CRAFT, {"id": meal_target}, 700, 0.93)
 	if not craft_target.is_empty() and Contract.ACTION_CRAFT in legal:
 		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_CRAFT, {"id": craft_target}, 700, 0.9)
+	# After crafting a pickaxe (or looting one), put it in hand before gathering.
+	# Soft resources like wood do not require a harvest tier, so the old mining
+	# path never equipped anything and the avatar stayed bare-handed.
+	if not bool(observation.get("pvp_world", false)):
+		var progression_hand := _empty_hand_progression_tool(observation)
+		if not progression_hand.is_empty() and Contract.ACTION_EQUIP in legal:
+			return _decision(Contract.GOAL_GATHER, Contract.ACTION_EQUIP, {"id": progression_hand}, 350, 0.91)
 	if not threats.is_empty() and Contract.ACTION_ATTACK_CREATURE in legal:
 		var creature := _first_dictionary(threats)
 		if float(creature.get("distance", 9999.0)) <= float(observation.get("creature_attack_distance", 48.0)):
@@ -665,6 +674,37 @@ func _equipable_tool(observation: Dictionary) -> String:
 	return ""
 
 
+func _empty_hand_progression_tool(observation: Dictionary) -> String:
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	if not str(equipment.get("hand", "")).is_empty():
+		return ""
+	return _best_owned_mining_tool(observation)
+
+
+func _best_owned_mining_tool(observation: Dictionary) -> String:
+	var inventory := _inventory(observation)
+	var best := ""
+	var best_tier := -1
+	for raw_name in inventory.keys():
+		var name := str(raw_name)
+		if int(inventory.get(name, 0)) <= 0:
+			continue
+		var tier := _tool_harvest_tier(name)
+		if tier <= 0 and name in PROGRESSION_HAND_TOOLS:
+			tier = PROGRESSION_HAND_TOOLS.size() - PROGRESSION_HAND_TOOLS.find(name)
+		if tier <= 0:
+			continue
+		if tier > best_tier:
+			best = name
+			best_tier = tier
+	if not best.is_empty():
+		return best
+	for preferred in PROGRESSION_HAND_TOOLS:
+		if int(inventory.get(preferred, 0)) > 0:
+			return preferred
+	return ""
+
+
 func _has_pvp_loadout(observation: Dictionary) -> bool:
 	var inventory := _inventory(observation)
 	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
@@ -864,10 +904,15 @@ func _tile_overlaps_player(tile: Vector2i, self_state: Dictionary) -> bool:
 
 func _mining_tool_for_target(observation: Dictionary, target: Dictionary) -> String:
 	var required_tier := int(target.get("harvest_tier", 0))
-	if required_tier <= 0:
-		return ""
 	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
-	if _tool_harvest_tier(str(equipment.get("hand", ""))) >= required_tier:
+	var hand := str(equipment.get("hand", ""))
+	if required_tier <= 0:
+		# Soft blocks (wood, dirt) do not need a tier, but still equip a owned
+		# pickaxe so the avatar is visibly holding a tool while gathering.
+		if not hand.is_empty():
+			return ""
+		return _best_owned_mining_tool(observation)
+	if _tool_harvest_tier(hand) >= required_tier:
 		return ""
 	var inventory := _inventory(observation)
 	var best := ""
@@ -877,6 +922,8 @@ func _mining_tool_for_target(observation: Dictionary, target: Dictionary) -> Str
 		if int(inventory.get(name, 0)) <= 0:
 			continue
 		var tier := _tool_harvest_tier(name)
+		if tier <= 0 and name in PROGRESSION_HAND_TOOLS:
+			tier = PROGRESSION_HAND_TOOLS.size() - PROGRESSION_HAND_TOOLS.find(name)
 		if tier >= required_tier and tier < best_tier:
 			best = name
 			best_tier = tier
@@ -886,7 +933,7 @@ func _mining_tool_for_target(observation: Dictionary, target: Dictionary) -> Str
 func _has_required_mining_tier(observation: Dictionary, target: Dictionary) -> bool:
 	var required_tier := int(target.get("harvest_tier", 0))
 	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
-	return _tool_harvest_tier(str(equipment.get("hand", ""))) >= required_tier
+	return _tool_harvest_tier(str(equipment.get("hand", ""))) >= required_tier or required_tier <= 0
 
 
 func _tool_harvest_tier(block_name: String) -> int:

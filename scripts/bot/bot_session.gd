@@ -103,7 +103,10 @@ var _pvp_chest_opened := false
 var _last_duel_ready_msec := -1
 var _craft_pending_output := ""
 var _craft_retry_after_msec := -1
+## output_name -> blocked_until_msec. Timed so a missed craft_recipe ack
+## cannot permanently starve plank/tool progression for the session.
 var _craft_blocked_outputs: Dictionary = {}
+var _food_eat_cooldown_until_msec := -1
 var _population_logged := false
 const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
 const PLAYER_INPUT_INTERVAL_MSEC := 50
@@ -112,6 +115,8 @@ const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const TREE_CLIMB_SPEED := -3.2
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
+const CRAFT_BLOCK_COOLDOWN_MSEC := 12_000
+const FOOD_EAT_COOLDOWN_MSEC := 8_000
 const ACTION_RETRY_BLOCK_MSEC := 8_000
 const EMOJI_EVENT_TTL_MSEC := 8_000
 const SUPPORT_PLACE_COOLDOWN_MSEC := 650
@@ -244,6 +249,7 @@ func join_session(record: Dictionary) -> void:
 	_craft_pending_output = ""
 	_craft_retry_after_msec = -1
 	_craft_blocked_outputs.clear()
+	_food_eat_cooldown_until_msec = -1
 	_population_logged = false
 	safety.reset_session()
 	_world_snapshot.clear()
@@ -1220,7 +1226,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	_world_snapshot["craft_pending_output"] = _craft_pending_output
 	_world_snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
-	_world_snapshot["craft_blocked_outputs"] = _craft_blocked_outputs.keys()
+	_world_snapshot["craft_blocked_outputs"] = _active_craft_blocked_outputs(Time.get_ticks_msec())
 	_world_snapshot["visible_resources"] = _visible_resources_from_tiles(_world_snapshot.get("tiles", []), local_state)
 	_world_snapshot["visible_containers"] = _visible_containers_from_snapshot(_world_snapshot, local_state)
 	_world_snapshot["threats"] = _threats_from_creatures(_world_snapshot.get("creatures", []))
@@ -1398,6 +1404,11 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 					continue
 				if field in ["x", "y", "vx", "vy", "on_ground"] and not reconcile_motion:
 					continue
+				# Delayed host echoes of nourishment jump the bar backwards after a
+				# local eat and make the bot spam EAT while berries are still present.
+				if field == "nourishment":
+					local_state[field] = clampi(int(local_state.get("nourishment", entry[field])), 0, 100)
+					continue
 				local_state[field] = entry[field]
 			_world_snapshot["self"] = local_state
 			continue
@@ -1522,7 +1533,11 @@ func _apply_inventory_snapshot(payload: Dictionary) -> void:
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	if payload.has("nourishment"):
 		var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
-		self_state["nourishment"] = clampi(int(payload.get("nourishment", 100)), 0, 100)
+		var current := clampi(int(self_state.get("nourishment", 100)), 0, 100)
+		var incoming := clampi(int(payload.get("nourishment", 100)), 0, 100)
+		# Keep a just-eaten local increase until the host catches up; still accept
+		# higher host values and never let a stale echo undo a successful bite.
+		self_state["nourishment"] = maxi(current, incoming)
 		_world_snapshot["self"] = self_state
 	if not _craft_pending_output.is_empty() and int(inventory.get(_craft_pending_output, 0)) > 0:
 		_craft_blocked_outputs.erase(_craft_pending_output)
@@ -1582,7 +1597,8 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	snapshot["craft_pending_output"] = _craft_pending_output
 	snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
-	snapshot["craft_blocked_outputs"] = _craft_blocked_outputs.keys()
+	snapshot["craft_blocked_outputs"] = _active_craft_blocked_outputs(now_msec)
+	snapshot["food_eat_cooldown_until_msec"] = _food_eat_cooldown_until_msec
 	snapshot["terrain_tiles"] = _terrain_observation(snapshot["self"] as Dictionary)
 	snapshot["visible_containers"] = _visible_containers_from_snapshot(snapshot, snapshot["self"] as Dictionary)
 	if _is_pvp_world() and not _pvp_chest_opened and _duel_fallback_container(snapshot["self"] as Dictionary).size() > 0:
@@ -2026,6 +2042,7 @@ func _apply_local_eat(food_name: String) -> bool:
 	self_state["nourishment"] = mini(100, nourishment + restore)
 	_world_snapshot["inventory_summary"] = inventory
 	_world_snapshot["self"] = self_state
+	_food_eat_cooldown_until_msec = Time.get_ticks_msec() + FOOD_EAT_COOLDOWN_MSEC
 	_send_inventory_snapshot()
 	structured_log.emit({
 		"event": "food_consumed",
@@ -2080,7 +2097,7 @@ func _handle_action_result(payload: Dictionary) -> void:
 		var output := str(craft.get("output", payload.get("output", "")))
 		_craft_pending_output = ""
 		if not accepted and not output.is_empty():
-			_craft_blocked_outputs[output] = true
+			_block_craft_output(output)
 		elif accepted:
 			_craft_blocked_outputs.erase(output)
 		_craft_retry_after_msec = Time.get_ticks_msec() + (CRAFT_RETRY_DELAY_MSEC if not accepted else 2_000)
@@ -2157,12 +2174,31 @@ func _host_id_from_network() -> String:
 func _expire_craft_pending(now_msec: int) -> void:
 	if _craft_pending_output.is_empty() or _craft_retry_after_msec < 0 or now_msec < _craft_retry_after_msec:
 		return
-	# Older community hosts may ignore the newer craft_recipe command. Mark the
-	# output unavailable for this session instead of retrying forever and
-	# starving the bot's mining/building goals.
-	_craft_blocked_outputs[_craft_pending_output] = true
+	# Older community hosts may ignore craft_recipe briefly. Cool the output down
+	# for a short window instead of permanently starving planks/tools.
+	_block_craft_output(_craft_pending_output, now_msec)
 	_craft_pending_output = ""
 	_craft_retry_after_msec = -1
+
+
+func _block_craft_output(output: String, now_msec: int = -1) -> void:
+	output = output.strip_edges()
+	if output.is_empty():
+		return
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	_craft_blocked_outputs[output] = now_msec + CRAFT_BLOCK_COOLDOWN_MSEC
+
+
+func _active_craft_blocked_outputs(now_msec: int) -> Array:
+	var active: Array = []
+	for raw_output in _craft_blocked_outputs.keys():
+		var output := str(raw_output)
+		if now_msec < int(_craft_blocked_outputs[raw_output]):
+			active.append(output)
+		else:
+			_craft_blocked_outputs.erase(raw_output)
+	return active
 
 
 func _achievement_observation() -> Dictionary:
