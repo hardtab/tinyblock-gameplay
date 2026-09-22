@@ -612,10 +612,11 @@ func _pvp_gap_ahead(origin: Vector2, destination: Vector2) -> bool:
 	# causing an endless MOVE_TO -> edge_guard loop after the first bridge block.
 	if _terrain_solid_at(next_x, support.y):
 		return false
-	# Duel arenas have two fixed six-block islands centered at -18 and 18.
-	# Stop at the edge before the next input can carry the bot into the void;
-	# the next provider decision can then place a bounded bridge block.
-	return (direction < 0.0 and support.x <= 13 and support.x >= 10) or (direction > 0.0 and support.x >= -13 and support.x <= -10)
+	# Stop before any empty next column on the duel lane — the unfinished bridge
+	# tip is the same hazard as the original island lip.
+	if _terrain_solid_at(next_x, support.y + 1):
+		return false
+	return not _terrain_tiles.has("%d:%d" % [next_x, support.y]) or str(_terrain_tiles.get("%d:%d" % [next_x, support.y], "")).is_empty()
 
 
 func _set_desired_input(move_left: bool, move_right: bool, jump: bool) -> void:
@@ -1353,12 +1354,17 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 		var entry := (players[raw_id] as Dictionary).duplicate(true)
 		if player_id == own_player_id:
 			# Input-driven hosts are authoritative for the bot's position. Keep the
-			# collision dimensions from the initial snapshot, but reconcile movement
-			# and physics state from the server at the normal snapshot cadence.
+			# collision dimensions from the initial snapshot, but do not hard-snap
+			# mid-jump: a late players_snapshot would yank the local prediction back
+			# to the previous edge and look like a teleport.
 			var local_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+			var reconcile_motion := not _jump_active and not _climb_active
 			for field in ["x", "y", "facing", "vx", "vy", "on_ground", "health", "nourishment", "respawn_revision", "tree_ghost", "climbing", "climb_col"]:
-				if entry.has(field):
-					local_state[field] = entry[field]
+				if not entry.has(field):
+					continue
+				if field in ["x", "y", "vx", "vy", "on_ground"] and not reconcile_motion:
+					continue
+				local_state[field] = entry[field]
 			_world_snapshot["self"] = local_state
 			continue
 		if player_id == _host_player_id and not _is_pvp_world():
