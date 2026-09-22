@@ -2916,22 +2916,33 @@ func _update_remote_player_interpolation(delta: float) -> void:
 
 
 func _clamp_remote_player_ground(position: Vector2, remote: Dictionary) -> Vector2:
-	"""Keep a delayed/extrapolated remote avatar above authoritative terrain.
+	"""Keep a delayed/extrapolated remote avatar out of authoritative terrain.
 
 	The render stream is intentionally allowed to extrapolate between snapshots,
-	but a falling snapshot can arrive one frame before the host reports its landing.
-	Without a collision clamp that predicted position penetrates the floor and the
-	avatar appears to fall through it.  This is presentation-only; the host remains
-	the authority for the actual player state.
+	but a falling snapshot can arrive one frame before the host reports its landing,
+	and horizontal extrapolation can slide the sprite into a solid wall. Without a
+	collision clamp the avatar appears to walk through terrain even though the host
+	state is valid. This is presentation-only.
 	"""
 	if sim == null or not sim.has_method("collides"):
 		return position
-	var hit: Variant = sim.collides(position.x, position.y, PLAYER_RENDER_WIDTH, PLAYER_RENDER_HEIGHT, false)
-	if hit is Dictionary and float(remote.get("vy", 0.0)) >= 0.0:
-		var floor_y := float((hit as Dictionary).get("by", position.y + PLAYER_RENDER_HEIGHT)) - PLAYER_RENDER_HEIGHT
-		if position.y > floor_y:
-			return Vector2(position.x, floor_y)
-	return position
+	var resolved := position
+	for _attempt in 4:
+		var hit: Variant = sim.collides(resolved.x, resolved.y, PLAYER_RENDER_WIDTH, PLAYER_RENDER_HEIGHT, false)
+		if not hit is Dictionary:
+			break
+		var block := hit as Dictionary
+		var mid := resolved.x + PLAYER_RENDER_WIDTH * 0.5
+		var block_mid := float(block.get("bx", resolved.x)) + float(BlockDefs.TILE) * 0.5
+		if mid < block_mid:
+			resolved.x = float(block.get("bx", resolved.x)) - PLAYER_RENDER_WIDTH
+		else:
+			resolved.x = float(block.get("bx", resolved.x)) + float(BlockDefs.TILE)
+		if float(remote.get("vy", 0.0)) >= 0.0:
+			var floor_y := float(block.get("by", resolved.y + PLAYER_RENDER_HEIGHT)) - PLAYER_RENDER_HEIGHT
+			if resolved.y > floor_y:
+				resolved.y = floor_y
+	return resolved
 
 
 func _remote_player_render_position(player_id: String, remote: Dictionary) -> Vector2:

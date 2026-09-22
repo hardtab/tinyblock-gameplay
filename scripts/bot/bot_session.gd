@@ -854,6 +854,7 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 	coordinates rather than a kinematic target position that can float over a
 	gap.  Dedicated hosts still correct these values from their own simulation.
 	"""
+	_eject_local_self_from_solid(self_state)
 	var step := clampf(maxf(delta, 0.0) * NETWORK_PHYSICS_TICKS_PER_SECOND, 0.25, 2.0)
 	var width := float(self_state.get("w", 20.0))
 	var height := float(self_state.get("h", 28.0))
@@ -911,6 +912,45 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 		_support_place_attempted = false
 	else:
 		_try_place_support_block(self_state)
+
+
+func _eject_local_self_from_solid(self_state: Dictionary) -> void:
+	"""Stop local prediction from tunneling once already overlapping a solid tile.
+
+	Incomplete tile streams or a delayed host snap can embed the avatar. Ordinary
+	per-axis resolution then walks through the wall one cell at a time and older
+	hosts that still trust player_snapshot show the bot clipping.
+	"""
+	var width := float(self_state.get("w", 20.0))
+	var height := float(self_state.get("h", 28.0))
+	for _attempt in 8:
+		var hit := _local_collision(
+			float(self_state.get("x", 0.0)),
+			float(self_state.get("y", 0.0)),
+			width,
+			height,
+		)
+		if hit.is_empty():
+			return
+		var mid := float(self_state.get("x", 0.0)) + width * 0.5
+		var block_mid := float(hit.get("bx", 0.0)) + float(BlockDefs.TILE) * 0.5
+		if mid < block_mid:
+			self_state["x"] = float(hit.get("bx", self_state.get("x", 0.0))) - width
+		else:
+			self_state["x"] = float(hit.get("bx", self_state.get("x", 0.0))) + float(BlockDefs.TILE)
+		var vertical := _local_collision(float(self_state.get("x", 0.0)), float(self_state.get("y", 0.0)), width, height)
+		if not vertical.is_empty():
+			var feet := float(self_state.get("y", 0.0)) + height
+			var block_top := float(vertical.get("by", feet))
+			if feet > block_top:
+				self_state["y"] = block_top - height
+			else:
+				self_state["y"] = float(vertical.get("by", self_state.get("y", 0.0))) + float(BlockDefs.TILE)
+		self_state["vx"] = 0.0
+		self_state["vy"] = 0.0
+		self_state["tree_ghost"] = false
+		self_state["climbing"] = false
+		self_state["climb_col"] = -1
 
 
 func _try_place_support_block(self_state: Dictionary) -> bool:
