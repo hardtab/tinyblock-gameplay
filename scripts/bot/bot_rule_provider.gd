@@ -416,6 +416,15 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var inventory := _inventory(observation)
 	var needs_wood := _needs_wood_progression(inventory)
 	var needs_leaves := _needs_leaf_progression(inventory)
+	var has_tree_target := false
+	if needs_wood or needs_leaves:
+		for raw_probe in values:
+			if not raw_probe is Dictionary:
+				continue
+			var probe_name := str((raw_probe as Dictionary).get("block_name", "")).to_lower()
+			if _is_wood_log_name(probe_name) or _is_leaf_name(probe_name):
+				has_tree_target = true
+				break
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var nourishment := clampi(int(self_state.get("nourishment", MAX_NOURISHMENT)), 0, MAX_NOURISHMENT)
 	var needs_food := nourishment <= HUNGER_FORAGE_THRESHOLD and _best_food_in_inventory(observation).is_empty()
@@ -441,15 +450,11 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			var required_tier := int(resource.get("harvest_tier", 0))
 			if required_tier > 0 and not _has_required_mining_tier(observation, resource) and _mining_tool_for_target(observation, resource).is_empty():
 				continue
-		var score := distance
-		if not bool(resource.get("reachable", false)):
-			score += 80.0
 		var block_name := str(resource.get("block_name", "")).to_lower()
-		if needs_wood and block_name in ["ice", "dirt", "grass", "sand", "gravel", "snow", "cobblestone", "stone"]:
-			# Hard-skip filler terrain while the wooden-tool path is incomplete.
-			# Score penalties still lost to foot-adjacent ice on tiny islands.
-			continue
-		if needs_leaves and block_name in ["ice", "dirt", "grass", "sand", "gravel", "snow", "cobblestone", "stone"] and not _is_leaf_name(block_name):
+		# Only skip ice filler when a real tree/leaf target is also visible.
+		# Otherwise keep mining soft terrain so activity tests and empty pads
+		# still make progress.
+		if has_tree_target and block_name in ["ice", "snow"]:
 			continue
 		var score := distance
 		if not bool(resource.get("reachable", false)):
@@ -460,6 +465,8 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			score -= 160.0
 		elif needs_leaves and _is_leaf_name(block_name):
 			score -= 200.0
+		elif has_tree_target and block_name in ["dirt", "grass", "sand", "gravel", "cobblestone", "stone"]:
+			score += 180.0
 		# Leaves are the ordinary forage path for wild berries. Prefer them when
 		# hungry and the inventory has no ready food, otherwise the bot starves
 		# while happily mining dirt beside berry bushes.
