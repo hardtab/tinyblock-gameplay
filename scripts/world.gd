@@ -12225,6 +12225,12 @@ func fill_craft_from_recipe(recipe: Dictionary) -> bool:
 	return true
 
 
+## Compatibility alias for the historical misspelling used by UI and multiplayer
+## craft paths. Without this, guest craft_recipe commands always fail on host.
+func fills_craft_from_recipe(recipe: Dictionary) -> bool:
+	return fill_craft_from_recipe(recipe)
+
+
 func _remember_generated_recipe(inputs: Dictionary, output_name: String) -> void:
 	for recipe: Dictionary in known_recipes:
 		if recipe_matches(inputs, recipe):

@@ -107,6 +107,8 @@ var _craft_retry_after_msec := -1
 ## cannot permanently starve plank/tool progression for the session.
 var _craft_blocked_outputs: Dictionary = {}
 var _food_eat_cooldown_until_msec := -1
+var _inventory_host_revision := 0
+var _inventory_client_revision := 0
 var _population_logged := false
 const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
 const PLAYER_INPUT_INTERVAL_MSEC := 50
@@ -250,6 +252,8 @@ func join_session(record: Dictionary) -> void:
 	_craft_retry_after_msec = -1
 	_craft_blocked_outputs.clear()
 	_food_eat_cooldown_until_msec = -1
+	_inventory_host_revision = 0
+	_inventory_client_revision = 0
 	_population_logged = false
 	safety.reset_session()
 	_world_snapshot.clear()
@@ -1261,6 +1265,8 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	# Root-level inventory/equipment belong to the host avatar. A guest bot must
 	# start empty unless its own multiplayer.player_states entry already exists.
 	_world_snapshot["inventory_summary"] = _inventory_summary_from_player_state(local_state)
+	_inventory_host_revision = maxi(0, int(local_state.get("inventory_host_revision", 0)))
+	_inventory_client_revision = maxi(_inventory_client_revision, int(local_state.get("inventory_client_revision", 0)))
 	_world_snapshot["recipes"] = _recipe_catalog(snapshot)
 	_equipment_slots = _equipment_from_player_state(local_state)
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
@@ -1549,9 +1555,13 @@ func _send_inventory_snapshot() -> void:
 	if network_client == null or not network_client.has_method("send_command"):
 		return
 	var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+	# Hosts reject guest snapshots whose host revision does not match the last
+	# acknowledged inventory_host_revision. Sending 0 forever made every post-mine
+	# craft/eat snapshot bounce, leaving the bot stuck retrying CRAFT planks.
+	_inventory_client_revision += 1
 	network_client.call("send_command", "inventory_snapshot", {
-		"inventory_host_revision": 0,
-		"inventory_client_revision": 0,
+		"inventory_host_revision": _inventory_host_revision,
+		"inventory_client_revision": _inventory_client_revision,
 		"inventory": inventory.duplicate(true),
 		"item_durability": {},
 		"footwear_wear_distance": 0.0,
@@ -1568,7 +1578,34 @@ func _send_inventory_snapshot() -> void:
 
 func _apply_inventory_snapshot(payload: Dictionary) -> void:
 	var inventory: Dictionary = payload.get("inventory", {}) if payload.get("inventory", {}) is Dictionary else {}
-	_world_snapshot["inventory_summary"] = inventory.duplicate(true)
+	# Host payloads may still use content ids; normalize to short block names so
+	# craft/eat rule checks match recipe inputs.
+	var normalized := {}
+	for raw_key in inventory.keys():
+		var key := str(raw_key)
+		var name := key if not _block_entry(key).is_empty() else _block_name_for_content_id(key)
+		if name.is_empty():
+			name = key
+		var amount := int(inventory.get(raw_key, 0))
+		if amount <= 0:
+			continue
+		normalized[name] = int(normalized.get(name, 0)) + amount
+	if payload.has("inventory_client_revision"):
+		var incoming_client := maxi(0, int(payload.get("inventory_client_revision", 0)))
+		if incoming_client < _inventory_client_revision:
+			# Stale host echo must not erase a newer local craft/eat. Adopt the
+			# host revision and resubmit so the replacement can land.
+			if payload.has("inventory_host_revision"):
+				var incoming_host := maxi(0, int(payload.get("inventory_host_revision", 0)))
+				if incoming_host != _inventory_host_revision:
+					_inventory_host_revision = incoming_host
+					_send_inventory_snapshot()
+			return
+	_world_snapshot["inventory_summary"] = normalized
+	if payload.has("inventory_host_revision"):
+		_inventory_host_revision = maxi(0, int(payload.get("inventory_host_revision", 0)))
+	if payload.has("inventory_client_revision"):
+		_inventory_client_revision = maxi(_inventory_client_revision, int(payload.get("inventory_client_revision", 0)))
 	_equipment_slots = payload.get("equipment_slots", _equipment_slots).duplicate(true) if payload.get("equipment_slots", _equipment_slots) is Dictionary else _equipment_slots
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	if payload.has("nourishment"):
@@ -1579,10 +1616,72 @@ func _apply_inventory_snapshot(payload: Dictionary) -> void:
 		# higher host values and never let a stale echo undo a successful bite.
 		self_state["nourishment"] = maxi(current, incoming)
 		_world_snapshot["self"] = self_state
-	if not _craft_pending_output.is_empty() and int(inventory.get(_craft_pending_output, 0)) > 0:
+	if not _craft_pending_output.is_empty() and int(normalized.get(_craft_pending_output, 0)) > 0:
 		_craft_blocked_outputs.erase(_craft_pending_output)
 		_craft_pending_output = ""
 		_craft_retry_after_msec = Time.get_ticks_msec() + CRAFT_RETRY_DELAY_MSEC
+
+
+func _apply_local_craft(output_name: String) -> bool:
+	"""Optimistically apply a known progression craft and push it via inventory_snapshot.
+
+	Phone hosts may ignore craft_recipe or fail fill_craft while still accepting a
+	revision-matched inventory replacement. Keep the transaction aligned with the
+	recipes the rule provider already selected.
+	"""
+	output_name = output_name.strip_edges()
+	if output_name.is_empty():
+		return false
+	var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+	var next := inventory.duplicate(true)
+	if output_name in ["planks", "palm_planks", "pine_planks", "weeping_planks"]:
+		var wood_name := "wood"
+		if output_name == "palm_planks":
+			wood_name = "palm_wood"
+		elif output_name == "pine_planks":
+			wood_name = "pine_wood"
+		elif output_name == "weeping_planks":
+			wood_name = "weeping_wood"
+		if int(next.get(wood_name, 0)) <= 0:
+			return false
+		next[wood_name] = int(next.get(wood_name, 0)) - 1
+		if int(next[wood_name]) <= 0:
+			next.erase(wood_name)
+		next[output_name] = int(next.get(output_name, 0)) + 4
+	elif output_name == "wooden_pickaxe":
+		var plank_name := ""
+		for candidate in ["planks", "palm_planks", "pine_planks", "weeping_planks"]:
+			if int(next.get(candidate, 0)) >= 3:
+				plank_name = candidate
+				break
+		if plank_name.is_empty():
+			return false
+		next[plank_name] = int(next.get(plank_name, 0)) - 3
+		if int(next[plank_name]) <= 0:
+			next.erase(plank_name)
+		next["wooden_pickaxe"] = int(next.get("wooden_pickaxe", 0)) + 1
+	elif output_name == "stick":
+		var plank_name := ""
+		for candidate in ["planks", "palm_planks", "pine_planks", "weeping_planks"]:
+			if int(next.get(candidate, 0)) >= 2:
+				plank_name = candidate
+				break
+		if plank_name.is_empty():
+			return false
+		next[plank_name] = int(next.get(plank_name, 0)) - 2
+		if int(next[plank_name]) <= 0:
+			next.erase(plank_name)
+		next["stick"] = int(next.get("stick", 0)) + 4
+	else:
+		return false
+	_world_snapshot["inventory_summary"] = next
+	structured_log.emit({
+		"event": "craft_applied_local",
+		"output": output_name,
+		"inventory": next.duplicate(true),
+		"at_msec": Time.get_ticks_msec(),
+	})
+	return true
 
 
 func _update_human_count() -> void:
@@ -2005,9 +2104,30 @@ func _on_decision_started(decision: Dictionary) -> void:
 		var key := "%d:%d" % [int(target.get("x", 0)), int(target.get("y", 0))]
 		_pending_action_targets[key] = {"action": action, "block": str(decision.get("block", "")), "content_id": str(target.get("content_id", "")), "sent_at_msec": now_msec}
 	elif action == Contract.ACTION_CRAFT:
-		_craft_pending_output = str(decision.get("target_id", ""))
-		_craft_retry_after_msec = now_msec + CRAFT_RESPONSE_TIMEOUT_MSEC
-		_pending_action_targets["craft"] = {"action": action, "output": _craft_pending_output}
+		var craft_output := str(decision.get("target_id", ""))
+		_pending_action_targets["craft"] = {"action": action, "output": craft_output}
+		# Apply + inventory_snapshot only (executor skips craft_recipe). Clear the
+		# pending gate immediately on success so wooden_pickaxe can follow planks
+		# on the next decision tick instead of waiting for a craft_recipe ack.
+		if _apply_local_craft(craft_output):
+			_send_inventory_snapshot()
+			_craft_blocked_outputs.erase(craft_output)
+			_craft_pending_output = ""
+			_craft_retry_after_msec = now_msec + 500
+			_pending_action_targets.erase("craft")
+			structured_log.emit({
+				"event": "craft_synced",
+				"output": craft_output,
+				"inventory_host_revision": _inventory_host_revision,
+				"inventory_client_revision": _inventory_client_revision,
+				"at_msec": now_msec,
+			})
+		else:
+			_craft_pending_output = craft_output
+			_craft_retry_after_msec = now_msec + CRAFT_RESPONSE_TIMEOUT_MSEC
+			behavior.executor.cancel("craft_failed")
+			decision_logged.emit({"event": "decision_failed", "decision": decision.duplicate(true), "reason": "craft_failed", "at_msec": now_msec})
+			return
 	elif action == Contract.ACTION_EAT:
 		if not _apply_local_eat(str(decision.get("target_id", ""))):
 			behavior.executor.cancel("eat_failed")
@@ -2137,11 +2257,21 @@ func _handle_action_result(payload: Dictionary) -> void:
 		var output := str(craft.get("output", payload.get("output", "")))
 		_craft_pending_output = ""
 		if not accepted and not output.is_empty():
-			_block_craft_output(output)
+			# Keep retrying when the local inventory snapshot already owns the
+			# output; only cool down outputs that are still missing.
+			var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+			if int(inventory.get(output, 0)) <= 0:
+				_block_craft_output(output)
 		elif accepted:
 			_craft_blocked_outputs.erase(output)
 		_craft_retry_after_msec = Time.get_ticks_msec() + (CRAFT_RETRY_DELAY_MSEC if not accepted else 2_000)
 		_pending_action_targets.erase("craft")
+		structured_log.emit({
+			"event": "craft_result",
+			"output": output,
+			"accepted": accepted,
+			"at_msec": Time.get_ticks_msec(),
+		})
 		var achievements := get_node_or_null("/root/Achievements")
 		if accepted and achievements != null and achievements.has_method("record_craft"):
 			achievements.call("record_craft", output)
@@ -2214,9 +2344,11 @@ func _host_id_from_network() -> String:
 func _expire_craft_pending(now_msec: int) -> void:
 	if _craft_pending_output.is_empty() or _craft_retry_after_msec < 0 or now_msec < _craft_retry_after_msec:
 		return
-	# Older community hosts may ignore craft_recipe briefly. Cool the output down
-	# for a short window instead of permanently starving planks/tools.
-	_block_craft_output(_craft_pending_output, now_msec)
+	var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+	# Do not cool down an output the local snapshot already owns — that is the
+	# inventory_snapshot success path waiting on a slow host echo.
+	if int(inventory.get(_craft_pending_output, 0)) <= 0:
+		_block_craft_output(_craft_pending_output, now_msec)
 	_craft_pending_output = ""
 	_craft_retry_after_msec = -1
 

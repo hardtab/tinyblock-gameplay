@@ -95,9 +95,10 @@ func start(raw_decision: Variant, observation: Dictionary, now_msec: int) -> boo
 		return true
 
 	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER, Contract.ACTION_CRAFT, Contract.ACTION_EAT, Contract.ACTION_OPEN_CONTAINER, Contract.ACTION_EQUIP]:
-		if action == Contract.ACTION_EAT:
-			# Eating is applied locally by the session and synced through
-			# inventory_snapshot, matching human guests.
+		if action in [Contract.ACTION_EAT, Contract.ACTION_CRAFT]:
+			# Eat/craft mutate guest inventory locally and sync through
+			# inventory_snapshot. Sending craft_recipe in parallel raced the
+			# host revision and left the bot stuck retrying planks forever.
 			_finish("command_sent")
 			return true
 		if not _send_network_action(action, decision):
