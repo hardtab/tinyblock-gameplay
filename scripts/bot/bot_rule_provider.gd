@@ -234,6 +234,12 @@ func decide(observation: Dictionary) -> Dictionary:
 					return _decision(Contract.GOAL_GATHER, Contract.ACTION_MINE, resource, 2200, 0.88)
 			if Contract.ACTION_MOVE_TO in legal:
 				return _decision(Contract.GOAL_GATHER, Contract.ACTION_MOVE_TO, resource, 2200, 0.7)
+		elif _needs_wood_progression(_inventory(observation)) and Contract.ACTION_MOVE_TO in legal:
+			# Ice-only pads temporarily hide the starter tree from the scored set.
+			# Climb/walk toward any wood/leaf tile still present in the raw list.
+			var tree_target := _nearest_named_resource(resources, true, true)
+			if not tree_target.is_empty():
+				return _decision(Contract.GOAL_GATHER, Contract.ACTION_MOVE_TO, tree_target, 2200, 0.85)
 
 	var containers: Array = _as_array(observation.get("visible_containers", []))
 	if not containers.is_empty() and Contract.ACTION_OPEN_CONTAINER in legal:
@@ -439,17 +445,21 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 		if not bool(resource.get("reachable", false)):
 			score += 80.0
 		var block_name := str(resource.get("block_name", "")).to_lower()
+		if needs_wood and block_name in ["ice", "dirt", "grass", "sand", "gravel", "snow", "cobblestone", "stone"]:
+			# Hard-skip filler terrain while the wooden-tool path is incomplete.
+			# Score penalties still lost to foot-adjacent ice on tiny islands.
+			continue
+		if needs_leaves and block_name in ["ice", "dirt", "grass", "sand", "gravel", "snow", "cobblestone", "stone"] and not _is_leaf_name(block_name):
+			continue
+		var score := distance
+		if not bool(resource.get("reachable", false)):
+			score += 80.0
 		if needs_wood and _is_wood_log_name(block_name):
 			score -= 220.0
 		elif needs_wood and _is_leaf_name(block_name):
 			score -= 160.0
 		elif needs_leaves and _is_leaf_name(block_name):
 			score -= 200.0
-		elif needs_wood or needs_leaves:
-			# Ice/dirt/sand dominate tiny starter islands by proximity. Keep them
-			# available, but never ahead of the progression tree/leaves.
-			if block_name in ["ice", "dirt", "grass", "sand", "gravel", "snow", "cobblestone", "stone"]:
-				score += 180.0
 		# Leaves are the ordinary forage path for wild berries. Prefer them when
 		# hungry and the inventory has no ready food, otherwise the bot starves
 		# while happily mining dirt beside berry bushes.
@@ -460,6 +470,27 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			score -= 2.0
 		if score < best_score:
 			best_score = score
+			best = resource
+	return best
+
+
+func _nearest_named_resource(values: Array, want_wood: bool, want_leaves: bool) -> Dictionary:
+	var best := {}
+	var best_distance := INF
+	for raw_value in values:
+		if not raw_value is Dictionary:
+			continue
+		var resource := raw_value as Dictionary
+		var block_name := str(resource.get("block_name", "")).to_lower()
+		if want_wood and _is_wood_log_name(block_name):
+			pass
+		elif want_leaves and _is_leaf_name(block_name):
+			pass
+		else:
+			continue
+		var distance := float(resource.get("distance", 9999.0))
+		if distance < best_distance:
+			best_distance = distance
 			best = resource
 	return best
 

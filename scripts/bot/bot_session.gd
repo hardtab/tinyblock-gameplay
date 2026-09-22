@@ -1904,7 +1904,10 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 func _visible_resources_from_terrain(self_state: Dictionary) -> Array:
 	var resources: Array = []
 	var origin := Contract.target_position(self_state)
-	var max_distance := observation_radius + float(BlockDefs.TILE)
+	# Starter trees sit above the ice/dirt pad. Keep a wide read so the bot can
+	# still lock onto wood after it digs a few blocks downward.
+	var max_distance := maxf(observation_radius, 420.0) + float(BlockDefs.TILE)
+	var seen: Dictionary = {}
 	for key in _terrain_tiles:
 		var parts := str(key).split(":")
 		if parts.size() != 2:
@@ -1912,28 +1915,62 @@ func _visible_resources_from_terrain(self_state: Dictionary) -> Array:
 		var tile_x := int(parts[0])
 		var tile_y := int(parts[1])
 		var block_name := str(_terrain_tiles[key])
-		var block_definition: Dictionary = _block_entry(block_name)
-		var solid := bool(block_definition.get("solid", false)) and not bool(block_definition.get("fluid", false))
-		if block_name.is_empty() or block_name == "air" or not solid:
+		_append_visible_resource(resources, seen, self_state, origin, max_distance, tile_x, tile_y, block_name)
+		if resources.size() >= 256:
+			return resources
+	# Join snapshots may carry tiles the live terrain index missed (or lost after
+	# a sparse tile_batch). Merge them so the starter tree remains visible.
+	var snapshot_tiles: Array = _world_snapshot.get("tiles", []) if _world_snapshot.get("tiles", []) is Array else []
+	for raw_tile in snapshot_tiles:
+		if not raw_tile is Dictionary:
 			continue
-		var position := Vector2((float(tile_x) + 0.5) * BlockDefs.TILE, (float(tile_y) + 0.5) * BlockDefs.TILE)
-		if origin.distance_to(position) > max_distance:
+		var tile := raw_tile as Dictionary
+		var tile_x := int(tile.get("x", 0))
+		var tile_y := int(tile.get("y", 0))
+		var block_name := _block_name_for_content_id(str(tile.get("content_id", "")))
+		if block_name.is_empty():
+			block_name = str(tile.get("block_name", ""))
+		if block_name.is_empty():
 			continue
-		var content_id := str(block_definition.get("content_id", "core.%s" % block_name))
-		resources.append({
-			"id": "tile:%d:%d" % [tile_x, tile_y],
-			"x": tile_x,
-			"y": tile_y,
-			"content_id": content_id,
-			"block_name": block_name,
-			"harvest_tier": _block_harvest_tier(block_definition),
-			"hardness": float(block_definition.get("hardness", 0.0)),
-			"position": [position.x, position.y],
-			"reachable": origin.distance_to(position) <= float(BlockDefs.TILE) * 2.5,
-		})
+		_append_visible_resource(resources, seen, self_state, origin, max_distance, tile_x, tile_y, block_name)
 		if resources.size() >= 256:
 			break
 	return resources
+
+
+func _append_visible_resource(
+	resources: Array,
+	seen: Dictionary,
+	self_state: Dictionary,
+	origin: Vector2,
+	max_distance: float,
+	tile_x: int,
+	tile_y: int,
+	block_name: String,
+) -> void:
+	var key := "%d:%d" % [tile_x, tile_y]
+	if seen.has(key):
+		return
+	var block_definition: Dictionary = _block_entry(block_name)
+	var solid := bool(block_definition.get("solid", false)) and not bool(block_definition.get("fluid", false))
+	if block_name.is_empty() or block_name == "air" or not solid:
+		return
+	var position := Vector2((float(tile_x) + 0.5) * BlockDefs.TILE, (float(tile_y) + 0.5) * BlockDefs.TILE)
+	if origin.distance_to(position) > max_distance:
+		return
+	seen[key] = true
+	var content_id := str(block_definition.get("content_id", "core.%s" % block_name))
+	resources.append({
+		"id": "tile:%d:%d" % [tile_x, tile_y],
+		"x": tile_x,
+		"y": tile_y,
+		"content_id": content_id,
+		"block_name": block_name,
+		"harvest_tier": _block_harvest_tier(block_definition),
+		"hardness": float(block_definition.get("hardness", 0.0)),
+		"position": [position.x, position.y],
+		"reachable": origin.distance_to(position) <= float(BlockDefs.TILE) * 2.5,
+	})
 
 
 func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -> Array:
