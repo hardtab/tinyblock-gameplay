@@ -12,6 +12,7 @@ const RuleProviderClass = preload("res://gameplay/scripts/bot/bot_rule_provider.
 const SafetyClass = preload("res://gameplay/scripts/bot/bot_safety_policy.gd")
 const ExecutorClass = preload("res://gameplay/scripts/bot/bot_executor.gd")
 const ActionLoop = preload("res://gameplay/scripts/bot/bot_action_loop.gd")
+const AiClientClass = preload("res://gameplay/scripts/bot/bot_ai_client.gd")
 
 signal state_changed(state: String)
 signal sync_started(session_id: String)
@@ -69,6 +70,10 @@ var _previous_emoji := ""
 var _social_last_sent_msec := -1
 var _welcome_emoji_due_msec := -1
 var _welcome_emoji_pending := false
+var _pending_social_emoji := ""
+var _pending_social_emoji_target_id := ""
+var _emoji_reply_inflight := false
+var ai_client: BotAiClient
 var _movement_step_callable: Callable
 var _desired_input := {"left": false, "right": false, "jump": false}
 var _last_player_input_msec := -1
@@ -151,8 +156,34 @@ func configure(backend_adapter: Object = null, multiplayer_adapter: Object = nul
 		safety.retaliation_window_msec = maxi(0, int(options.get("retaliation_window_msec", safety.retaliation_window_msec)))
 	if options.has("decision_provider") and options.get("decision_provider") is BotDecisionProvider:
 		behavior.provider = options.get("decision_provider")
+	if options.has("ai_client") and options.get("ai_client") is BotAiClient:
+		_bind_ai_client(options.get("ai_client") as BotAiClient)
+	elif options.get("ai_options", {}) is Dictionary and not (options.get("ai_options", {}) as Dictionary).is_empty():
+		_ensure_ai_client(options.get("ai_options", {}) as Dictionary)
 	executor.configure(network_client, Callable(), _movement_step_callable, Callable(safety, "consume_retaliation"))
 	_connect_network_signals()
+
+
+func _ensure_ai_client(ai_options: Dictionary) -> void:
+	if ai_client == null:
+		ai_client = AiClientClass.new()
+		add_child(ai_client)
+	ai_client.configure(ai_options)
+	_bind_ai_client(ai_client)
+
+
+func _bind_ai_client(client: BotAiClient) -> void:
+	if client == null:
+		return
+	if ai_client != null and ai_client != client and ai_client.emoji_reply_ready.is_connected(_on_ai_emoji_reply):
+		ai_client.emoji_reply_ready.disconnect(_on_ai_emoji_reply)
+		if ai_client.request_failed.is_connected(_on_ai_emoji_failed):
+			ai_client.request_failed.disconnect(_on_ai_emoji_failed)
+	ai_client = client
+	if not ai_client.emoji_reply_ready.is_connected(_on_ai_emoji_reply):
+		ai_client.emoji_reply_ready.connect(_on_ai_emoji_reply)
+	if not ai_client.request_failed.is_connected(_on_ai_emoji_failed):
+		ai_client.request_failed.connect(_on_ai_emoji_failed)
 
 
 func _connect_network_signals() -> void:
@@ -181,6 +212,9 @@ func join_session(record: Dictionary) -> void:
 	_roster.clear()
 	_recent_events.clear()
 	_recent_emoji_events.clear()
+	_pending_social_emoji = ""
+	_pending_social_emoji_target_id = ""
+	_emoji_reply_inflight = false
 	_last_player_snapshot_msec = -1
 	_last_player_input_msec = -1
 	_desired_input = {"left": false, "right": false, "jump": false}
@@ -1565,6 +1599,10 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["achievements"] = _achievement_observation()
 	if _welcome_emoji_pending and now_msec >= _welcome_emoji_due_msec:
 		snapshot["social_emoji"] = "👋"
+	elif not _pending_social_emoji.is_empty():
+		snapshot["social_emoji"] = _pending_social_emoji
+		if not _pending_social_emoji_target_id.is_empty():
+			snapshot["social_target_id"] = _pending_social_emoji_target_id
 	else:
 		snapshot["social_emoji"] = ""
 	# Duel arenas may place the pinned opponent farther away than the ordinary
@@ -1809,6 +1847,66 @@ func _record_emoji_event(message: Dictionary, payload: Dictionary) -> void:
 	_recent_emoji_events.append(event)
 	while _recent_emoji_events.size() > Perception.DEFAULT_MAX_EVENTS:
 		_recent_emoji_events.pop_front()
+	_queue_emoji_reply(event)
+
+
+func _queue_emoji_reply(event: Dictionary) -> void:
+	if not _pending_social_emoji.is_empty() or _emoji_reply_inflight:
+		return
+	var incoming := str(event.get("emoji", ""))
+	var sender_id := str(event.get("player_id", ""))
+	var context := {
+		"incoming_emoji": incoming,
+		"player_id": sender_id,
+		"at_msec": int(event.get("at_msec", Time.get_ticks_msec())),
+	}
+	if ai_client != null and ai_client.is_available() and not ai_client.is_busy():
+		_emoji_reply_inflight = true
+		if ai_client.request_emoji_reply(context):
+			structured_log.emit({"event": "emoji_ai_requested", "incoming_emoji": incoming, "player_id": sender_id, "at_msec": Time.get_ticks_msec()})
+			return
+		_emoji_reply_inflight = false
+	_pending_social_emoji = Social.reply_emoji(incoming)
+	_pending_social_emoji_target_id = sender_id
+	structured_log.emit({
+		"event": "emoji_reply_queued",
+		"incoming_emoji": incoming,
+		"reply_emoji": _pending_social_emoji,
+		"source": "fallback",
+		"player_id": sender_id,
+		"at_msec": Time.get_ticks_msec(),
+	})
+
+
+func _on_ai_emoji_reply(emoji: String, context: Dictionary) -> void:
+	_emoji_reply_inflight = false
+	var sanitized := EmojiReactions.sanitize(emoji)
+	if sanitized.is_empty():
+		_pending_social_emoji = Social.reply_emoji(str(context.get("incoming_emoji", "")))
+	else:
+		_pending_social_emoji = sanitized
+	_pending_social_emoji_target_id = str(context.get("player_id", ""))
+	structured_log.emit({
+		"event": "emoji_reply_queued",
+		"incoming_emoji": str(context.get("incoming_emoji", "")),
+		"reply_emoji": _pending_social_emoji,
+		"source": "ai",
+		"player_id": _pending_social_emoji_target_id,
+		"at_msec": Time.get_ticks_msec(),
+	})
+
+
+func _on_ai_emoji_failed(reason: String, context: Dictionary) -> void:
+	_emoji_reply_inflight = false
+	_pending_social_emoji = Social.reply_emoji(str(context.get("incoming_emoji", "")))
+	_pending_social_emoji_target_id = str(context.get("player_id", ""))
+	structured_log.emit({
+		"event": "emoji_ai_failed",
+		"reason": reason,
+		"reply_emoji": _pending_social_emoji,
+		"player_id": _pending_social_emoji_target_id,
+		"at_msec": Time.get_ticks_msec(),
+	})
 
 
 func _active_emoji_events(now_msec: int) -> Array[Dictionary]:
@@ -1866,6 +1964,8 @@ func _on_decision_started(decision: Dictionary) -> void:
 			_social_last_sent_msec = now_msec
 			_previous_emoji = emoji
 			_welcome_emoji_pending = false
+			_pending_social_emoji = ""
+			_pending_social_emoji_target_id = ""
 		else:
 			behavior.executor.cancel("emoji_cooldown")
 	decision_logged.emit({"event": "decision_started", "decision": decision.duplicate(true), "at_msec": now_msec})

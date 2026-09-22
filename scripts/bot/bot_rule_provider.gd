@@ -13,7 +13,6 @@ const PREFERRED_PLAYER_DISTANCE := 84.0
 ## Without slack, distance 84.6 forever re-issues MOVE_NEAR / FOLLOW and the
 ## bot looks like it is only hopping beside the player.
 const SOCIAL_FOLLOW_START_SLACK := 48.0
-const SOCIAL_IDLE_EMOJI_COOLDOWN_MSEC := 18_000
 const WANDER_RADIUS := 96.0
 const WANDER_COMMIT_MSEC := 1800
 const BOW_ARROW_MIN_SPEED := 250.0
@@ -22,9 +21,11 @@ const BOW_ARROW_GRAVITY := 310.0
 const CREATURE_DANGER_RADIUS := 224.0
 const BUILD_ACTION_COOLDOWN_MSEC := 8_000
 const MAX_CONSECUTIVE_MINING_ACTIONS := 3
-const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stone", "cobblestone", "workbench", "chest", "furnace", "glass", "stone_bricks"]
-
-var _last_idle_emoji_msec := -1
+const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stick", "stone", "cobblestone", "workbench", "chest", "furnace", "glass", "stone_bricks"]
+const PROGRESSION_CRAFTS := ["wooden_pickaxe", "workbench", "stone_pickaxe", "stone_axe", "trail_boots", "stone_sword", "chest"]
+const WOOD_BLOCK_NAMES := ["wood", "palm_wood", "pine_wood", "weeping_wood"]
+const LEAF_BLOCK_NAMES := ["leaves", "palm_leaves", "pine_needles", "weeping_leaves"]
+const PLANK_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks"]
 
 
 func _init(seed: int = 0) -> void:
@@ -239,20 +240,6 @@ func decide(observation: Dictionary) -> Dictionary:
 		if Contract.ACTION_FOLLOW in legal:
 			return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_FOLLOW, social_target, 2400, 0.58)
 
-	# Occasional friendly wave while hanging out near a player. Welcome emoji is
-	# handled earlier; this is a low-priority idle signal so the bot does not
-	# look mute after the initial greeting.
-	var now_msec := int(observation.get("observed_at_msec", 0))
-	if (
-		not social_target_id.is_empty()
-		and social_distance <= follow_threshold
-		and Contract.ACTION_SEND_EMOJI in legal
-		and (_last_idle_emoji_msec < 0 or now_msec - _last_idle_emoji_msec >= SOCIAL_IDLE_EMOJI_COOLDOWN_MSEC)
-		and _rng.randf() < 0.22
-	):
-		_last_idle_emoji_msec = now_msec
-		return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_SEND_EMOJI, {"id": social_target_id, "emoji": "😀"}, 500, 0.52)
-
 	# Do not freeze once the bot has reached the comfortable social distance.
 	# Small, non-combat wander steps make the avatar feel alive while keeping it
 	# separate from real players and away from unsolicited PvP.  A high but not
@@ -393,6 +380,8 @@ func _first_dictionary(values: Array) -> Dictionary:
 func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var best := {}
 	var best_score := INF
+	var inventory := _inventory(observation)
+	var needs_wood := _needs_wood_progression(inventory)
 	for raw_value in values:
 		if not raw_value is Dictionary:
 			continue
@@ -418,6 +407,13 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 		var score := distance
 		if not bool(resource.get("reachable", false)):
 			score += 80.0
+		var block_name := str(resource.get("block_name", "")).to_lower()
+		if needs_wood and _is_wood_log_name(block_name):
+			score -= 70.0
+		elif needs_wood and _is_leaf_name(block_name):
+			score -= 40.0
+		elif needs_wood and block_name in ["dirt", "grass", "sand", "gravel"]:
+			score += 35.0
 		# Prefer harvestable targets over blocks that require a better tool.
 		if int(resource.get("harvest_tier", 0)) > 0:
 			score -= 2.0
@@ -462,12 +458,20 @@ func _craftable_output(observation: Dictionary) -> String:
 	var achievements: Dictionary = observation.get("achievements", {}) if observation.get("achievements", {}) is Dictionary else {}
 	var unlocked: Array = achievements.get("unlocked", []) if achievements.get("unlocked", []) is Array else []
 	var recipes: Array = observation.get("recipes", []) if observation.get("recipes", []) is Array else []
-	var priority := ["stone_pickaxe", "stone_axe", "trail_boots", "stone_sword"]
-	for wanted in priority:
-		if wanted in inventory or wanted in blocked_outputs or (wanted == "stone_pickaxe" and "stone_age" in unlocked):
+	for wanted in PROGRESSION_CRAFTS:
+		if wanted in blocked_outputs:
 			continue
-		if _recipe_available(recipes, inventory, wanted) and wanted not in blocked_outputs:
+		if wanted == "stone_pickaxe" and "stone_age" in unlocked:
+			continue
+		if int(inventory.get(wanted, 0)) > 0:
+			continue
+		if _recipe_available(recipes, inventory, wanted):
 			return wanted
+		# Prefer converting wood into planks when a wooden tool is the next goal.
+		if wanted == "wooden_pickaxe":
+			var plank_output := _craftable_plank_output(recipes, inventory, blocked_outputs)
+			if not plank_output.is_empty():
+				return plank_output
 	# Do not repeatedly crush the same raw material merely because a server
 	# without the newer craft command has not acknowledged the request yet.
 	for raw_recipe in recipes:
@@ -480,6 +484,48 @@ func _craftable_output(observation: Dictionary) -> String:
 			if name in GENERIC_OUTPUTS and name not in blocked_outputs and int(inventory.get(name, 0)) <= 0 and _recipe_inputs_available(recipe, inventory):
 				return name
 	return ""
+
+
+func _craftable_plank_output(recipes: Array, inventory: Dictionary, blocked_outputs: Array) -> String:
+	if _count_named(inventory, PLANK_OUTPUTS) >= 3:
+		return ""
+	if _count_named(inventory, WOOD_BLOCK_NAMES) <= 0:
+		return ""
+	for raw_recipe in recipes:
+		if not raw_recipe is Dictionary:
+			continue
+		var recipe := raw_recipe as Dictionary
+		var output: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
+		for raw_name in output:
+			var name := str(raw_name)
+			if name not in PLANK_OUTPUTS or name in blocked_outputs:
+				continue
+			if _recipe_inputs_available(recipe, inventory):
+				return name
+	return ""
+
+
+func _needs_wood_progression(inventory: Dictionary) -> bool:
+	if int(inventory.get("wooden_pickaxe", 0)) > 0:
+		return false
+	if int(inventory.get("stone_pickaxe", 0)) > 0 or int(inventory.get("copper_pickaxe", 0)) > 0:
+		return false
+	return _count_named(inventory, PLANK_OUTPUTS) < 3 or _count_named(inventory, WOOD_BLOCK_NAMES) < 1
+
+
+func _count_named(inventory: Dictionary, names: Array) -> int:
+	var total := 0
+	for raw_name in names:
+		total += int(inventory.get(str(raw_name), 0))
+	return total
+
+
+func _is_wood_log_name(block_name: String) -> bool:
+	return block_name in WOOD_BLOCK_NAMES or block_name.ends_with("_wood")
+
+
+func _is_leaf_name(block_name: String) -> bool:
+	return block_name in LEAF_BLOCK_NAMES or block_name.ends_with("_leaves") or block_name.ends_with("_needles")
 
 
 func _recipe_available(recipes: Array, inventory: Dictionary, output_name: String) -> bool:

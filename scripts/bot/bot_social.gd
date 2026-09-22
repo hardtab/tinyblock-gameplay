@@ -41,3 +41,31 @@ static func context_emoji(event_name: String) -> String:
 		"victory":
 			return "🎉"
 	return ""
+
+
+## Fallback reply when no remote model is configured. Maps an incoming player
+## emoji to one allowed response so the bot still answers social signals.
+static func reply_emoji(incoming_emoji: String) -> String:
+	var incoming := EmojiReactions.sanitize(incoming_emoji)
+	if incoming.is_empty():
+		return "👋"
+	match incoming:
+		"👋", "🥰", "😀", "😎":
+			return "👋"
+		"😂", "🎉", "✨", "🔥", "💯":
+			return "😂"
+		"👍", "👏", "🙏", "💪", "✅":
+			return "👍"
+		"❤️":
+			return "❤️"
+		"🤔", "❓", "💡":
+			return "🤔"
+		"😭", "😱":
+			return "🥰"
+		"😡", "👎":
+			return "🤔"
+		"⛏️", "🏠":
+			return "👍"
+	if incoming in EmojiReactions.DEFAULT_EMOJIS:
+		return "👋"
+	return "👋"

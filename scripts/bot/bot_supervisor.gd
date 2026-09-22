@@ -49,7 +49,9 @@ var session_cooldown_seconds := DEFAULT_SESSION_COOLDOWN_SECONDS
 var max_session_seconds := DEFAULT_MAX_SESSION_SECONDS
 var enabled := true
 var kill_switch := false
+var response_enabled := true
 var allow_world_ids: PackedStringArray = []
+var ai_options: Dictionary = {}
 var recently_visited: Dictionary = {}
 var blacklisted_sessions: Dictionary = {}
 var _rng := RandomNumberGenerator.new()
@@ -77,7 +79,10 @@ func configure(backend_adapter: Object = null, multiplayer_adapter: Object = nul
 	max_session_seconds = maxf(0.0, float(options.get("max_session_seconds", max_session_seconds)))
 	enabled = bool(options.get("enabled", enabled))
 	kill_switch = bool(options.get("kill_switch", kill_switch))
+	response_enabled = bool(options.get("response_enabled", response_enabled))
 	allow_world_ids = _normalize_string_array(options.get("allow_world_ids", options.get("allowed_world_ids", [])))
+	if options.get("ai_options", {}) is Dictionary:
+		ai_options = (options.get("ai_options", {}) as Dictionary).duplicate(true)
 	if options.has("seed"):
 		_rng.seed = int(options.get("seed", 0))
 
@@ -160,6 +165,8 @@ func _create_session(selected_protocol_version: int = -1) -> void:
 	session.configure(backend, network_client, {
 		"empty_grace_seconds": empty_grace_seconds,
 		"protocol_version": selected_protocol_version if selected_protocol_version > 0 else protocol_version,
+		"response_enabled": response_enabled,
+		"ai_options": ai_options,
 	})
 	session.session_ready.connect(_on_session_ready)
 	session.sync_started.connect(_on_session_sync_started)
