@@ -1672,6 +1672,60 @@ func _apply_local_craft(output_name: String) -> bool:
 		if int(next[plank_name]) <= 0:
 			next.erase(plank_name)
 		next["stick"] = int(next.get("stick", 0)) + 4
+	elif output_name == "workbench":
+		var plank_name := ""
+		for candidate in ["planks", "palm_planks", "pine_planks", "weeping_planks"]:
+			if int(next.get(candidate, 0)) >= 4:
+				plank_name = candidate
+				break
+		if plank_name.is_empty():
+			return false
+		next[plank_name] = int(next.get(plank_name, 0)) - 4
+		if int(next[plank_name]) <= 0:
+			next.erase(plank_name)
+		next["workbench"] = int(next.get("workbench", 0)) + 1
+	elif output_name == "chest":
+		var plank_name := ""
+		for candidate in ["planks", "palm_planks", "pine_planks", "weeping_planks"]:
+			if int(next.get(candidate, 0)) >= 3:
+				plank_name = candidate
+				break
+		var wood_name := "wood"
+		if plank_name == "palm_planks":
+			wood_name = "palm_wood"
+		elif plank_name == "pine_planks":
+			wood_name = "pine_wood"
+		elif plank_name == "weeping_planks":
+			wood_name = "weeping_wood"
+		if plank_name.is_empty() or int(next.get(wood_name, 0)) <= 0:
+			return false
+		next[plank_name] = int(next.get(plank_name, 0)) - 3
+		if int(next[plank_name]) <= 0:
+			next.erase(plank_name)
+		next[wood_name] = int(next.get(wood_name, 0)) - 1
+		if int(next[wood_name]) <= 0:
+			next.erase(wood_name)
+		next["chest"] = int(next.get("chest", 0)) + 1
+	elif output_name == "trail_boots":
+		var leaf_name := ""
+		for candidate in ["leaves", "palm_leaves", "pine_needles", "weeping_leaves"]:
+			if int(next.get(candidate, 0)) >= 2:
+				leaf_name = candidate
+				break
+		var plank_name := ""
+		for candidate in ["planks", "palm_planks", "pine_planks", "weeping_planks"]:
+			if int(next.get(candidate, 0)) >= 1:
+				plank_name = candidate
+				break
+		if leaf_name.is_empty() or plank_name.is_empty():
+			return false
+		next[leaf_name] = int(next.get(leaf_name, 0)) - 2
+		if int(next[leaf_name]) <= 0:
+			next.erase(leaf_name)
+		next[plank_name] = int(next.get(plank_name, 0)) - 1
+		if int(next[plank_name]) <= 0:
+			next.erase(plank_name)
+		next["trail_boots"] = int(next.get("trail_boots", 0)) + 1
 	else:
 		return false
 	_world_snapshot["inventory_summary"] = next
@@ -2123,8 +2177,12 @@ func _on_decision_started(decision: Dictionary) -> void:
 				"at_msec": now_msec,
 			})
 		else:
-			_craft_pending_output = craft_output
-			_craft_retry_after_msec = now_msec + CRAFT_RESPONSE_TIMEOUT_MSEC
+			# Unsupported/unavailable recipe: cool only that output so it cannot
+			# freeze the whole craft progression gate for several seconds.
+			_block_craft_output(craft_output, now_msec)
+			_craft_pending_output = ""
+			_craft_retry_after_msec = now_msec + 500
+			_pending_action_targets.erase("craft")
 			behavior.executor.cancel("craft_failed")
 			decision_logged.emit({"event": "decision_failed", "decision": decision.duplicate(true), "reason": "craft_failed", "at_msec": now_msec})
 			return
