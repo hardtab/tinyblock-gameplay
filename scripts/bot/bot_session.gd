@@ -2489,20 +2489,20 @@ func _queue_emoji_reply(event: Dictionary) -> void:
 		return
 	var incoming := str(event.get("emoji", ""))
 	var sender_id := str(event.get("player_id", ""))
-	# Ignore echo/same-as-last reactions so a player's wave cannot re-arm the
-	# bot to spam the identical emoji once the social cooldown expires.
-	var fallback := Social.reply_emoji(incoming)
-	if not fallback.is_empty() and fallback == _previous_emoji:
+	var fallback := Social.reply_emoji(incoming, _previous_emoji)
+	if fallback.is_empty():
 		return
 	var context := {
 		"incoming_emoji": incoming,
 		"player_id": sender_id,
+		"avoid_emoji": _previous_emoji,
+		"previous_emoji": _previous_emoji,
 		"at_msec": int(event.get("at_msec", Time.get_ticks_msec())),
 	}
 	if ai_client != null and ai_client.is_available() and not ai_client.is_busy():
 		_emoji_reply_inflight = true
 		if ai_client.request_emoji_reply(context):
-			structured_log.emit({"event": "emoji_ai_requested", "incoming_emoji": incoming, "player_id": sender_id, "at_msec": Time.get_ticks_msec()})
+			structured_log.emit({"event": "emoji_ai_requested", "incoming_emoji": incoming, "player_id": sender_id, "avoid_emoji": _previous_emoji, "at_msec": Time.get_ticks_msec()})
 			return
 		_emoji_reply_inflight = false
 	_pending_social_emoji = fallback
@@ -2519,10 +2519,11 @@ func _queue_emoji_reply(event: Dictionary) -> void:
 
 func _on_ai_emoji_reply(emoji: String, context: Dictionary) -> void:
 	_emoji_reply_inflight = false
+	var avoid := str(context.get("avoid_emoji", _previous_emoji))
 	var sanitized := EmojiReactions.sanitize(emoji)
+	if sanitized.is_empty() or sanitized == avoid:
+		sanitized = Social.reply_emoji(str(context.get("incoming_emoji", "")), avoid)
 	if sanitized.is_empty():
-		sanitized = Social.reply_emoji(str(context.get("incoming_emoji", "")))
-	if sanitized.is_empty() or sanitized == _previous_emoji:
 		return
 	_pending_social_emoji = sanitized
 	_pending_social_emoji_target_id = str(context.get("player_id", ""))
@@ -2538,8 +2539,9 @@ func _on_ai_emoji_reply(emoji: String, context: Dictionary) -> void:
 
 func _on_ai_emoji_failed(reason: String, context: Dictionary) -> void:
 	_emoji_reply_inflight = false
-	var fallback := Social.reply_emoji(str(context.get("incoming_emoji", "")))
-	if fallback.is_empty() or fallback == _previous_emoji:
+	var avoid := str(context.get("avoid_emoji", _previous_emoji))
+	var fallback := Social.reply_emoji(str(context.get("incoming_emoji", "")), avoid)
+	if fallback.is_empty():
 		return
 	_pending_social_emoji = fallback
 	_pending_social_emoji_target_id = str(context.get("player_id", ""))

@@ -50,27 +50,37 @@ static func context_emoji(event_name: String) -> String:
 
 ## Fallback reply when no remote model is configured. Maps an incoming player
 ## emoji to one allowed response so the bot still answers social signals.
-static func reply_emoji(incoming_emoji: String) -> String:
+static func reply_emoji(incoming_emoji: String, avoid_emoji: String = "") -> String:
 	var incoming := EmojiReactions.sanitize(incoming_emoji)
+	var avoid := EmojiReactions.sanitize(avoid_emoji)
+	var picked := ""
 	if incoming.is_empty():
-		return "👋"
-	match incoming:
-		"👋", "🥰", "😀", "😎":
-			return "👋"
-		"😂", "🎉", "✨", "🔥", "💯":
-			return "😂"
-		"👍", "👏", "🙏", "💪", "✅":
-			return "👍"
-		"❤️":
-			return "❤️"
-		"🤔", "❓", "💡":
-			return "🤔"
-		"😭", "😱":
-			return "🥰"
-		"😡", "👎":
-			return "🤔"
-		"⛏️", "🏠":
-			return "👍"
-	if incoming in EmojiReactions.DEFAULT_EMOJIS:
-		return "👋"
-	return "👋"
+		picked = "👋"
+	else:
+		match incoming:
+			"👋", "🥰", "😀", "😎":
+				picked = "🥰"
+			"😂", "🎉", "✨", "🔥", "💯":
+				picked = "😂"
+			"👍", "👏", "🙏", "💪", "✅":
+				picked = "👍"
+			"❤️":
+				picked = "❤️"
+			"🤔", "❓", "💡":
+				picked = "🤔"
+			"😭", "😱":
+				picked = "🥰"
+			"😡", "👎":
+				picked = "🤔"
+			"⛏️", "🏠":
+				picked = "👍"
+			_:
+				picked = "👍" if incoming in EmojiReactions.DEFAULT_EMOJIS else "👋"
+	if picked == avoid or picked.is_empty():
+		for candidate in ["👍", "🥰", "😂", "🎉", "🤔", "❤️", "✨", "👋"]:
+			if candidate != avoid and candidate != incoming and candidate in EmojiReactions.DEFAULT_EMOJIS:
+				return candidate
+		for emoji in EmojiReactions.DEFAULT_EMOJIS:
+			if emoji != avoid:
+				return emoji
+	return picked

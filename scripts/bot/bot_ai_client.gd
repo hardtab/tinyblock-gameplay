@@ -55,21 +55,33 @@ func request_emoji_reply(context: Dictionary) -> bool:
 	if not is_available() or _pending:
 		return false
 	var incoming := str(context.get("incoming_emoji", ""))
+	var avoid := EmojiReactions.sanitize(context.get("avoid_emoji", context.get("previous_emoji", "")))
 	var criteria := {}
 	for emoji in EmojiReactions.DEFAULT_EMOJIS:
+		if emoji == avoid:
+			continue
 		criteria[emoji] = "Reply with %s" % emoji
+	# Keep at least a few choices even if avoid wiped a tiny list.
+	if criteria.size() < 2:
+		criteria.clear()
+		for emoji in EmojiReactions.DEFAULT_EMOJIS:
+			criteria[emoji] = "Reply with %s" % emoji
+	var instructions := "Pick exactly one emoji reply that fits a friendly sandbox co-op guest. Prefer variety — do not mirror the player's emoji and do not reuse the bot's last reaction when another fit exists."
+	if not avoid.is_empty():
+		instructions += " Do not pick %s." % avoid
 	var body := {
 		"model": model,
 		"state": {
 			"task": "tinyblock_emoji_reply",
 			"incoming_emoji": incoming if not incoming.is_empty() else "greeting",
+			"avoid_emoji": avoid,
 			"role": "friendly multiplayer guest in Tiny Block",
 		},
 		"questions": {
 			"emoji": {
 				"type": "choice",
 				"criteria": criteria,
-				"instructions": "Pick exactly one emoji reply that fits a friendly sandbox co-op guest.",
+				"instructions": instructions,
 			},
 		},
 	}
