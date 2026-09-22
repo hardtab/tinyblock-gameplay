@@ -111,8 +111,14 @@ func decide(observation: Dictionary) -> Dictionary:
 	# players and never emits a generic player attack.
 	var defense: Dictionary = observation.get("self_defense", {}) if observation.get("self_defense", {}) is Dictionary else {}
 	var attacker_id := str(defense.get("attacker_player_id", ""))
+	var attacker_target := _player_target_by_id(observation, attacker_id)
 	if not attacker_id.is_empty() and bool(defense.get("can_retaliate", false)) and Contract.ACTION_RETALIATE_ONCE in legal:
 		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_RETALIATE_ONCE, {"id": attacker_id}, 700, 0.99)
+	if not attacker_target.is_empty() and Contract.ACTION_FLEE_FROM in legal:
+		# Outside PvP the safety contract allows one proportional response. Once it
+		# is consumed, keep the attacker as a survival focus and disengage instead of
+		# immediately switching to mining while the threat is still beside the bot.
+		return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, attacker_target, 1400, 0.96)
 
 	# Hunger sits with survival: eat ready food before social/crafting loops while
 	# the nourishment bar is low enough that the next drain ticks matter.
@@ -522,6 +528,15 @@ func _first_dictionary(values: Array) -> Dictionary:
 	return {}
 
 
+func _player_target_by_id(observation: Dictionary, player_id: String) -> Dictionary:
+	if player_id.is_empty():
+		return {}
+	for raw_player in _as_array(observation.get("players", [])):
+		if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == player_id:
+			return raw_player as Dictionary
+	return {}
+
+
 func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var best := {}
 	var best_score := INF
@@ -545,6 +560,8 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			continue
 		var resource := raw_value as Dictionary
 		if resource.has("solid") and not bool(resource.get("solid", true)):
+			continue
+		if not Perception.mine_target_is_safe(observation, resource):
 			continue
 		# Reachable tiles are preferred for MINE; farther tiles stay candidates so
 		# MOVE_TO can walk toward them. DigPlanner already ran for true blocked

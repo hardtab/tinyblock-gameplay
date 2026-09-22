@@ -7,6 +7,7 @@ const BlockDefs = preload("res://gameplay/scripts/block_defs.gd")
 const DEFAULT_RADIUS := 256.0
 const DEFAULT_MAX_EVENTS := 12
 const REACHABLE_DISTANCE := float(BlockDefs.TILE) * 2.5
+const SAFE_SUPPORT_MINE_DROP_TILES := 8
 
 
 static func build(snapshot: Dictionary, own_player_id: String, radius: float = DEFAULT_RADIUS, now_msec: int = 0) -> Dictionary:
@@ -48,7 +49,7 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 		"own_player_id": own_player_id,
 		"active_projectiles": _as_array(snapshot.get("active_projectiles", [])).duplicate(true),
 	}
-	for key in ["self_defense", "social_emoji", "social_target_id", "preferred_player_distance", "creature_attack_distance", "bow_attack_distance", "pvp_world", "duel_started", "enemy_player_id", "pvp_chest_opened", "recipes", "achievements", "equipment_slots", "craft_pending_output", "craft_retry_after_msec", "craft_blocked_outputs", "food_eat_cooldown_until_msec", "action_loop_blocked"]:
+	for key in ["self_defense", "social_emoji", "social_target_id", "preferred_player_distance", "creature_attack_distance", "bow_attack_distance", "pvp_world", "duel_started", "enemy_player_id", "pvp_chest_opened", "world_mode", "recipes", "achievements", "equipment_slots", "craft_pending_output", "craft_retry_after_msec", "craft_blocked_outputs", "food_eat_cooldown_until_msec", "action_loop_blocked"]:
 		if snapshot.has(key):
 			observation[key] = snapshot[key]
 	return observation
@@ -115,6 +116,76 @@ static func has_clear_bow_line_of_sight(observation: Dictionary, target: Diction
 		if terrain.has(tile):
 			return false
 	return true
+
+
+static func mine_target_is_safe(observation: Dictionary, target: Dictionary) -> bool:
+	if not target.has("x") or not target.has("y"):
+		# Legacy/resource-provider entries may carry only id + world position. They
+		# cannot be identified as the current support tile, so preserve the existing
+		# reach/tool checks instead of treating every such resource as unsafe.
+		return true
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if self_state.is_empty():
+		return false
+	var tile_size := float(BlockDefs.TILE)
+	var player_x := float(self_state.get("x", 0.0))
+	var player_y := float(self_state.get("y", 0.0))
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var left := floori(player_x / tile_size)
+	var right := floori((player_x + width - 0.001) / tile_size)
+	var support_y := floori((player_y + height + 0.01) / tile_size)
+	var target_x := int(target.get("x", 2147483647))
+	var target_y := int(target.get("y", 2147483647))
+	if target_y != support_y or target_x < left or target_x > right:
+		return true
+	# The One Block anchor is synchronously replaced by the authoritative host.
+	# It is intentionally mined while standing on it and never opens a void.
+	if str(observation.get("world_mode", "")).to_lower() == "one_block":
+		return true
+	var terrain := _terrain_cell_map(observation.get("terrain_tiles", []))
+	terrain.erase(Vector2i(target_x, target_y))
+	# A wide avatar may still have another solid support cell under its feet.
+	for support_x in range(left, right + 1):
+		if _safe_solid_terrain(terrain.get(Vector2i(support_x, support_y), {})):
+			return true
+	# Otherwise the bot will fall vertically. Allow that only when the loaded
+	# terrain proves a non-hazardous landing within the bounded observation.
+	var landing_x := floori((player_x + width * 0.5) / tile_size)
+	for drop in range(1, SAFE_SUPPORT_MINE_DROP_TILES + 1):
+		var landing_cell: Dictionary = terrain.get(Vector2i(landing_x, support_y + drop), {}) if terrain.get(Vector2i(landing_x, support_y + drop), {}) is Dictionary else {}
+		if landing_cell.is_empty():
+			continue
+		return _safe_solid_terrain(landing_cell)
+	return false
+
+
+static func _terrain_cell_map(raw_terrain: Variant) -> Dictionary:
+	var terrain := {}
+	for raw_tile in _as_array(raw_terrain):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		var block_name := str(tile.get("block_name", "")).to_lower()
+		if block_name.is_empty() or block_name in ["air", "core.air"]:
+			continue
+		var hazardous_fluid := block_name in ["lava", "core.lava", "water", "core.water", "glass_tide", "chorus_brine"]
+		terrain[Vector2i(int(tile.get("x", 0)), int(tile.get("y", 0)))] = {
+			"name": block_name,
+			"solid": bool(tile.get("solid", not hazardous_fluid)),
+			"fluid": bool(tile.get("fluid", hazardous_fluid)),
+		}
+	return terrain
+
+
+static func _safe_solid_terrain(cell: Variant) -> bool:
+	if not cell is Dictionary:
+		return false
+	var terrain_cell := cell as Dictionary
+	var block_name := str(terrain_cell.get("name", "")).to_lower()
+	if block_name.is_empty() or block_name in ["air", "core.air", "lava", "core.lava"]:
+		return false
+	return bool(terrain_cell.get("solid", false)) and not bool(terrain_cell.get("fluid", false))
 
 
 static func _normalize_entities(raw_entities: Variant, own_player_id: String, origin: Vector2, radius: float, hostile_default: bool) -> Array[Dictionary]:

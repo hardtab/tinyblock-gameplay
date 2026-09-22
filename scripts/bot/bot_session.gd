@@ -88,6 +88,7 @@ var _physics_route: Array[Dictionary] = []
 var _physics_route_target := Vector2i(2147483647, 2147483647)
 var _physics_route_target_id := ""
 var _physics_route_replan_msec := -1
+var _physics_advanced_this_frame := false
 var _jump_active := false
 var _jump_velocity := 0.0
 var _jump_ground_y := 0.0
@@ -468,7 +469,9 @@ func _process(delta: float) -> void:
 	# The brain may run at a much lower cadence than physics. Reset the held
 	# controls every frame; a movement executor reasserts them for this frame.
 	_desired_input = {"left": false, "right": false, "jump": false}
+	_physics_advanced_this_frame = false
 	behavior.tick(observation, delta, now_msec)
+	_advance_local_physics_if_needed(delta)
 	_send_player_input_if_due(now_msec)
 	# Keep the legacy snapshot during rollout. New hosts ignore its coordinates
 	# after the first player_input packet, while old hosts can still display the
@@ -1048,6 +1051,7 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 	coordinates rather than a kinematic target position that can float over a
 	gap.  Dedicated hosts still correct these values from their own simulation.
 	"""
+	_physics_advanced_this_frame = true
 	_eject_local_self_from_solid(self_state)
 	var step := clampf(maxf(delta, 0.0) * NETWORK_PHYSICS_TICKS_PER_SECOND, 0.25, 2.0)
 	var width := float(self_state.get("w", 20.0))
@@ -1127,6 +1131,16 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 		_support_place_attempted = false
 	else:
 		_try_place_support_block(self_state)
+
+
+func _advance_local_physics_if_needed(delta: float) -> void:
+	if _physics_advanced_this_frame:
+		return
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	if self_state.is_empty():
+		return
+	_advance_local_physics(self_state, delta, false)
+	_world_snapshot["self"] = self_state
 
 
 func _local_touches_harmful_fluid(self_state: Dictionary) -> bool:
@@ -2187,6 +2201,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 		if not has_chest:
 			snapshot["visible_containers"].append(_duel_fallback_container(snapshot["self"] as Dictionary))
 	var generation: Dictionary = snapshot.get("generation", {}) if snapshot.get("generation", {}) is Dictionary else {}
+	snapshot["world_mode"] = str(generation.get("mode", _session_world_mode)).to_lower()
 	snapshot["pvp_world"] = _is_pvp_world()
 	snapshot["duel_started"] = _duel_started
 	snapshot["pvp_chest_opened"] = _pvp_chest_opened
@@ -2289,6 +2304,8 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 			"x": tile_x,
 			"y": tile_y,
 			"block_name": block_name,
+			"solid": bool(block.get("solid", false)),
+			"fluid": bool(block.get("fluid", false)),
 			"harvest_tier": _block_harvest_tier(block),
 			"hardness": float(block.get("hardness", 0.0)),
 		})

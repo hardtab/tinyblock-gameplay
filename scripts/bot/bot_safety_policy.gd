@@ -124,6 +124,8 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 				return _rejected(decision, "flee_target_missing")
 		Contract.ACTION_MINE:
 			var mine_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+			if not Perception.mine_target_is_safe(observation, mine_target):
+				return _rejected(decision, "mine_target_unsafe_support")
 			if bool(mine_target.get("dig_route", false)):
 				if not _valid_dig_route_target(decision, observation):
 					return _rejected(decision, "dig_target_unsafe")
