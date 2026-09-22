@@ -26,6 +26,10 @@ const PROGRESSION_CRAFTS := ["wooden_pickaxe", "workbench", "stone_pickaxe", "st
 const WOOD_BLOCK_NAMES := ["wood", "palm_wood", "pine_wood", "weeping_wood"]
 const LEAF_BLOCK_NAMES := ["leaves", "palm_leaves", "pine_needles", "weeping_leaves"]
 const PLANK_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks"]
+const KNOWN_FOODS := ["wild_berries", "prepared_meal"]
+const HUNGER_EAT_THRESHOLD := 55
+const HUNGER_FORAGE_THRESHOLD := 70
+const MAX_NOURISHMENT := 100
 
 
 func _init(seed: int = 0) -> void:
@@ -87,6 +91,16 @@ func decide(observation: Dictionary) -> Dictionary:
 	var attacker_id := str(defense.get("attacker_player_id", ""))
 	if not attacker_id.is_empty() and bool(defense.get("can_retaliate", false)) and Contract.ACTION_RETALIATE_ONCE in legal:
 		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_RETALIATE_ONCE, {"id": attacker_id}, 700, 0.99)
+
+	# Hunger sits with survival: eat ready food before social/crafting loops while
+	# the nourishment bar is low enough that the next drain ticks matter.
+	var nourishment := clampi(int(self_state.get("nourishment", MAX_NOURISHMENT)), 0, MAX_NOURISHMENT)
+	var hungry := nourishment <= HUNGER_EAT_THRESHOLD
+	var foraging := nourishment <= HUNGER_FORAGE_THRESHOLD
+	if hungry and Contract.ACTION_EAT in legal:
+		var food_name := _best_food_in_inventory(observation)
+		if not food_name.is_empty():
+			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_EAT, {"id": food_name}, 500, 0.97)
 
 	var social_target: Dictionary = _first_dictionary(_as_array(observation.get("players", [])))
 	var social_target_id := str(social_target.get("id", observation.get("social_target_id", "")))
@@ -173,6 +187,10 @@ func decide(observation: Dictionary) -> Dictionary:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, pvp_target, 1800, 0.94)
 
 	var craft_target := _craftable_output(observation)
+	if foraging:
+		var meal_target := _craftable_food_output(observation)
+		if not meal_target.is_empty() and Contract.ACTION_CRAFT in legal:
+			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_CRAFT, {"id": meal_target}, 700, 0.93)
 	if not craft_target.is_empty() and Contract.ACTION_CRAFT in legal:
 		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_CRAFT, {"id": craft_target}, 700, 0.9)
 	if not threats.is_empty() and Contract.ACTION_ATTACK_CREATURE in legal:
@@ -382,6 +400,9 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var best_score := INF
 	var inventory := _inventory(observation)
 	var needs_wood := _needs_wood_progression(inventory)
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var nourishment := clampi(int(self_state.get("nourishment", MAX_NOURISHMENT)), 0, MAX_NOURISHMENT)
+	var needs_food := nourishment <= HUNGER_FORAGE_THRESHOLD and _best_food_in_inventory(observation).is_empty()
 	for raw_value in values:
 		if not raw_value is Dictionary:
 			continue
@@ -414,6 +435,11 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			score -= 40.0
 		elif needs_wood and block_name in ["dirt", "grass", "sand", "gravel"]:
 			score += 35.0
+		# Leaves are the ordinary forage path for wild berries. Prefer them when
+		# hungry and the inventory has no ready food, otherwise the bot starves
+		# while happily mining dirt beside berry bushes.
+		if needs_food and _is_leaf_name(block_name):
+			score -= 90.0
 		# Prefer harvestable targets over blocks that require a better tool.
 		if int(resource.get("harvest_tier", 0)) > 0:
 			score -= 2.0
@@ -487,7 +513,9 @@ func _craftable_output(observation: Dictionary) -> String:
 
 
 func _craftable_plank_output(recipes: Array, inventory: Dictionary, blocked_outputs: Array) -> String:
-	if _count_named(inventory, PLANK_OUTPUTS) >= 3:
+	# Wooden tools need three planks of the *same* tree family. Counting mixed
+	# palm/pine/oak stacks as "enough" left the bot stuck with 1+1+1 forever.
+	if _max_named_stack(inventory, PLANK_OUTPUTS) >= 3:
 		return ""
 	if _count_named(inventory, WOOD_BLOCK_NAMES) <= 0:
 		return ""
@@ -505,12 +533,64 @@ func _craftable_plank_output(recipes: Array, inventory: Dictionary, blocked_outp
 	return ""
 
 
+func _craftable_food_output(observation: Dictionary) -> String:
+	if not str(observation.get("craft_pending_output", "")).is_empty():
+		return ""
+	if int(observation.get("craft_retry_after_msec", -1)) > int(observation.get("observed_at_msec", 0)):
+		return ""
+	var blocked_outputs: Array = observation.get("craft_blocked_outputs", []) if observation.get("craft_blocked_outputs", []) is Array else []
+	if "prepared_meal" in blocked_outputs:
+		return ""
+	var inventory := _inventory(observation)
+	if int(inventory.get("prepared_meal", 0)) > 0:
+		return ""
+	var recipes: Array = observation.get("recipes", []) if observation.get("recipes", []) is Array else []
+	if _recipe_available(recipes, inventory, "prepared_meal"):
+		return "prepared_meal"
+	return ""
+
+
+func _best_food_in_inventory(observation: Dictionary) -> String:
+	var inventory := _inventory(observation)
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if clampi(int(self_state.get("nourishment", MAX_NOURISHMENT)), 0, MAX_NOURISHMENT) >= MAX_NOURISHMENT:
+		return ""
+	var best := ""
+	var best_restore := 0
+	for raw_name in inventory.keys():
+		var name := str(raw_name)
+		if int(inventory.get(name, 0)) <= 0:
+			continue
+		var restore := _item_nourishment(name)
+		if restore <= 0:
+			continue
+		if restore > best_restore or (restore == best_restore and name in KNOWN_FOODS):
+			best = name
+			best_restore = restore
+	return best
+
+
+func _item_nourishment(block_name: String) -> int:
+	var entry := _block_entry(block_name)
+	var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	var restore := maxi(0, int(effects.get("nourishment", 0)))
+	if restore > 0:
+		return restore
+	# Fallback when BlockDefs is unavailable in pure unit tests.
+	if block_name == "wild_berries":
+		return 28
+	if block_name == "prepared_meal":
+		return 64
+	return 0
+
+
 func _needs_wood_progression(inventory: Dictionary) -> bool:
 	if int(inventory.get("wooden_pickaxe", 0)) > 0:
 		return false
 	if int(inventory.get("stone_pickaxe", 0)) > 0 or int(inventory.get("copper_pickaxe", 0)) > 0:
 		return false
-	return _count_named(inventory, PLANK_OUTPUTS) < 3 or _count_named(inventory, WOOD_BLOCK_NAMES) < 1
+	return _max_named_stack(inventory, PLANK_OUTPUTS) < 3 or _count_named(inventory, WOOD_BLOCK_NAMES) < 1
 
 
 func _count_named(inventory: Dictionary, names: Array) -> int:
@@ -518,6 +598,13 @@ func _count_named(inventory: Dictionary, names: Array) -> int:
 	for raw_name in names:
 		total += int(inventory.get(str(raw_name), 0))
 	return total
+
+
+func _max_named_stack(inventory: Dictionary, names: Array) -> int:
+	var best := 0
+	for raw_name in names:
+		best = maxi(best, int(inventory.get(str(raw_name), 0)))
+	return best
 
 
 func _is_wood_log_name(block_name: String) -> bool:

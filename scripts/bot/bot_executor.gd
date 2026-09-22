@@ -62,6 +62,17 @@ func start(raw_decision: Variant, observation: Dictionary, now_msec: int) -> boo
 			action_failed.emit(decision, "emoji_not_allowed")
 			return false
 		decision["emoji"] = emoji
+	if action == Contract.ACTION_DISCOVER:
+		var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+		var inputs: Array = target.get("inputs", []) if target.get("inputs", []) is Array else []
+		if inputs.is_empty():
+			action_failed.emit(decision, "discover_inputs_missing")
+			return false
+	if action == Contract.ACTION_EAT:
+		var food_name := str(decision.get("target_id", ""))
+		if food_name.is_empty():
+			action_failed.emit(decision, "food_target_missing")
+			return false
 	if action == Contract.ACTION_RETALIATE_ONCE and retaliation_consumer.is_valid():
 		var target_id := str(decision.get("target_id", ""))
 		if not bool(retaliation_consumer.call(target_id, now_msec)):
@@ -83,7 +94,12 @@ func start(raw_decision: Variant, observation: Dictionary, now_msec: int) -> boo
 		_send_mine_progress(now_msec, 0)
 		return true
 
-	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER, Contract.ACTION_EQUIP]:
+	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER, Contract.ACTION_CRAFT, Contract.ACTION_EAT, Contract.ACTION_OPEN_CONTAINER, Contract.ACTION_EQUIP]:
+		if action == Contract.ACTION_EAT:
+			# Eating is applied locally by the session and synced through
+			# inventory_snapshot, matching human guests.
+			_finish("command_sent")
+			return true
 		if not _send_network_action(action, decision):
 			_fail("command_rejected")
 			return false

@@ -1520,6 +1520,10 @@ func _apply_inventory_snapshot(payload: Dictionary) -> void:
 	_world_snapshot["inventory_summary"] = inventory.duplicate(true)
 	_equipment_slots = payload.get("equipment_slots", _equipment_slots).duplicate(true) if payload.get("equipment_slots", _equipment_slots) is Dictionary else _equipment_slots
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+	if payload.has("nourishment"):
+		var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+		self_state["nourishment"] = clampi(int(payload.get("nourishment", 100)), 0, 100)
+		_world_snapshot["self"] = self_state
 	if not _craft_pending_output.is_empty() and int(inventory.get(_craft_pending_output, 0)) > 0:
 		_craft_blocked_outputs.erase(_craft_pending_output)
 		_craft_pending_output = ""
@@ -1948,6 +1952,11 @@ func _on_decision_started(decision: Dictionary) -> void:
 		_craft_pending_output = str(decision.get("target_id", ""))
 		_craft_retry_after_msec = now_msec + CRAFT_RESPONSE_TIMEOUT_MSEC
 		_pending_action_targets["craft"] = {"action": action, "output": _craft_pending_output}
+	elif action == Contract.ACTION_EAT:
+		if not _apply_local_eat(str(decision.get("target_id", ""))):
+			behavior.executor.cancel("eat_failed")
+			decision_logged.emit({"event": "decision_failed", "decision": decision.duplicate(true), "reason": "eat_failed", "at_msec": now_msec})
+			return
 	elif action == Contract.ACTION_OPEN_CONTAINER:
 		var container_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
 		var container_key := "%d:%d" % [int(container_target.get("x", 0)), int(container_target.get("y", 0))]
@@ -1995,6 +2004,50 @@ func _record_action_history(phase: String, decision: Dictionary, reason: String 
 	_action_history.append(entry)
 	while _action_history.size() > Perception.DEFAULT_MAX_EVENTS:
 		_action_history.pop_front()
+
+
+func _apply_local_eat(food_name: String) -> bool:
+	food_name = food_name.strip_edges()
+	if food_name.is_empty():
+		return false
+	var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+	if int(inventory.get(food_name, 0)) <= 0:
+		return false
+	var restore := _item_nourishment_value(food_name)
+	if restore <= 0:
+		return false
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	var nourishment := clampi(int(self_state.get("nourishment", 100)), 0, 100)
+	if nourishment >= 100:
+		return false
+	inventory[food_name] = int(inventory.get(food_name, 0)) - 1
+	if int(inventory[food_name]) <= 0:
+		inventory.erase(food_name)
+	self_state["nourishment"] = mini(100, nourishment + restore)
+	_world_snapshot["inventory_summary"] = inventory
+	_world_snapshot["self"] = self_state
+	_send_inventory_snapshot()
+	structured_log.emit({
+		"event": "food_consumed",
+		"food": food_name,
+		"nourishment": int(self_state.get("nourishment", 0)),
+		"at_msec": Time.get_ticks_msec(),
+	})
+	return true
+
+
+func _item_nourishment_value(block_name: String) -> int:
+	var block := _block_entry(block_name)
+	var definition: Dictionary = block.get("definition", {}) if block.get("definition", {}) is Dictionary else {}
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	var restore := maxi(0, int(effects.get("nourishment", 0)))
+	if restore > 0:
+		return restore
+	if block_name == "wild_berries":
+		return 28
+	if block_name == "prepared_meal":
+		return 64
+	return 0
 
 
 func _handle_action_result(payload: Dictionary) -> void:

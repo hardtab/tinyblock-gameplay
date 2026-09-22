@@ -143,7 +143,7 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 			if emoji.is_empty():
 				return _rejected(decision, "emoji_not_allowed")
 			decision["emoji"] = emoji
-		Contract.ACTION_CRAFT, Contract.ACTION_EQUIP:
+		Contract.ACTION_CRAFT, Contract.ACTION_DISCOVER, Contract.ACTION_EAT, Contract.ACTION_EQUIP:
 			if target_id.is_empty():
 				return _rejected(decision, "item_target_missing")
 		Contract.ACTION_PLACE:
