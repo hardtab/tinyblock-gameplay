@@ -83,6 +83,7 @@ var _equipment_slots := {"hand": "", "feet": ""}
 var _pending_action_targets: Dictionary = {}
 var _blocked_action_targets: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
+var _plant_tiles: Dictionary = {}
 var _physics_route: Array[Dictionary] = []
 var _physics_route_target := Vector2i(2147483647, 2147483647)
 var _physics_route_target_id := ""
@@ -408,6 +409,10 @@ func handle_message(message: Dictionary) -> void:
 		return
 	if message_type == "tile_batch":
 		_apply_tile_batch(payload)
+		_record_event(message_type, payload)
+		return
+	if message_type == "plant_batch":
+		_apply_plant_batch(payload)
 		_record_event(message_type, payload)
 		return
 	if message_type == "emoji_reaction":
@@ -754,6 +759,83 @@ func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 		if not name.is_empty():
 			_terrain_tiles["%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]] = name
 	_physics_route_replan_msec = 0
+
+
+func _rebuild_plant_index(raw_plants: Variant) -> void:
+	_plant_tiles.clear()
+	if not raw_plants is Array:
+		return
+	for raw_plant in raw_plants:
+		if not raw_plant is Dictionary:
+			continue
+		_ingest_plant_entry(raw_plant as Dictionary)
+
+
+func _seed_tree_growth_resources(raw_growth: Variant) -> void:
+	# Growing trees place wood/leaves over time. Until those tile_batches arrive,
+	# keep the known trunk/foliage cells visible so the bot can climb them.
+	if not raw_growth is Array:
+		return
+	for raw_entry in raw_growth:
+		if not raw_entry is Dictionary:
+			continue
+		var entry := raw_entry as Dictionary
+		var data: Dictionary = entry.get("data", {}) if entry.get("data", {}) is Dictionary else {}
+		var trunk := str(data.get("trunk_block_name", "wood"))
+		var foliage := str(data.get("foliage_block_name", "leaves"))
+		var anchor_x := int(entry.get("x", 0))
+		var anchor_y := int(entry.get("y", 0))
+		_terrain_tiles["%d:%d" % [anchor_x, anchor_y]] = trunk if not trunk.is_empty() else "wood"
+		for dy in range(0, 6):
+			var key := "%d:%d" % [anchor_x, anchor_y - dy]
+			if not _terrain_tiles.has(key):
+				_terrain_tiles[key] = trunk if dy < 4 else foliage
+
+
+func _apply_plant_batch(payload: Dictionary) -> void:
+	var plants: Array = payload.get("plants", []) if payload.get("plants", []) is Array else []
+	for raw_plant in plants:
+		if raw_plant is Dictionary:
+			_ingest_plant_entry(raw_plant as Dictionary)
+
+
+func _ingest_plant_entry(entry: Dictionary) -> void:
+	var anchor_x := int(entry.get("anchor_x", entry.get("x", 0)))
+	var anchor_y := int(entry.get("anchor_y", entry.get("y", 0)))
+	var data: Dictionary = entry.get("data", {}) if entry.get("data", {}) is Dictionary else {}
+	var exists := bool(entry.get("exists", true))
+	if entry.has("data") and data.is_empty():
+		exists = false
+	var block_name := str(entry.get("block_name", data.get("block_name", "leaves")))
+	if block_name.is_empty():
+		block_name = "leaves"
+	# Map growable plants onto craftable leaf/wood so trail boots and planks can
+	# still progress when the host only synced the plant overlay.
+	if block_name.contains("pine"):
+		block_name = "pine_needles"
+	elif block_name.contains("palm"):
+		block_name = "palm_leaves"
+	elif block_name.contains("weeping"):
+		block_name = "weeping_leaves"
+	elif block_name.contains("plant") or block_name.contains("oak") or block_name.contains("tree"):
+		block_name = "leaves"
+	var cells: Array = entry.get("cells", data.get("cells", [])) if entry.get("cells", data.get("cells", [])) is Array else []
+	if cells.is_empty():
+		cells = [{"x": anchor_x, "y": anchor_y}]
+	for raw_cell in cells:
+		var cell_x := anchor_x
+		var cell_y := anchor_y
+		if raw_cell is Dictionary:
+			cell_x = int((raw_cell as Dictionary).get("x", anchor_x))
+			cell_y = int((raw_cell as Dictionary).get("y", anchor_y))
+		elif raw_cell is Vector2i:
+			cell_x = (raw_cell as Vector2i).x
+			cell_y = (raw_cell as Vector2i).y
+		var key := "%d:%d" % [cell_x, cell_y]
+		if exists:
+			_plant_tiles[key] = block_name
+		else:
+			_plant_tiles.erase(key)
 
 
 func _seed_duel_fallback_terrain() -> void:
@@ -1226,6 +1308,8 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		_world_snapshot["generation"] = snapshot_generation
 		snapshot_is_duel = selected_world_mode == "duel"
 	_rebuild_terrain_index(_world_snapshot.get("tiles", []))
+	_rebuild_plant_index(_world_snapshot.get("plant_growth", _world_snapshot.get("plants", [])))
+	_seed_tree_growth_resources(_world_snapshot.get("tree_growth", []))
 	if str(snapshot_generation.get("mode", "")).to_lower() == "duel":
 		_seed_duel_fallback_terrain()
 	world_id = str(snapshot.get("world_id", world_id))
@@ -1915,6 +1999,16 @@ func _visible_resources_from_terrain(self_state: Dictionary) -> Array:
 		var tile_x := int(parts[0])
 		var tile_y := int(parts[1])
 		var block_name := str(_terrain_tiles[key])
+		_append_visible_resource(resources, seen, self_state, origin, max_distance, tile_x, tile_y, block_name)
+		if resources.size() >= 256:
+			return resources
+	for key in _plant_tiles:
+		var parts := str(key).split(":")
+		if parts.size() != 2:
+			continue
+		var tile_x := int(parts[0])
+		var tile_y := int(parts[1])
+		var block_name := str(_plant_tiles[key])
 		_append_visible_resource(resources, seen, self_state, origin, max_distance, tile_x, tile_y, block_name)
 		if resources.size() >= 256:
 			return resources
