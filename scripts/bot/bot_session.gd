@@ -141,6 +141,7 @@ const HOST_KILL_LEAVE_DELAY_MSEC := 650
 const HOST_KILL_EMOJIS: PackedStringArray = ["😱", "😡", "👎"]
 const DUEL_PROTOCOL_VERSION := 3
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
+const LOCAL_MAX_FALL_SPEED := 12.0
 const TREE_CLIMB_SPEED := -3.2
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
@@ -666,7 +667,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# still allowed because its destination was built from a known standable tile;
 	# direct movement toward unknown void has no such landing guarantee.
 	if (
-		bool(self_state.get("on_ground", false))
+		(bool(self_state.get("on_ground", false)) or _local_pose_has_support(self_state))
 		and _would_step_into_void(origin, destination)
 		and route_kind != "jump"
 	):
@@ -1142,7 +1143,10 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 	elif on_ground:
 		vy = 0.0
 	else:
-		vy += BlockDefs.GRAVITY * step
+		# Match WorldSim's terminal velocity. An incomplete support snapshot must
+		# never make the legacy predictor accelerate to enormous coordinates while
+		# it waits for the authoritative host to reconcile the player.
+		vy = minf(LOCAL_MAX_FALL_SPEED, vy + BlockDefs.GRAVITY * step)
 
 	var substeps := maxi(1, int(ceil(maxf(absf(vx), absf(vy)) * step / 6.0)))
 	var substep := step / float(substeps)
@@ -1532,6 +1536,25 @@ func _would_step_into_void(origin: Vector2, destination: Vector2) -> bool:
 	return true
 
 
+func _local_pose_has_support(self_state: Dictionary) -> bool:
+	if _terrain_tiles.is_empty():
+		return false
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var x := float(self_state.get("x", 0.0))
+	var y := float(self_state.get("y", 0.0))
+	var support := _support_tile_for_position(Vector2(x, y))
+	if not _terrain_solid_at(support.x, support.y):
+		return false
+	var expected_y := float(support.y * BlockDefs.TILE) - height
+	if absf(y - expected_y) > 1.75:
+		return false
+	var foot_left := x + 3.0
+	var foot_right := x + width - 3.0
+	var block_left := float(support.x * BlockDefs.TILE)
+	return foot_right > block_left and foot_left < block_left + float(BlockDefs.TILE)
+
+
 func _terrain_is_lava_at(tx: int, ty: int) -> bool:
 	var name := _terrain_name_at(tx, ty).to_lower()
 	if name == "lava" or name.ends_with(".lava"):
@@ -1735,6 +1758,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	if _is_pvp_world() and snapshot_is_duel and not _roster.is_empty() and not _duel_started:
 		_duel_started = true
 		_record_event("duel_start_inferred", {"reason": "active_duel_snapshot"})
+	var spawn_support_recovered := _stabilize_initial_supported_pose(local_state)
 	_world_snapshot["self"] = local_state.duplicate(true)
 	# Root-level inventory/equipment belong to the host avatar. A guest bot must
 	# start empty unless its own multiplayer.player_states entry already exists.
@@ -1750,6 +1774,19 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_world_snapshot["visible_resources"] = _visible_resources_from_tiles(_world_snapshot.get("tiles", []), local_state)
 	_world_snapshot["visible_containers"] = _visible_containers_from_snapshot(_world_snapshot, local_state)
 	_world_snapshot["threats"] = _threats_from_creatures(_world_snapshot.get("creatures", []))
+	var initial_support := _support_tile_for_position(Contract.target_position(local_state))
+	structured_log.emit({
+		"event": "snapshot_ready",
+		"x": float(local_state.get("x", 0.0)),
+		"y": float(local_state.get("y", 0.0)),
+		"on_ground": bool(local_state.get("on_ground", false)),
+		"support_x": initial_support.x,
+		"support_y": initial_support.y,
+		"support_block": _terrain_name_at(initial_support.x, initial_support.y),
+		"terrain_tile_count": _terrain_tiles.size(),
+		"spawn_support_recovered": spawn_support_recovered,
+		"at_msec": Time.get_ticks_msec(),
+	})
 	sync_complete = true
 	_snapshot_transfer_id = ""
 	_snapshot_expected_chunks = 0
@@ -1763,6 +1800,50 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_send_duel_ready(Time.get_ticks_msec())
 	behavior.request_decision(Time.get_ticks_msec())
 	session_ready.emit(session_id, own_player_id)
+
+
+func _stabilize_initial_supported_pose(local_state: Dictionary) -> bool:
+	"""Normalize a newly joined guest onto nearby authoritative terrain.
+
+	A P2P snapshot can briefly report on_ground=false or omit a new guest's
+	state. This runs once, before PLAYING, and uses only the generic terrain map;
+	it does not depend on a world mode or suppress later legitimate jumps.
+	"""
+	if local_state.is_empty() or _terrain_tiles.is_empty():
+		return false
+	var width := maxf(1.0, float(local_state.get("w", 20.0)))
+	var height := maxf(1.0, float(local_state.get("h", 28.0)))
+	if _local_pose_has_support(local_state):
+		var support := _support_tile_for_position(Contract.target_position(local_state))
+		var changed := not bool(local_state.get("on_ground", false)) or not is_zero_approx(float(local_state.get("vy", 0.0)))
+		local_state["y"] = float(support.y * BlockDefs.TILE) - height
+		local_state["vx"] = 0.0
+		local_state["vy"] = 0.0
+		local_state["on_ground"] = true
+		return changed
+	var origin := _support_tile_for_position(Contract.target_position(local_state))
+	var best_tile := Vector2i(2147483647, 2147483647)
+	var best_distance := INF
+	const RECOVERY_RADIUS := 8
+	for dy in range(-RECOVERY_RADIUS, RECOVERY_RADIUS + 1):
+		for dx in range(-RECOVERY_RADIUS, RECOVERY_RADIUS + 1):
+			var candidate := origin + Vector2i(dx, dy)
+			if not _terrain_standable_tile(candidate):
+				continue
+			var candidate_position := _world_position_for_support_tile(candidate)
+			var distance := Contract.target_position(local_state).distance_squared_to(candidate_position)
+			if distance < best_distance:
+				best_distance = distance
+				best_tile = candidate
+	if best_tile.x == 2147483647:
+		return false
+	var recovered_position := _world_position_for_support_tile(best_tile)
+	local_state["x"] = recovered_position.x + (20.0 - width) * 0.5
+	local_state["y"] = float(best_tile.y * BlockDefs.TILE) - height
+	local_state["vx"] = 0.0
+	local_state["vy"] = 0.0
+	local_state["on_ground"] = true
+	return true
 
 
 func _send_duel_ready(now_msec: int) -> void:
