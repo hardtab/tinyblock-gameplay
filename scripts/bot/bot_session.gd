@@ -663,6 +663,17 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	var route_kind := str(route_step.get("kind", ""))
 	if not route_step.is_empty():
 		destination = route_step.get("position", destination)
+	if route_kind == "jump" and not _jump_route_has_safe_landing(self_state, destination):
+		# A standable destination alone does not prove that the actual player arc
+		# can reach it: a wall/ceiling or an optimistic graph edge can still turn
+		# the jump into a fall. Validate the same collision trajectory before any
+		# jump input is emitted.
+		_physics_route.clear()
+		_physics_route_replan_msec = Time.get_ticks_msec() + 450
+		_set_desired_input(false, false, false)
+		_advance_local_physics(self_state, delta, false)
+		_world_snapshot["self"] = self_state
+		return {"done": true, "reason": "unsafe_jump_route"}
 	# Guard the edge before a movement hint can start a jump. A navigator jump is
 	# still allowed because its destination was built from a known standable tile;
 	# direct movement toward unknown void has no such landing guarantee.
@@ -1112,6 +1123,51 @@ func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> D
 		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "blocked_obstacle"}
 	return {"done": landed and absf(destination.x - next_x) <= 8.0, "reason": "jump_step"}
+
+
+func _jump_route_has_safe_landing(self_state: Dictionary, destination: Vector2) -> bool:
+	var origin := Contract.target_position(self_state)
+	var origin_support := _support_tile_for_position(origin)
+	var landing_support := _support_tile_for_position(destination)
+	var horizontal_tiles := absi(landing_support.x - origin_support.x)
+	if horizontal_tiles <= 0 or horizontal_tiles > 2:
+		return false
+	# The navigator only advertises same-level and one-block-up jumps. Drops are
+	# walked normally; larger climbs need a dig/climb route rather than hope.
+	if landing_support.y < origin_support.y - 1 or landing_support.y > origin_support.y:
+		return false
+	if not _terrain_standable_tile(landing_support):
+		return false
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var direction := signf(destination.x - origin.x)
+	if is_zero_approx(direction):
+		return false
+	var x := float(self_state.get("x", origin.x))
+	var y := float(self_state.get("y", origin.y))
+	var vx := direction * BlockDefs.MOVE
+	var vy := BlockDefs.JUMP
+	for _frame in range(90):
+		var substeps := maxi(1, int(ceil(maxf(absf(vx), absf(vy)) / 6.0)))
+		var substep := 1.0 / float(substeps)
+		for _substep_index in substeps:
+			var next_x := x + vx * substep
+			if not _local_collision(next_x, y, width, height).is_empty():
+				return false
+			x = next_x
+			var next_y := y + vy * substep
+			var vertical_hit := _local_collision(x, next_y, width, height)
+			if vertical_hit.is_empty():
+				y = next_y
+			else:
+				if vy < 0.0:
+					return false
+				y = float(vertical_hit.get("by", y)) - height
+				return _support_tile_for_position(Vector2(x, y)) == landing_support
+		vy = minf(LOCAL_MAX_FALL_SPEED, vy + BlockDefs.GRAVITY)
+		if y > origin.y + float(BlockDefs.TILE) * 4.0:
+			return false
+	return false
 
 
 func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: bool) -> void:
