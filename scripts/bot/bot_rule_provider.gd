@@ -2,13 +2,11 @@ class_name BotRuleProvider
 extends BotDecisionProvider
 
 const DigPlanner = preload("res://gameplay/scripts/bot/bot_dig_planner.gd")
+const BuildPlanner = preload("res://gameplay/scripts/bot/bot_build_planner.gd")
 const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 
 var _rng := RandomNumberGenerator.new()
-var _build_step := 0
 var _last_build_msec := -1
-var _build_anchor := Vector2i.ZERO
-var _build_anchor_set := false
 var _plant_step := 0
 var _last_plant_msec := -1
 var _explore_direction := 0
@@ -56,13 +54,6 @@ const MAX_NOURISHMENT := 100
 const STATION_NAMES := ["workbench", "furnace"]
 const FILLER_BLOCK_NAMES := ["dirt", "grass", "sand", "gravel", "snow", "ice"]
 const MAX_FILLER_RESERVE := 8
-const SHELTER_BLUEPRINT := [
-	Vector2i(1, -1), Vector2i(2, -1), Vector2i(3, -1),
-	Vector2i(1, -2), Vector2i(3, -2),
-	Vector2i(1, -3), Vector2i(2, -3), Vector2i(3, -3),
-]
-
-
 func _init(seed: int = 0) -> void:
 	if seed == 0:
 		_rng.randomize()
@@ -75,10 +66,7 @@ func provider_name() -> String:
 
 
 func reset() -> void:
-	_build_step = 0
 	_last_build_msec = -1
-	_build_anchor = Vector2i.ZERO
-	_build_anchor_set = false
 	_plant_step = 0
 	_last_plant_msec = -1
 	_explore_direction = 0
@@ -321,9 +309,9 @@ func decide(observation: Dictionary) -> Dictionary:
 			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, urgent_plant, 900, 0.86)
 
 	var mining_streak := _consecutive_action_streak(observation, Contract.ACTION_MINE)
-	# Once gathering has supplied a couple of blocks, continue a stable shelter
-	# blueprint instead of immediately opening the next layer of a pit.
-	if mining_streak >= MAX_CONSECUTIVE_MINING_ACTIONS or _build_anchor_set:
+	# Once gathering has supplied a couple of blocks, spend them on connected
+	# navigation infrastructure instead of immediately opening the next pit.
+	if mining_streak >= MAX_CONSECUTIVE_MINING_ACTIONS:
 		var construction_plant := _plant_target(observation)
 		if not construction_plant.is_empty() and Contract.ACTION_PLACE in legal:
 			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, construction_plant, 900, 0.84)
@@ -614,6 +602,7 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var needs_leaves := _needs_leaf_progression(inventory)
 	var needs_cobblestone := _needs_cobblestone_progression(observation)
 	var filler_count := _count_named(inventory, FILLER_BLOCK_NAMES)
+	var recent_build_cells := _recent_build_cells(observation)
 	var has_tree_target := false
 	var has_support_preserving_target := false
 	if needs_wood or needs_leaves:
@@ -639,6 +628,9 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 		if not raw_value is Dictionary:
 			continue
 		var resource := raw_value as Dictionary
+		var resource_cell := "%d:%d" % [int(resource.get("x", 2147483647)), int(resource.get("y", 2147483647))]
+		if recent_build_cells.has(resource_cell):
+			continue
 		if resource.has("solid") and not bool(resource.get("solid", true)):
 			continue
 		if not Perception.mine_target_is_safe(observation, resource):
@@ -699,6 +691,21 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			best_score = score
 			best = resource
 	return best
+
+
+func _recent_build_cells(observation: Dictionary) -> Dictionary:
+	var cells := {}
+	for raw_entry in _as_array(observation.get("action_history", [])):
+		if not raw_entry is Dictionary:
+			continue
+		var entry := raw_entry as Dictionary
+		if str(entry.get("action", "")) != Contract.ACTION_PLACE:
+			continue
+		var parts := str(entry.get("target_id", "")).split(":")
+		if parts.size() < 3 or not parts[-1].is_valid_int() or not parts[-2].is_valid_int():
+			continue
+		cells["%d:%d" % [int(parts[-2]), int(parts[-1])]] = true
+	return cells
 
 
 func _nearest_named_resource(values: Array, want_wood: bool, want_leaves: bool) -> Dictionary:
@@ -1503,53 +1510,10 @@ func _build_target(observation: Dictionary) -> Dictionary:
 	var now_msec := int(observation.get("observed_at_msec", 0))
 	if _last_build_msec >= 0 and now_msec - _last_build_msec < BUILD_ACTION_COOLDOWN_MSEC:
 		return {}
-	var inventory := _inventory(observation)
-	var block_name := ""
-	# Keep early logs/planks for tools and the workbench. A shelter is useful, but
-	# it must not consume the four matching planks that unlock progression.
-	for preferred in ["stone_bricks", "cobblestone", "stone", "dirt", "grass", "packed_ice"]:
-		if int(inventory.get(preferred, 0)) > 0:
-			block_name = preferred
-			break
-	if block_name.is_empty():
-		for preferred in PLANK_OUTPUTS:
-			if int(inventory.get(preferred, 0)) > 4:
-				block_name = preferred
-				break
-	if block_name.is_empty():
-		return {}
-	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
-	if not _build_anchor_set:
-		_build_anchor = Vector2i(
-			floori((float(self_state.get("x", 0.0)) + 10.0) / float(BlockDefs.TILE)),
-			floori((float(self_state.get("y", 0.0)) + 28.0) / float(BlockDefs.TILE)),
-		)
-		_build_anchor_set = true
-		_build_step = 0
-	var occupied := _terrain_occupied_map(observation)
-	for offset_index in range(_build_step, SHELTER_BLUEPRINT.size()):
-		var offset: Vector2i = SHELTER_BLUEPRINT[offset_index]
-		var target_x := _build_anchor.x + offset.x
-		var target_y := _build_anchor.y + offset.y
-		var occupied_name := str(occupied.get("%d:%d" % [target_x, target_y], ""))
-		if not occupied_name.is_empty() and occupied_name.to_lower() not in ["air", "core.air"]:
-			_build_step = offset_index + 1
-			continue
-		if _tile_overlaps_player(Vector2i(target_x, target_y), self_state):
-			continue
-		_build_step = offset_index + 1
+	var target: Dictionary = BuildPlanner.next_step(observation)
+	if not target.is_empty():
 		_last_build_msec = now_msec
-		return {
-			"id": "shelter:%d:%d:%d" % [_build_anchor.x, _build_anchor.y, offset_index],
-			"block": block_name,
-			"x": target_x,
-			"y": target_y,
-			"reason": "build_shelter",
-		}
-	_build_anchor_set = false
-	_build_step = 0
-	_last_build_msec = now_msec
-	return {}
+	return target
 
 
 func _should_prioritize_planting(observation: Dictionary, resources: Array) -> bool:
