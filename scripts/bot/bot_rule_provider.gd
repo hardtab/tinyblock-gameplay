@@ -111,10 +111,11 @@ func decide(observation: Dictionary) -> Dictionary:
 	# players and never emits a generic player attack.
 	var defense: Dictionary = observation.get("self_defense", {}) if observation.get("self_defense", {}) is Dictionary else {}
 	var attacker_id := str(defense.get("attacker_player_id", ""))
+	var aggressive_player_id := str(observation.get("aggressive_player_id", ""))
 	var attacker_target := _player_target_by_id(observation, attacker_id)
 	if not attacker_id.is_empty() and bool(defense.get("can_retaliate", false)) and Contract.ACTION_RETALIATE_ONCE in legal:
 		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_RETALIATE_ONCE, {"id": attacker_id}, 700, 0.99)
-	if not attacker_target.is_empty() and Contract.ACTION_FLEE_FROM in legal:
+	if not attacker_target.is_empty() and attacker_id != aggressive_player_id and Contract.ACTION_FLEE_FROM in legal:
 		# Outside PvP the safety contract allows one proportional response. Once it
 		# is consumed, keep the attacker as a survival focus and disengage instead of
 		# immediately switching to mining while the threat is still beside the bot.
@@ -175,7 +176,7 @@ func decide(observation: Dictionary) -> Dictionary:
 	# Equip battle gear before choosing the combat action. Outside PvP, tools are
 	# equipped only when mining or fighting creatures so the bot does not spin
 	# through every pickaxe and bow in an empty starter inventory.
-	if bool(observation.get("pvp_world", false)):
+	if bool(observation.get("pvp_world", false)) or not aggressive_player_id.is_empty():
 		var equip_target := _equipable_tool(observation)
 		if not equip_target.is_empty() and Contract.ACTION_EQUIP in legal:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_EQUIP, {"id": equip_target}, 350, 0.96)
@@ -193,7 +194,7 @@ func decide(observation: Dictionary) -> Dictionary:
 		var relative_target := (target_position + Vector2(10.0, 14.0)) - (self_position + Vector2(10.0, 11.76))
 		var direction := bow_aim_direction(relative_target, 1.0)
 		return _decision(
-			Contract.GOAL_SELF_DEFENSE if bool(observation.get("pvp_world", false)) else Contract.GOAL_SURVIVE,
+			Contract.GOAL_SELF_DEFENSE if bool(observation.get("pvp_world", false)) or str(ranged_target.get("id", "")) == aggressive_player_id else Contract.GOAL_SURVIVE,
 			Contract.ACTION_FIRE_BOW,
 			ranged_target.merged({"direction": [direction.x, direction.y], "charge": 1.0}),
 			650,
@@ -208,7 +209,7 @@ func decide(observation: Dictionary) -> Dictionary:
 		# Do not waste arrows into a wall. Move toward the target so the next
 		# observation can choose a clear angle or a closer melee action.
 		return _decision(
-			Contract.GOAL_SELF_DEFENSE if bool(observation.get("pvp_world", false)) else Contract.GOAL_SURVIVE,
+			Contract.GOAL_SELF_DEFENSE if bool(observation.get("pvp_world", false)) or str(blocked_ranged_target.get("id", "")) == aggressive_player_id else Contract.GOAL_SURVIVE,
 			Contract.ACTION_MOVE_TO,
 			blocked_ranged_target,
 			1200,
@@ -230,6 +231,14 @@ func decide(observation: Dictionary) -> Dictionary:
 			# authoritative position while a partial snapshot is repaired. Attacks
 			# still require a fresh entry, so stale data cannot deal damage.
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, pvp_target, 900 if not target_is_fresh else 1800, 0.84 if not target_is_fresh else 0.94)
+	var aggressive_target := _aggressive_player_target(observation)
+	if not aggressive_target.is_empty():
+		var aggressive_distance := float(aggressive_target.get("distance", 9999.0))
+		var aggressive_melee_distance := float(observation.get("retaliation_distance", 52.0))
+		if aggressive_distance <= aggressive_melee_distance and Contract.ACTION_ATTACK_PLAYER in legal:
+			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_ATTACK_PLAYER, aggressive_target, 550, 0.98)
+		if Contract.ACTION_MOVE_TO in legal:
+			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, aggressive_target, 1800, 0.96)
 	var craft_target := _craftable_output(observation)
 	if foraging:
 		var meal_target := _craftable_food_output(observation)
@@ -267,6 +276,8 @@ func decide(observation: Dictionary) -> Dictionary:
 	if bool(observation.get("pvp_world", false)) and bool(observation.get("duel_started", false)):
 		if Contract.ACTION_WAIT in legal:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.88)
+	if not aggressive_player_id.is_empty() and Contract.ACTION_WAIT in legal:
+		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.88)
 
 
 	var resources: Array = _as_array(observation.get("visible_resources", []))
@@ -855,14 +866,15 @@ func _equipable_tool(observation: Dictionary) -> String:
 	var inventory := _inventory(observation)
 	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
 	var pvp_world := bool(observation.get("pvp_world", false))
+	var combat_focus := pvp_world or not str(observation.get("aggressive_player_id", "")).is_empty()
 	# Footwear is the current defensive equipment slot in Tiny Block. Equip it
 	# once after opening the duel chest, before changing the combat hand item.
-	if pvp_world and str(equipment.get("feet", "")).is_empty():
+	if combat_focus and str(equipment.get("feet", "")).is_empty():
 		for footwear in ["trail_boots", "palm_sandals", "ice_boots", "moonstone_boots"]:
 			if int(inventory.get(footwear, 0)) > 0:
 				return footwear
 	var current := str(equipment.get("hand", ""))
-	if pvp_world:
+	if combat_focus:
 		# A loaded bow is the bot's preferred PvP weapon. Do not immediately
 		# switch to a melee tool on the next decision or the bot oscillates between
 		# bow and axe before it ever gets a shot off.
@@ -967,6 +979,10 @@ func _approach_bridge_step(observation: Dictionary, social_target: Dictionary) -
 	var min_distance := float(observation.get("preferred_player_distance", PREFERRED_PLAYER_DISTANCE))
 	if bool(observation.get("pvp_world", false)):
 		approach = _pvp_target(observation)
+		goal = Contract.GOAL_SELF_DEFENSE
+		min_distance = float(BlockDefs.TILE) * 2.5
+	elif not str(observation.get("aggressive_player_id", "")).is_empty():
+		approach = _aggressive_player_target(observation)
 		goal = Contract.GOAL_SELF_DEFENSE
 		min_distance = float(BlockDefs.TILE) * 2.5
 	if approach.is_empty() or float(approach.get("distance", 0.0)) <= min_distance:
@@ -1181,9 +1197,11 @@ func _ranged_target(observation: Dictionary, require_clear_path: bool = true) ->
 		return {}
 	var max_distance := float(observation.get("bow_attack_distance", 320.0))
 	var enemy_id := str(observation.get("enemy_player_id", ""))
-	if bool(observation.get("pvp_world", false)) and not enemy_id.is_empty():
+	var aggressive_player_id := str(observation.get("aggressive_player_id", ""))
+	var player_target_id := enemy_id if bool(observation.get("pvp_world", false)) else aggressive_player_id
+	if not player_target_id.is_empty():
 		for raw_player in _as_array(observation.get("players", [])):
-			if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == enemy_id:
+			if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == player_target_id:
 				var enemy := raw_player as Dictionary
 				if not bool(enemy.get("stale", enemy.get("last_known", false))) and bool(enemy.get("alive", true)) and float(enemy.get("distance", 9999.0)) <= max_distance and (not require_clear_path or Perception.has_clear_bow_line_of_sight(observation, enemy)):
 					return enemy
@@ -1226,6 +1244,18 @@ func _pvp_target(observation: Dictionary) -> Dictionary:
 		return {}
 	for raw_player in _as_array(observation.get("players", [])):
 		if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == enemy_id:
+			var player := raw_player as Dictionary
+			if bool(player.get("alive", true)):
+				return player
+	return {}
+
+
+func _aggressive_player_target(observation: Dictionary) -> Dictionary:
+	var aggressive_player_id := str(observation.get("aggressive_player_id", ""))
+	if aggressive_player_id.is_empty():
+		return {}
+	for raw_player in _as_array(observation.get("players", [])):
+		if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == aggressive_player_id:
 			var player := raw_player as Dictionary
 			if bool(player.get("alive", true)):
 				return player

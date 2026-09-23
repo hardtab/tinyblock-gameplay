@@ -20,6 +20,7 @@ signal session_ready(session_id: String, player_id: String)
 signal human_player_count_changed(count: int)
 signal empty_world_ready()
 signal session_left(reason: String)
+signal world_block_requested(world_id: String, killer_player_id: String, kill_count: int)
 signal decision_logged(event: Dictionary)
 signal structured_log(event: Dictionary)
 
@@ -103,6 +104,13 @@ var _harmful_fluid_damage_cooldown := 0.0
 var _guest_defeat_pending := false
 var _guest_defeat_retry_after_msec := -1
 var _host_player_id := ""
+var _aggressive_player_id := ""
+var _last_player_damage_attacker_id := ""
+var _last_player_damage_msec := -1
+var _player_death_count := 0
+var _host_kill_streak := 0
+var _host_kill_leave_at_msec := -1
+var _world_block_requested := false
 var _pvp_enemy_player_id := ""
 var _pvp_enemy_last_known_state: Dictionary = {}
 var _pvp_enemy_last_seen_msec := -1
@@ -126,6 +134,10 @@ const PLAYER_SNAPSHOT_INTERVAL_MSEC := 100
 const PLAYER_INPUT_INTERVAL_MSEC := 50
 const HARMFUL_FLUID_DAMAGE_INTERVAL := 20.0 / 60.0
 const GUEST_DEFEAT_RETRY_MSEC := 400
+const RECENT_PLAYER_KILL_MSEC := 2_500
+const HOST_KILL_LIMIT := 3
+const HOST_KILL_LEAVE_DELAY_MSEC := 650
+const HOST_KILL_EMOJIS: PackedStringArray = ["😱", "😡", "👎"]
 const DUEL_PROTOCOL_VERSION := 3
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const TREE_CLIMB_SPEED := -3.2
@@ -262,6 +274,13 @@ func join_session(record: Dictionary) -> void:
 	_guest_defeat_pending = false
 	_guest_defeat_retry_after_msec = -1
 	_host_player_id = ""
+	_aggressive_player_id = ""
+	_last_player_damage_attacker_id = ""
+	_last_player_damage_msec = -1
+	_player_death_count = 0
+	_host_kill_streak = 0
+	_host_kill_leave_at_msec = -1
+	_world_block_requested = false
 	_pvp_enemy_player_id = ""
 	_pvp_enemy_last_known_state.clear()
 	_pvp_enemy_last_seen_msec = -1
@@ -407,7 +426,9 @@ func handle_message(message: Dictionary) -> void:
 		_apply_inventory_snapshot(payload)
 		return
 	if message_type == "player_hit":
-		if safety.record_player_hit(payload, own_player_id, Time.get_ticks_msec()):
+		var hit_msec := Time.get_ticks_msec()
+		_record_recent_player_damage(payload, hit_msec)
+		if safety.record_player_hit(payload, own_player_id, hit_msec):
 			_record_event("player_hit", {"attacker_player_id": safety.attacker_player_id(), "damage": int(payload.get("damage", 0))})
 		else:
 			_record_event("player_hit_unattributed", {"target_player_id": str(payload.get("target_player_id", ""))})
@@ -455,6 +476,13 @@ func _process(delta: float) -> void:
 			_emit_left("snapshot_timeout")
 		return
 	if state != STATE_PLAYING:
+		return
+	if _host_kill_leave_at_msec >= 0:
+		_set_desired_input(false, false, false)
+		_send_player_input_if_due(now_msec)
+		_send_player_snapshot_if_due(now_msec)
+		if now_msec >= _host_kill_leave_at_msec:
+			leave("host_kill_limit")
 		return
 	_expire_craft_pending(now_msec)
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
@@ -1176,6 +1204,10 @@ func _apply_local_harmful_fluid(self_state: Dictionary, delta: float) -> void:
 		self_state["health"] = health
 		_harmful_fluid_damage_cooldown = HARMFUL_FLUID_DAMAGE_INTERVAL
 		if health <= 0:
+			# Environmental deaths break a consecutive player-kill streak. Do not
+			# attribute a recent, non-lethal player hit to the lava respawn.
+			_last_player_damage_attacker_id = ""
+			_last_player_damage_msec = -1
 			_guest_defeat_pending = true
 			_guest_defeat_retry_after_msec = 0
 			structured_log.emit({
@@ -1203,6 +1235,85 @@ func _send_guest_defeat_if_due(now_msec: int) -> void:
 		"respawn_revision": int(local.get("respawn_revision", 0)),
 		"at_msec": now_msec,
 	})
+
+
+func _record_recent_player_damage(payload: Dictionary, now_msec: int) -> void:
+	if str(payload.get("target_player_id", "")) != own_player_id:
+		return
+	var attacker_id := str(payload.get("attacker_player_id", ""))
+	if attacker_id.is_empty() or attacker_id == own_player_id or int(payload.get("damage", 0)) <= 0:
+		return
+	_last_player_damage_attacker_id = attacker_id
+	_last_player_damage_msec = now_msec
+
+
+func _handle_confirmed_respawn(now_msec: int) -> void:
+	var killer_id := ""
+	if (
+		not _last_player_damage_attacker_id.is_empty()
+		and _last_player_damage_msec >= 0
+		and now_msec - _last_player_damage_msec <= RECENT_PLAYER_KILL_MSEC
+	):
+		killer_id = _last_player_damage_attacker_id
+	_last_player_damage_attacker_id = ""
+	_last_player_damage_msec = -1
+	_player_death_count += 1
+	if killer_id.is_empty():
+		_aggressive_player_id = ""
+		_host_kill_streak = 0
+	else:
+		_aggressive_player_id = killer_id
+		_host_kill_streak = _host_kill_streak + 1 if killer_id == _host_player_id and not _host_player_id.is_empty() else 0
+	var emoji := death_reaction_emoji(killer_id, _host_player_id, _host_kill_streak)
+	_send_death_reaction(emoji, killer_id, now_msec)
+	structured_log.emit({
+		"event": "bot_death_confirmed",
+		"killer_player_id": killer_id,
+		"host_kill_streak": _host_kill_streak,
+		"death_count": _player_death_count,
+		"emoji": emoji,
+		"at_msec": now_msec,
+	})
+	behavior.request_decision(now_msec)
+	if _host_kill_streak < HOST_KILL_LIMIT or _world_block_requested:
+		return
+	_world_block_requested = true
+	_host_kill_leave_at_msec = now_msec + HOST_KILL_LEAVE_DELAY_MSEC
+	world_block_requested.emit(world_id, killer_id, _host_kill_streak)
+	structured_log.emit({
+		"event": "world_block_requested",
+		"world_id": world_id,
+		"killer_player_id": killer_id,
+		"host_kill_streak": _host_kill_streak,
+		"leave_at_msec": _host_kill_leave_at_msec,
+		"at_msec": now_msec,
+	})
+
+
+func _send_death_reaction(emoji: String, killer_id: String, now_msec: int) -> void:
+	var sanitized := EmojiReactions.sanitize(emoji)
+	if sanitized.is_empty():
+		return
+	if network_client != null and network_client.has_method("send_command"):
+		network_client.call("send_command", "emoji_reaction", {"emoji": sanitized})
+	_last_emoji_sent_msec = now_msec
+	_social_last_sent_msec = now_msec
+	_previous_emoji = sanitized
+	_clear_social_emoji_queue()
+	structured_log.emit({
+		"event": "death_emoji_sent",
+		"emoji": sanitized,
+		"killer_player_id": killer_id,
+		"at_msec": now_msec,
+	})
+
+
+static func death_reaction_emoji(killer_id: String, host_player_id: String, host_kill_streak: int) -> String:
+	if killer_id.is_empty():
+		return "😭"
+	if killer_id == host_player_id and not host_player_id.is_empty():
+		return HOST_KILL_EMOJIS[clampi(host_kill_streak - 1, 0, HOST_KILL_EMOJIS.size() - 1)]
+	return "😡"
 
 
 func _eject_local_self_from_solid(self_state: Dictionary) -> void:
@@ -1571,7 +1682,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_roster.clear()
 	for raw_id in player_states:
 		var player_id := str(raw_id)
-		if player_id == own_player_id or (player_id == _host_player_id and not _is_pvp_world()):
+		if player_id == own_player_id or (dedicated_server and player_id == _host_player_id and not _is_pvp_world()):
 			continue
 		var player_state := player_states[raw_id] as Dictionary if player_states[raw_id] is Dictionary else {}
 		player_state["id"] = player_id
@@ -1778,6 +1889,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 			var respawned := host_revision > local_revision
 			var reconcile_motion := respawned or (not _jump_active and not _climb_active)
 			if respawned:
+				_handle_confirmed_respawn(Time.get_ticks_msec())
 				_was_in_harmful_fluid = false
 				_harmful_fluid_damage_cooldown = 0.0
 				_guest_defeat_pending = false
@@ -1804,7 +1916,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 				local_state[field] = entry[field]
 			_world_snapshot["self"] = local_state
 			continue
-		if player_id == _host_player_id and not _is_pvp_world():
+		if dedicated_server and player_id == _host_player_id and not _is_pvp_world():
 			continue
 		entry["id"] = player_id
 		entry["alive"] = int(entry.get("health", 10)) > 0
@@ -2143,7 +2255,8 @@ func _apply_local_craft(output_name: String) -> bool:
 
 
 func _update_human_count() -> void:
-	var next_count := Perception.count_live_humans(_roster, own_player_id, [_host_player_id], dedicated_server)
+	var excluded_ids: Array = [_host_player_id] if dedicated_server and not _host_player_id.is_empty() else []
+	var next_count := Perception.count_live_humans(_roster, own_player_id, excluded_ids, dedicated_server)
 	var changed := next_count != human_player_count
 	if not changed and _population_logged:
 		return
@@ -2219,6 +2332,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["duel_started"] = _duel_started
 	snapshot["pvp_chest_opened"] = _pvp_chest_opened
 	snapshot["enemy_player_id"] = _enemy_player_id()
+	snapshot["aggressive_player_id"] = _aggressive_player_id
 	snapshot["bow_attack_distance"] = BlockDefs.TILE * 10.0
 	snapshot["achievements"] = _achievement_observation()
 	var candidate_emoji := ""

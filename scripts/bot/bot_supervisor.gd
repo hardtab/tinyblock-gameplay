@@ -27,6 +27,8 @@ const DEFAULT_RETRY_BASE_SECONDS := 5.0
 const DEFAULT_RETRY_MAX_SECONDS := 300.0
 const DEFAULT_NO_WORLD_RETRY_MAX_SECONDS := 12.0
 const DEFAULT_POST_LEAVE_DISCOVERY_DELAY_SECONDS := 1.0
+const DEFAULT_BLOCKED_WORLDS_PATH := "user://bot_blocked_worlds.json"
+const BLOCKED_WORLDS_VERSION := 1
 ## Community servers are operated by us but are reported by the backend as
 ## `official`.  They are safe for the bot because they use the dedicated
 ## server protocol; first-party official worlds must still remain excluded.
@@ -55,6 +57,8 @@ var ai_options: Dictionary = {}
 var strip_progression_gear := false
 var recently_visited: Dictionary = {}
 var blacklisted_sessions: Dictionary = {}
+var permanently_blocked_worlds: Dictionary = {}
+var blocked_worlds_path := DEFAULT_BLOCKED_WORLDS_PATH
 var _rng := RandomNumberGenerator.new()
 var _next_discovery_msec := 0
 var _cooldown_until_msec := 0
@@ -62,6 +66,7 @@ var _retry_attempt := 0
 var _discovery_in_flight := false
 var _current_session_record: Dictionary = {}
 var _session_started_msec := -1
+var _blocked_worlds_loaded := false
 
 
 func _init() -> void:
@@ -82,6 +87,9 @@ func configure(backend_adapter: Object = null, multiplayer_adapter: Object = nul
 	kill_switch = bool(options.get("kill_switch", kill_switch))
 	response_enabled = bool(options.get("response_enabled", response_enabled))
 	strip_progression_gear = bool(options.get("strip_progression_gear", strip_progression_gear))
+	blocked_worlds_path = str(options.get("blocked_worlds_path", blocked_worlds_path))
+	if bool(options.get("load_blocked_worlds", true)) and not _blocked_worlds_loaded:
+		_load_permanently_blocked_worlds()
 	allow_world_ids = _normalize_string_array(options.get("allow_world_ids", options.get("allowed_world_ids", [])))
 	if options.get("ai_options", {}) is Dictionary:
 		ai_options = (options.get("ai_options", {}) as Dictionary).duplicate(true)
@@ -176,6 +184,7 @@ func _create_session(selected_protocol_version: int = -1) -> void:
 	session.sync_started.connect(_on_session_sync_started)
 	session.empty_world_ready.connect(_on_empty_world_ready)
 	session.session_left.connect(_on_session_left)
+	session.world_block_requested.connect(_on_world_block_requested)
 	session.structured_log.connect(_on_session_log)
 	session.decision_logged.connect(_on_session_decision)
 
@@ -195,6 +204,19 @@ func _on_empty_world_ready() -> void:
 		return
 	_set_state(STATE_LEAVING)
 	session.leave("empty_world_grace_elapsed")
+
+
+func _on_world_block_requested(blocked_world_id: String, killer_player_id: String, kill_count: int) -> void:
+	var resolved_world_id := blocked_world_id
+	if resolved_world_id.is_empty():
+		resolved_world_id = str(_current_session_record.get("world_id", ""))
+	if not block_world_permanently(resolved_world_id, killer_player_id, kill_count):
+		return
+	_log("world_permanently_blocked", {
+		"world_id": resolved_world_id,
+		"killer_player_id": killer_player_id,
+		"kill_count": kill_count,
+	})
 
 
 func _on_session_left(reason: String) -> void:
@@ -287,6 +309,8 @@ func filter_public_sessions(sessions: Array, expected_protocol_version: int = DE
 		var dedicated_server := bool(entry.get("dedicated_server", false))
 		if session_id.is_empty() or access_mode != "public":
 			continue
+		if permanently_blocked_worlds.has(world_id):
+			continue
 		# Managed community worlds are marked `official` by the backend even
 		# though they are intended to be visible in the community pool.  Keep
 		# first-party official worlds out, but allow those known dedicated worlds.
@@ -374,7 +398,7 @@ func pick_session(sessions: Array, random_unit: float = 0.5) -> Dictionary:
 
 func human_player_count(players: Variant, bot_player_id: String, dedicated_server: bool = false, host_player_id: String = "") -> int:
 	var excluded_ids: Array = []
-	if not host_player_id.is_empty():
+	if dedicated_server and not host_player_id.is_empty():
 		excluded_ids.append(host_player_id)
 	return Perception.count_live_humans(players, bot_player_id, excluded_ids, dedicated_server)
 
@@ -407,6 +431,67 @@ func retry_delay_seconds(attempt: int, jitter_unit: float = 0.5, max_seconds: fl
 
 func post_leave_discovery_delay_seconds() -> float:
 	return minf(DEFAULT_POST_LEAVE_DISCOVERY_DELAY_SECONDS, discovery_interval_seconds)
+
+
+func block_world_permanently(world_id: String, killer_player_id: String = "", kill_count: int = 0) -> bool:
+	var normalized_world_id := world_id.strip_edges()
+	if normalized_world_id.is_empty():
+		return false
+	permanently_blocked_worlds[normalized_world_id] = {
+		"blocked_at_unix": int(Time.get_unix_time_from_system()),
+		"killer_player_id": killer_player_id,
+		"kill_count": maxi(0, kill_count),
+		"reason": "host_kill_limit",
+	}
+	return _save_permanently_blocked_worlds()
+
+
+func _load_permanently_blocked_worlds() -> void:
+	_blocked_worlds_loaded = true
+	permanently_blocked_worlds.clear()
+	if blocked_worlds_path.is_empty() or not FileAccess.file_exists(blocked_worlds_path):
+		return
+	var file := FileAccess.open(blocked_worlds_path, FileAccess.READ)
+	if file == null:
+		return
+	var parsed: Variant = JSON.parse_string(file.get_as_text())
+	if not parsed is Dictionary:
+		return
+	var worlds: Variant = (parsed as Dictionary).get("worlds", {})
+	if not worlds is Dictionary:
+		return
+	for raw_world_id in worlds:
+		var world_id := str(raw_world_id).strip_edges()
+		if world_id.is_empty():
+			continue
+		var metadata: Variant = (worlds as Dictionary)[raw_world_id]
+		permanently_blocked_worlds[world_id] = (
+			(metadata as Dictionary).duplicate(true)
+			if metadata is Dictionary
+			else {"reason": "host_kill_limit"}
+		)
+
+
+func _save_permanently_blocked_worlds() -> bool:
+	if blocked_worlds_path.is_empty():
+		return false
+	var absolute_path := ProjectSettings.globalize_path(blocked_worlds_path)
+	var parent_dir := absolute_path.get_base_dir()
+	if not parent_dir.is_empty() and DirAccess.make_dir_recursive_absolute(parent_dir) != OK:
+		return false
+	var temporary_path := "%s.tmp" % absolute_path
+	var file := FileAccess.open(temporary_path, FileAccess.WRITE)
+	if file == null:
+		return false
+	file.store_string(JSON.stringify({
+		"version": BLOCKED_WORLDS_VERSION,
+		"worlds": permanently_blocked_worlds,
+	}))
+	file.flush()
+	file.close()
+	if FileAccess.file_exists(absolute_path):
+		DirAccess.remove_absolute(absolute_path)
+	return DirAccess.rename_absolute(temporary_path, absolute_path) == OK
 
 
 func _normalize_string_array(value: Variant) -> PackedStringArray:

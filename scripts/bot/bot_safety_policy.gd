@@ -89,10 +89,13 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 			if not _player_is_near(observation, target_id, float(observation.get("retaliation_distance", 52.0))):
 				return _rejected(decision, "attacker_out_of_range")
 		Contract.ACTION_ATTACK_PLAYER:
-			if not bool(observation.get("pvp_world", false)):
-				return _rejected(decision, "pvp_only_action")
-			if str(observation.get("enemy_player_id", "")) != target_id:
-				return _rejected(decision, "pvp_enemy_target_required")
+			var attack_target_id := (
+				str(observation.get("enemy_player_id", ""))
+				if bool(observation.get("pvp_world", false))
+				else str(observation.get("aggressive_player_id", ""))
+			)
+			if attack_target_id.is_empty() or attack_target_id != target_id:
+				return _rejected(decision, "aggressive_player_target_required")
 			if _target_snapshot_is_stale(observation.get("players", []), target_id):
 				return _rejected(decision, "pvp_enemy_snapshot_stale")
 			if not _player_is_near(observation, target_id, float(observation.get("retaliation_distance", 52.0))):
@@ -105,9 +108,11 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 				return _rejected(decision, "bow_or_arrows_missing")
 			var pvp_world := bool(observation.get("pvp_world", false))
 			var enemy_id := str(observation.get("enemy_player_id", ""))
-			if pvp_world:
-				if enemy_id.is_empty() or target_id != enemy_id:
-					return _rejected(decision, "pvp_enemy_target_required")
+			var aggressive_player_id := str(observation.get("aggressive_player_id", ""))
+			var player_target_id := enemy_id if pvp_world else aggressive_player_id
+			if not player_target_id.is_empty():
+				if target_id != player_target_id:
+					return _rejected(decision, "aggressive_player_target_required")
 				if not _target_exists(observation.get("players", []), target_id):
 					return _rejected(decision, "pvp_enemy_not_visible")
 				if _target_snapshot_is_stale(observation.get("players", []), target_id):
@@ -173,7 +178,11 @@ func _player_combat_focus_active(observation: Dictionary) -> bool:
 		return true
 	var defense: Dictionary = observation.get("self_defense", {}) if observation.get("self_defense", {}) is Dictionary else {}
 	var attacker_id := str(defense.get("attacker_player_id", ""))
-	return not attacker_id.is_empty() and _target_exists(observation.get("players", []), attacker_id)
+	var aggressive_player_id := str(observation.get("aggressive_player_id", ""))
+	return (
+		not aggressive_player_id.is_empty()
+		or (not attacker_id.is_empty() and _target_exists(observation.get("players", []), attacker_id))
+	)
 
 
 static func defensive_window_active(attacker_player_id: String, hit_msec: int, target_player_id: String, now_msec: int, window_msec: int = DEFAULT_RETALIATION_WINDOW_MSEC) -> bool:

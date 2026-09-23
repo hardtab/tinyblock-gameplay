@@ -117,7 +117,11 @@ func _player_combat_focus_active(observation: Dictionary) -> bool:
 		return true
 	var defense: Dictionary = observation.get("self_defense", {}) if observation.get("self_defense", {}) is Dictionary else {}
 	var attacker_id := str(defense.get("attacker_player_id", ""))
-	return not attacker_id.is_empty() and _observation_has_player(observation, attacker_id)
+	var aggressive_player_id := str(observation.get("aggressive_player_id", ""))
+	return (
+		not aggressive_player_id.is_empty()
+		or (not attacker_id.is_empty() and _observation_has_player(observation, attacker_id))
+	)
 
 
 func _is_aggressive_player_decision(decision: Dictionary, observation: Dictionary) -> bool:
@@ -128,10 +132,11 @@ func _is_aggressive_player_decision(decision: Dictionary, observation: Dictionar
 	if target_id.is_empty() and decision.get("target", {}) is Dictionary:
 		target_id = str((decision.get("target", {}) as Dictionary).get("id", ""))
 	var enemy_id := str(observation.get("enemy_player_id", ""))
+	var aggressive_player_id := str(observation.get("aggressive_player_id", ""))
 	var defense: Dictionary = observation.get("self_defense", {}) if observation.get("self_defense", {}) is Dictionary else {}
 	var attacker_id := str(defense.get("attacker_player_id", ""))
 	var targets_player := (
-		(not target_id.is_empty() and target_id in [enemy_id, attacker_id])
+		(not target_id.is_empty() and target_id in [enemy_id, attacker_id, aggressive_player_id])
 		or _observation_has_player(observation, target_id)
 	)
 	var goal := str(decision.get("goal", ""))
@@ -143,12 +148,12 @@ func _is_aggressive_player_decision(decision: Dictionary, observation: Dictionar
 	if action in [Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER]:
 		return targets_player
 	if action in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_MOVE_TO, Contract.ACTION_FOLLOW]:
-		if targets_player and (goal == Contract.GOAL_SELF_DEFENSE or target_id in [enemy_id, attacker_id]):
+		if targets_player and (goal == Contract.GOAL_SELF_DEFENSE or target_id in [enemy_id, attacker_id, aggressive_player_id]):
 			return true
-		return goal == Contract.GOAL_SELF_DEFENSE and (not enemy_id.is_empty() or not attacker_id.is_empty())
+		return goal == Contract.GOAL_SELF_DEFENSE and (not enemy_id.is_empty() or not attacker_id.is_empty() or not aggressive_player_id.is_empty())
 	if action in [Contract.ACTION_PLACE, Contract.ACTION_EQUIP]:
 		return goal == Contract.GOAL_SELF_DEFENSE and (
-			targets_player or not enemy_id.is_empty() or not attacker_id.is_empty()
+			targets_player or not enemy_id.is_empty() or not attacker_id.is_empty() or not aggressive_player_id.is_empty()
 		)
 	return false
 
