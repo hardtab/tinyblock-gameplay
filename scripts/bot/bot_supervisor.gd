@@ -27,6 +27,7 @@ const DEFAULT_RETRY_BASE_SECONDS := 5.0
 const DEFAULT_RETRY_MAX_SECONDS := 300.0
 const DEFAULT_NO_WORLD_RETRY_MAX_SECONDS := 12.0
 const DEFAULT_POST_LEAVE_DISCOVERY_DELAY_SECONDS := 1.0
+const TRANSIENT_DISCONNECT_RETRY_SECONDS := 10.0
 const DEFAULT_BLOCKED_WORLDS_PATH := "user://bot_blocked_worlds.json"
 const BLOCKED_WORLDS_VERSION := 1
 ## Community servers are operated by us but are reported by the backend as
@@ -229,7 +230,16 @@ func _on_session_left(reason: String) -> void:
 	if visited_key.is_empty():
 		visited_key = str(finished.get("world_id", ""))
 	if not visited_key.is_empty():
-		recently_visited[visited_key] = Time.get_ticks_msec()
+		var now_msec := Time.get_ticks_msec()
+		if reason.begins_with("disconnected_"):
+			# MultiplayerClient has already exhausted its bounded WebRTC reconnect
+			# attempts. Let discovery establish a fresh guest transport shortly;
+			# the normal five-minute visit cooldown made a healthy public world look
+			# abandoned after one transient mobile-network interruption.
+			blacklisted_sessions[visited_key] = now_msec + int(TRANSIENT_DISCONNECT_RETRY_SECONDS * 1000.0)
+			recently_visited.erase(visited_key)
+		else:
+			recently_visited[visited_key] = now_msec
 	session_finished.emit(finished, reason)
 	if session != null:
 		session.queue_free()
@@ -305,6 +315,8 @@ func filter_public_sessions(sessions: Array, expected_protocol_version: int = DE
 		var blacklist_until := int(entry.get("blacklisted_until_msec", blacklisted_sessions.get(session_id, 0)))
 		var recent_at := int(recently_visited_sessions.get(session_id, recently_visited_sessions.get(world_id, 0)))
 		var current_now := now_msec if now_msec > 0 else Time.get_ticks_msec()
+		if blacklist_until > 0 and blacklist_until <= current_now and blacklisted_sessions.has(session_id):
+			blacklisted_sessions.erase(session_id)
 		var official := bool(entry.get("official", entry.get("is_official", false)))
 		var dedicated_server := bool(entry.get("dedicated_server", false))
 		if session_id.is_empty() or access_mode != "public":
