@@ -694,7 +694,11 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 
 
 func _recent_build_cells(observation: Dictionary) -> Dictionary:
-	var cells := {}
+	var cells: Dictionary = (
+		(observation.get("protected_build_cells", {}) as Dictionary).duplicate(true)
+		if observation.get("protected_build_cells", {}) is Dictionary
+		else {}
+	)
 	for raw_entry in _as_array(observation.get("action_history", [])):
 		if not raw_entry is Dictionary:
 			continue

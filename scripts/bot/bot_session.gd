@@ -83,6 +83,7 @@ var _last_player_snapshot_msec := -1
 var _equipment_slots := {"hand": "", "feet": ""}
 var _pending_action_targets: Dictionary = {}
 var _blocked_action_targets: Dictionary = {}
+var _protected_build_cells: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
 var _support_preserving_mine_tiles: Dictionary = {}
 var _plant_tiles: Dictionary = {}
@@ -259,6 +260,7 @@ func join_session(record: Dictionary) -> void:
 	_desired_input = {"left": false, "right": false, "jump": false}
 	_pending_action_targets.clear()
 	_blocked_action_targets.clear()
+	_protected_build_cells.clear()
 	_action_loop_blocked_until.clear()
 	_terrain_tiles.clear()
 	_support_preserving_mine_tiles.clear()
@@ -990,6 +992,7 @@ func _apply_tile_batch(payload: Dictionary) -> void:
 		if int(tile.get("block_id", 1)) == 0 or name == "air":
 			_terrain_tiles.erase(key)
 			_support_preserving_mine_tiles.erase(key)
+			_protected_build_cells.erase(key)
 		elif not name.is_empty():
 			_terrain_tiles[key] = name
 			if tile.has("preserves_support_on_mine"):
@@ -1498,6 +1501,7 @@ func _try_place_support_block(self_state: Dictionary) -> bool:
 		"block": block_name,
 		"content_id": str(_block_entry(block_name).get("content_id", "")),
 	}
+	_protected_build_cells[key] = {"block": block_name, "reason": "fall_support", "at_msec": now_msec}
 	structured_log.emit({
 		"event": "support_block_place_requested",
 		"x": target.x,
@@ -1535,6 +1539,15 @@ func _support_place_target(self_state: Dictionary) -> Vector2i:
 	# falling beside/over an existing floor.  Placing beneath that floor would
 	# create an invisible pillar instead of a recovery step.
 	if _terrain_solid_at(tx, ty - 1):
+		return SUPPORT_PLACE_INVALID_TILE
+	# A falling placement must attach to real terrain. This preserves the useful
+	# block-clutch ability beside a ledge or above a pillar without manufacturing
+	# isolated blocks in empty sky from a stale predicted fall.
+	if not (
+		_terrain_solid_at(tx - 1, ty)
+		or _terrain_solid_at(tx + 1, ty)
+		or _terrain_solid_at(tx, ty + 1)
+	):
 		return SUPPORT_PLACE_INVALID_TILE
 	var player_center := Vector2(x + width * 0.5, y + height * 0.5)
 	var tile_center := Vector2(tile_left + BlockDefs.TILE * 0.5, tile_top + BlockDefs.TILE * 0.5)
@@ -2524,6 +2537,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["recent_events"] = _recent_events.duplicate(true)
 	snapshot["emoji_events"] = _active_emoji_events(now_msec)
 	snapshot["action_history"] = _action_history.duplicate(true)
+	snapshot["protected_build_cells"] = _protected_build_cells.duplicate(true)
 	snapshot["world_id"] = world_id
 	_action_loop_blocked_until = ActionLoop.refresh_blocked_actions(
 		_action_history,
@@ -3072,6 +3086,12 @@ func _on_decision_started(decision: Dictionary) -> void:
 		var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
 		var key := "%d:%d" % [int(target.get("x", 0)), int(target.get("y", 0))]
 		_pending_action_targets[key] = {"action": action, "block": str(decision.get("block", "")), "content_id": str(target.get("content_id", "")), "sent_at_msec": now_msec}
+		if action == Contract.ACTION_PLACE:
+			_protected_build_cells[key] = {
+				"block": str(decision.get("block", "")),
+				"reason": str(target.get("reason", decision.get("goal", ""))),
+				"at_msec": now_msec,
+			}
 	elif action == Contract.ACTION_CRAFT:
 		var craft_output := str(decision.get("target_id", ""))
 		_pending_action_targets["craft"] = {"action": action, "output": craft_output}
@@ -3287,6 +3307,8 @@ func _handle_action_result(payload: Dictionary) -> void:
 		var rejected_key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
 		_blocked_action_targets["tile:%s" % rejected_key] = Time.get_ticks_msec() + ACTION_RETRY_BLOCK_MSEC
 		_pending_action_targets.erase(rejected_key)
+		if action == "place_block":
+			_protected_build_cells.erase(rejected_key)
 		if action == "mine_block" and behavior != null and behavior.executor != null and behavior.executor.current_action() == Contract.ACTION_MINE:
 			behavior.executor.cancel("mine_rejected")
 		return
