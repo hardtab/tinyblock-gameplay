@@ -557,6 +557,10 @@ func create_island() -> void:
 	equipment_slots = {"hand": "", "feet": ""}
 	item_durability.clear()
 	footwear_wear_distance = 0.0
+	# A new world is a fresh inventory namespace for every participant. Reusing
+	# the WorldSim after a duel must not let a stable guest/bot player id inherit
+	# the previous arena loadout (bow, arrows, tools, blocks, or equipment).
+	multiplayer_player_states.clear()
 	active_hotbar_slot = 0
 	selected = ""
 	active_hotbar_slot_awaiting_item = false
