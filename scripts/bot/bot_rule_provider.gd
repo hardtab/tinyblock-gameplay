@@ -7,8 +7,11 @@ const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 var _rng := RandomNumberGenerator.new()
 var _build_step := 0
 var _last_build_msec := -1
+var _build_anchor := Vector2i.ZERO
+var _build_anchor_set := false
 var _plant_step := 0
 var _last_plant_msec := -1
+var _explore_direction := 0
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 ## Only chase a player once they are clearly farther than the preferred gap.
@@ -17,26 +20,29 @@ const PREFERRED_PLAYER_DISTANCE := 84.0
 const SOCIAL_FOLLOW_START_SLACK := 48.0
 const WANDER_RADIUS := 96.0
 const WANDER_COMMIT_MSEC := 1800
+const EXPLORE_RADIUS := 384.0
+const EXPLORE_COMMIT_MSEC := 4200
 const BOW_ARROW_MIN_SPEED := 250.0
 const BOW_ARROW_MAX_SPEED := 560.0
 const BOW_ARROW_GRAVITY := 310.0
 const CREATURE_DANGER_RADIUS := 224.0
-const BUILD_ACTION_COOLDOWN_MSEC := 8_000
+const BUILD_ACTION_COOLDOWN_MSEC := 2_500
 const PLANT_ACTION_COOLDOWN_MSEC := 6_000
-const MAX_CONSECUTIVE_MINING_ACTIONS := 3
-# Only outputs `_apply_local_craft` can fulfill. Generic station crafts like
-# furnace/glass fail immediately and starved gather/equip for seconds each cycle.
+const MAX_CONSECUTIVE_MINING_ACTIONS := 2
+# Only outputs `_apply_local_craft` can fulfill. Advanced station-gated outputs
+# use the authoritative host craft path instead of optimistic inventory edits.
 const LOCAL_OPTIMISTIC_CRAFTS := [
 	"planks", "palm_planks", "pine_planks", "weeping_planks",
-	"stick", "wooden_pickaxe", "workbench", "chest", "trail_boots",
-	"stone_pickaxe", "stone_axe", "stone_sword",
+	"stick", "wooden_pickaxe", "workbench", "furnace", "chest", "trail_boots",
 ]
 const GENERIC_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks", "stick", "workbench", "chest"]
 # Boots right after the wooden pickaxe so leaf/plank gear is proven before
 # station-gated stone tools.
 const PROGRESSION_CRAFTS := [
 	"wooden_pickaxe", "trail_boots", "workbench",
-	"stone_pickaxe", "stone_axe", "stone_sword", "chest",
+	"stone_pickaxe", "furnace", "charcoal", "copper_ingot", "copper_pickaxe",
+	"stone_axe", "stone_sword", "chest", "crystal_pickaxe",
+	"obsidian_pickaxe", "resonance_pickaxe",
 ]
 const WOOD_BLOCK_NAMES := ["wood", "palm_wood", "pine_wood", "weeping_wood"]
 const LEAF_BLOCK_NAMES := ["leaves", "palm_leaves", "pine_needles", "weeping_leaves"]
@@ -47,6 +53,14 @@ const PROGRESSION_HAND_TOOLS := ["crystal_pickaxe", "copper_pickaxe", "stone_pic
 const HUNGER_EAT_THRESHOLD := 55
 const HUNGER_FORAGE_THRESHOLD := 70
 const MAX_NOURISHMENT := 100
+const STATION_NAMES := ["workbench", "furnace"]
+const FILLER_BLOCK_NAMES := ["dirt", "grass", "sand", "gravel", "snow", "ice"]
+const MAX_FILLER_RESERVE := 8
+const SHELTER_BLUEPRINT := [
+	Vector2i(1, -1), Vector2i(2, -1), Vector2i(3, -1),
+	Vector2i(1, -2), Vector2i(3, -2),
+	Vector2i(1, -3), Vector2i(2, -3), Vector2i(3, -3),
+]
 
 
 func _init(seed: int = 0) -> void:
@@ -58,6 +72,16 @@ func _init(seed: int = 0) -> void:
 
 func provider_name() -> String:
 	return "rules"
+
+
+func reset() -> void:
+	_build_step = 0
+	_last_build_msec = -1
+	_build_anchor = Vector2i.ZERO
+	_build_anchor_set = false
+	_plant_step = 0
+	_last_plant_msec = -1
+	_explore_direction = 0
 
 
 func decide(observation: Dictionary) -> Dictionary:
@@ -239,6 +263,14 @@ func decide(observation: Dictionary) -> Dictionary:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_ATTACK_PLAYER, aggressive_target, 550, 0.98)
 		if Contract.ACTION_MOVE_TO in legal:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, aggressive_target, 1800, 0.96)
+	# Functional stations are part of progression, not decoration. Place an owned
+	# workbench/furnace before more gathering, or walk back to a visible station
+	# when the next affordable recipe requires it.
+	var station_action := _station_progression_action(observation, foraging)
+	if not station_action.is_empty():
+		var station_action_name := str(station_action.get("action", ""))
+		if station_action_name in legal:
+			return Contract.normalize_decision(station_action)
 	var craft_target := _craftable_output(observation)
 	if foraging:
 		var meal_target := _craftable_food_output(observation)
@@ -289,6 +321,15 @@ func decide(observation: Dictionary) -> Dictionary:
 			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, urgent_plant, 900, 0.86)
 
 	var mining_streak := _consecutive_action_streak(observation, Contract.ACTION_MINE)
+	# Once gathering has supplied a couple of blocks, continue a stable shelter
+	# blueprint instead of immediately opening the next layer of a pit.
+	if mining_streak >= MAX_CONSECUTIVE_MINING_ACTIONS or _build_anchor_set:
+		var construction_plant := _plant_target(observation)
+		if not construction_plant.is_empty() and Contract.ACTION_PLACE in legal:
+			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, construction_plant, 900, 0.84)
+		var construction_target := _build_target(observation)
+		if not construction_target.is_empty() and Contract.ACTION_PLACE in legal:
+			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, construction_target, 700, 0.83)
 	# Mining is useful background work, but an endless stream of nearby MINE
 	# decisions makes the avatar look frozen even when every command succeeds.
 	# Rotate to craft/build/explore after a short burst; the next observation can
@@ -337,6 +378,13 @@ func decide(observation: Dictionary) -> Dictionary:
 	var build_target := _build_target(observation)
 	if not build_target.is_empty() and Contract.ACTION_PLACE in legal:
 		return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, build_target, 700, 0.61)
+
+	# If none of the currently visible blocks advances progression, walk far
+	# enough to make the host stream/generate another chunk. This is distinct
+	# from the short social wander below: it keeps a direction until an edge or
+	# obstacle proves that side unproductive, then explores the other way.
+	if Contract.ACTION_MOVE_TO in legal and _best_resource(resources, observation).is_empty():
+		return _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, _exploration_target(observation), EXPLORE_COMMIT_MSEC, 0.72)
 
 	# Social proximity is a context, not the bot's whole job.  Only follow after
 	# the nearby achievement, gathering, and building opportunities have been
@@ -562,8 +610,10 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var best := {}
 	var best_score := INF
 	var inventory := _inventory(observation)
-	var needs_wood := _needs_wood_progression(inventory)
+	var needs_wood := _needs_wood_progression(inventory) or _needs_workbench_material(observation)
 	var needs_leaves := _needs_leaf_progression(inventory)
+	var needs_cobblestone := _needs_cobblestone_progression(observation)
+	var filler_count := _count_named(inventory, FILLER_BLOCK_NAMES)
 	var has_tree_target := false
 	if needs_wood or needs_leaves:
 		for raw_probe in values:
@@ -576,6 +626,12 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var nourishment := clampi(int(self_state.get("nourishment", MAX_NOURISHMENT)), 0, MAX_NOURISHMENT)
 	var needs_food := nourishment <= HUNGER_FORAGE_THRESHOLD and _best_food_in_inventory(observation).is_empty()
+	# Adventure islands always have a useful wood path, but the nearest tree can
+	# start just outside the resource radius. Do not mistake the sand below the
+	# avatar for progression and excavate a crater while the bot should explore.
+	# One Block is the deliberate exception: its renewable anchor must be mined.
+	if _needs_wood_progression(inventory) and not has_tree_target and str(observation.get("world_mode", "")).to_lower() != "one_block":
+		return {}
 	for raw_value in values:
 		if not raw_value is Dictionary:
 			continue
@@ -609,10 +665,7 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			"stick", "workbench", "chest", "furnace", "torch",
 		]:
 			continue
-		# Only skip ice filler when a real tree/leaf target is also visible.
-		# Otherwise keep mining soft terrain so activity tests and empty pads
-		# still make progress.
-		if has_tree_target and block_name in ["ice", "snow"]:
+		if block_name in FILLER_BLOCK_NAMES and filler_count >= MAX_FILLER_RESERVE:
 			continue
 		var score := distance
 		if not bool(resource.get("reachable", false)):
@@ -623,8 +676,14 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			score -= 160.0
 		elif needs_leaves and _is_leaf_name(block_name):
 			score -= 200.0
-		elif has_tree_target and block_name in ["dirt", "grass", "sand", "gravel", "cobblestone", "stone"]:
+		elif needs_cobblestone and block_name == "cobblestone":
+			score -= 190.0
+		elif has_tree_target and block_name in FILLER_BLOCK_NAMES:
 			score += 180.0
+		elif block_name in FILLER_BLOCK_NAMES:
+			score += 110.0
+		elif block_name in ["copper_ore", "amethyst_crystal", "obsidian", "moonstone_ore", "emerald_crystal", "rose_crystal"]:
+			score -= 80.0
 		# Leaves are the ordinary forage path for wild berries. Prefer them when
 		# hungry and the inventory has no ready food, otherwise the bot starves
 		# while happily mining dirt beside berry bushes.
@@ -681,8 +740,130 @@ func _wander_target(self_state: Dictionary) -> Dictionary:
 	return {"position": [origin.x + direction * WANDER_RADIUS, origin.y]}
 
 
+func _exploration_target(observation: Dictionary) -> Dictionary:
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var origin := Contract.target_position(self_state)
+	var history: Array = _as_array(observation.get("action_history", []))
+	for index in range(history.size() - 1, -1, -1):
+		if not history[index] is Dictionary:
+			continue
+		var entry := history[index] as Dictionary
+		if str(entry.get("goal", "")) != Contract.GOAL_EXPLORE:
+			continue
+		if str(entry.get("phase", "")) in ["finished", "failed"] and str(entry.get("reason", "")) in ["blocked_obstacle", "edge_guard", "route_unreachable"]:
+			_explore_direction = -1 if str(entry.get("target_id", "")).contains("right") else 1
+		break
+	if _explore_direction == 0:
+		_explore_direction = -1 if _rng.randf() < 0.5 else 1
+	var label := "left" if _explore_direction < 0 else "right"
+	return {
+		"id": "explore:%s" % label,
+		"position": [origin.x + float(_explore_direction) * EXPLORE_RADIUS, origin.y],
+		"reason": "discover_terrain",
+	}
+
+
 func _inventory(observation: Dictionary) -> Dictionary:
 	return observation.get("inventory_summary", {}) as Dictionary if observation.get("inventory_summary", {}) is Dictionary else {}
+
+
+func _station_progression_action(observation: Dictionary, foraging: bool) -> Dictionary:
+	var inventory := _inventory(observation)
+	for station_name in STATION_NAMES:
+		if int(inventory.get(station_name, 0)) <= 0 or _station_is_available(observation, station_name):
+			continue
+		var placement := _station_place_target(observation, station_name)
+		if not placement.is_empty():
+			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, placement, 900, 0.97)
+	var needed_station := _needed_station_for_affordable_recipe(observation, foraging)
+	if needed_station.is_empty() or _station_is_available(observation, needed_station):
+		return {}
+	var station_target := _nearest_station_target(observation, needed_station)
+	if station_target.is_empty():
+		return {}
+	return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, station_target, 1800, 0.9)
+
+
+func _needed_station_for_affordable_recipe(observation: Dictionary, foraging: bool) -> String:
+	var inventory := _inventory(observation)
+	var recipes: Array = _as_array(observation.get("recipes", []))
+	var blocked_outputs: Array = _as_array(observation.get("craft_blocked_outputs", []))
+	var wanted_outputs: Array = PROGRESSION_CRAFTS.duplicate()
+	if foraging:
+		wanted_outputs.push_front("prepared_meal")
+	for wanted in wanted_outputs:
+		if wanted in blocked_outputs or _progression_output_satisfied(inventory, str(wanted), observation):
+			continue
+		for raw_recipe in recipes:
+			if not raw_recipe is Dictionary:
+				continue
+			var recipe := raw_recipe as Dictionary
+			var output: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
+			if int(output.get(str(wanted), 0)) <= 0:
+				continue
+			var station := str(recipe.get("station", ""))
+			if station.is_empty() or bool(recipe.get("station_available", false)):
+				continue
+			if _recipe_inputs_available_ignoring_station(recipe, inventory):
+				return station
+	return ""
+
+
+func _station_is_available(observation: Dictionary, station_name: String) -> bool:
+	for raw_recipe in _as_array(observation.get("recipes", [])):
+		if raw_recipe is Dictionary and str((raw_recipe as Dictionary).get("station", "")) == station_name and bool((raw_recipe as Dictionary).get("station_available", false)):
+			return true
+	return false
+
+
+func _station_place_target(observation: Dictionary, station_name: String) -> Dictionary:
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var center_x := floori((float(self_state.get("x", 0.0)) + 10.0) / 32.0)
+	var support_y := floori((float(self_state.get("y", 0.0)) + 28.0) / 32.0)
+	var occupied := _terrain_occupied_map(observation)
+	for offset_x in [1, -1, 2, -2, 3, -3]:
+		var target := Vector2i(center_x + offset_x, support_y - 1)
+		var target_name := str(occupied.get("%d:%d" % [target.x, target.y], ""))
+		var support_name := str(occupied.get("%d:%d" % [target.x, target.y + 1], ""))
+		if not target_name.is_empty() and target_name.to_lower() not in ["air", "core.air"]:
+			continue
+		if support_name.is_empty() or _tile_overlaps_player(target, self_state):
+			continue
+		return {
+			"id": "station:%s:%d:%d" % [station_name, target.x, target.y],
+			"block": station_name,
+			"x": target.x,
+			"y": target.y,
+			"reason": "place_station",
+		}
+	return {}
+
+
+func _nearest_station_target(observation: Dictionary, station_name: String) -> Dictionary:
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var self_position := Contract.target_position(self_state)
+	var best := {}
+	var best_distance := INF
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		var block_name := str(tile.get("block_name", ""))
+		if str(_block_entry(block_name).get("station", "")) != station_name:
+			continue
+		var position := Vector2((float(tile.get("x", 0)) + 0.5) * 32.0, (float(tile.get("y", 0)) + 0.5) * 32.0)
+		var distance := self_position.distance_to(position)
+		if distance >= best_distance:
+			continue
+		best_distance = distance
+		best = {
+			"id": "station:%s:%d:%d" % [station_name, int(tile.get("x", 0)), int(tile.get("y", 0))],
+			"x": int(tile.get("x", 0)),
+			"y": int(tile.get("y", 0)),
+			"position": [position.x, position.y],
+			"distance": distance,
+		}
+	return best
 
 
 func _craftable_output(observation: Dictionary) -> String:
@@ -698,11 +879,7 @@ func _craftable_output(observation: Dictionary) -> String:
 	for wanted in PROGRESSION_CRAFTS:
 		if wanted in blocked_outputs:
 			continue
-		if wanted not in LOCAL_OPTIMISTIC_CRAFTS:
-			continue
-		if wanted == "stone_pickaxe" and "stone_age" in unlocked:
-			continue
-		if int(inventory.get(wanted, 0)) > 0:
+		if _progression_output_satisfied(inventory, str(wanted), observation, unlocked):
 			continue
 		if _recipe_available(recipes, inventory, wanted):
 			return wanted
@@ -723,6 +900,34 @@ func _craftable_output(observation: Dictionary) -> String:
 			if name in GENERIC_OUTPUTS and name in LOCAL_OPTIMISTIC_CRAFTS and name not in blocked_outputs and int(inventory.get(name, 0)) <= 0 and _recipe_inputs_available(recipe, inventory):
 				return name
 	return ""
+
+
+func _progression_output_satisfied(inventory: Dictionary, output_name: String, observation: Dictionary = {}, unlocked: Array = []) -> bool:
+	if int(inventory.get(output_name, 0)) > 0:
+		return true
+	if output_name in STATION_NAMES and _station_is_available(observation, output_name):
+		return true
+	if unlocked.is_empty() and observation.get("achievements", {}) is Dictionary:
+		var achievements := observation.get("achievements", {}) as Dictionary
+		unlocked = achievements.get("unlocked", []) if achievements.get("unlocked", []) is Array else []
+	if output_name == "wooden_pickaxe":
+		return _owns_any(inventory, ["stone_pickaxe", "copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "resonance_pickaxe"])
+	if output_name == "stone_pickaxe":
+		return "stone_age" in unlocked or _owns_any(inventory, ["copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "resonance_pickaxe"])
+	if output_name == "copper_pickaxe":
+		return _owns_any(inventory, ["crystal_pickaxe", "obsidian_pickaxe", "resonance_pickaxe"])
+	if output_name == "crystal_pickaxe":
+		return _owns_any(inventory, ["obsidian_pickaxe", "resonance_pickaxe"])
+	if output_name == "obsidian_pickaxe":
+		return int(inventory.get("resonance_pickaxe", 0)) > 0
+	return false
+
+
+func _owns_any(inventory: Dictionary, names: Array) -> bool:
+	for raw_name in names:
+		if int(inventory.get(str(raw_name), 0)) > 0:
+			return true
+	return false
 
 
 func _craftable_plank_output(recipes: Array, inventory: Dictionary, blocked_outputs: Array) -> String:
@@ -860,6 +1065,35 @@ func _recipe_inputs_available(recipe: Dictionary, inventory: Dictionary) -> bool
 		if int(inventory.get(str(raw_name), 0)) < int(inputs[raw_name]):
 			return false
 	return true
+
+
+func _recipe_inputs_available_ignoring_station(recipe: Dictionary, inventory: Dictionary) -> bool:
+	var inputs: Dictionary = recipe.get("in", {}) if recipe.get("in", {}) is Dictionary else {}
+	if inputs.is_empty():
+		return false
+	for raw_name in inputs:
+		if int(inventory.get(str(raw_name), 0)) < int(inputs[raw_name]):
+			return false
+	return true
+
+
+func _needs_workbench_material(observation: Dictionary) -> bool:
+	if _station_is_available(observation, "workbench"):
+		return false
+	var inventory := _inventory(observation)
+	if int(inventory.get("workbench", 0)) > 0:
+		return false
+	return _max_named_stack(inventory, PLANK_OUTPUTS) < 4
+
+
+func _needs_cobblestone_progression(observation: Dictionary) -> bool:
+	var inventory := _inventory(observation)
+	var cobblestone := int(inventory.get("cobblestone", 0))
+	if not _progression_output_satisfied(inventory, "stone_pickaxe", observation):
+		return cobblestone < 2
+	if not _station_is_available(observation, "furnace") and int(inventory.get("furnace", 0)) <= 0:
+		return cobblestone < 4
+	return false
 
 
 func _equipable_tool(observation: Dictionary) -> String:
@@ -1268,42 +1502,50 @@ func _build_target(observation: Dictionary) -> Dictionary:
 		return {}
 	var inventory := _inventory(observation)
 	var block_name := ""
-	for preferred in ["planks", "palm_planks", "pine_planks", "weeping_planks", "stone_bricks", "cobblestone", "stone", "dirt"]:
+	# Keep early logs/planks for tools and the workbench. A shelter is useful, but
+	# it must not consume the four matching planks that unlock progression.
+	for preferred in ["stone_bricks", "cobblestone", "stone", "dirt", "grass", "packed_ice"]:
 		if int(inventory.get(preferred, 0)) > 0:
 			block_name = preferred
 			break
 	if block_name.is_empty():
+		for preferred in PLANK_OUTPUTS:
+			if int(inventory.get(preferred, 0)) > 4:
+				block_name = preferred
+				break
+	if block_name.is_empty():
 		return {}
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
-	var tile_x := floori(float(self_state.get("x", 0.0)) / 32.0)
-	var tile_y := floori((float(self_state.get("y", 0.0)) + 28.0) / 32.0)
-	var offsets := [Vector2i(1, 0), Vector2i(2, 0), Vector2i(1, -1), Vector2i(2, -1), Vector2i(0, -1), Vector2i(3, 0)]
-	var occupied: Dictionary = {}
-	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
-		if not raw_tile is Dictionary:
-			continue
-		var tile := raw_tile as Dictionary
-		occupied["%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]] = str(tile.get("block_name", ""))
-	for offset_index in range(offsets.size()):
-		var offset: Vector2i = offsets[(_build_step + offset_index) % offsets.size()]
-		var target_x := tile_x + offset.x
-		var target_y := tile_y + offset.y
+	if not _build_anchor_set:
+		_build_anchor = Vector2i(
+			floori((float(self_state.get("x", 0.0)) + 10.0) / float(BlockDefs.TILE)),
+			floori((float(self_state.get("y", 0.0)) + 28.0) / float(BlockDefs.TILE)),
+		)
+		_build_anchor_set = true
+		_build_step = 0
+	var occupied := _terrain_occupied_map(observation)
+	for offset_index in range(_build_step, SHELTER_BLUEPRINT.size()):
+		var offset: Vector2i = SHELTER_BLUEPRINT[offset_index]
+		var target_x := _build_anchor.x + offset.x
+		var target_y := _build_anchor.y + offset.y
 		var occupied_name := str(occupied.get("%d:%d" % [target_x, target_y], ""))
 		if not occupied_name.is_empty() and occupied_name.to_lower() not in ["air", "core.air"]:
+			_build_step = offset_index + 1
 			continue
-		var conflicts_with_resource := false
-		for raw_resource in _as_array(observation.get("visible_resources", [])):
-			if not raw_resource is Dictionary:
-				continue
-			var resource := raw_resource as Dictionary
-			if int(resource.get("x", 2147483647)) == target_x and int(resource.get("y", 2147483647)) == target_y:
-				conflicts_with_resource = true
-				break
-		if conflicts_with_resource:
+		if _tile_overlaps_player(Vector2i(target_x, target_y), self_state):
 			continue
-		_build_step = (_build_step + offset_index + 1) % offsets.size()
+		_build_step = offset_index + 1
 		_last_build_msec = now_msec
-		return {"id": "build:%d" % now_msec, "block": block_name, "x": target_x, "y": target_y}
+		return {
+			"id": "shelter:%d:%d:%d" % [_build_anchor.x, _build_anchor.y, offset_index],
+			"block": block_name,
+			"x": target_x,
+			"y": target_y,
+			"reason": "build_shelter",
+		}
+	_build_anchor_set = false
+	_build_step = 0
+	_last_build_msec = now_msec
 	return {}
 
 

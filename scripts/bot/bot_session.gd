@@ -144,6 +144,8 @@ const TREE_CLIMB_SPEED := -3.2
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
 const CRAFT_BLOCK_COOLDOWN_MSEC := 12_000
+const STATION_RADIUS_TILES := 4
+const MIN_PREPARED_MEAL_CREATURE_SIZE := 0.65
 const FOOD_EAT_COOLDOWN_MSEC := 8_000
 const ACTION_RETRY_BLOCK_MSEC := 8_000
 const EMOJI_EVENT_TTL_MSEC := 8_000
@@ -1706,7 +1708,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_world_snapshot["inventory_summary"] = _inventory_summary_from_player_state(local_state)
 	_inventory_host_revision = maxi(0, int(local_state.get("inventory_host_revision", 0)))
 	_inventory_client_revision = maxi(_inventory_client_revision, int(local_state.get("inventory_client_revision", 0)))
-	_world_snapshot["recipes"] = _recipe_catalog(snapshot)
+	_world_snapshot["recipes"] = _recipe_catalog(_world_snapshot)
 	_equipment_slots = _equipment_from_player_state(local_state)
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	_world_snapshot["craft_pending_output"] = _craft_pending_output
@@ -1834,7 +1836,32 @@ func _recipe_catalog(snapshot: Dictionary) -> Array:
 		if not recipe.is_empty():
 			recipe["station_available"] = _station_available(snapshot, str(recipe.get("station", "")))
 			result.append(recipe)
+	# Mirror WorldSim.get_all_recipes(): collectible, non-sapient creatures of a
+	# useful size can be prepared at a nearby furnace. Without this dynamic part
+	# the bot could own food ingredients yet never know a meal recipe existed.
+	var defs := get_node_or_null("/root/BlockDefs")
+	var blocks: Dictionary = defs.get("BLOCKS") if defs != null and defs.get("BLOCKS") is Dictionary else {}
+	for raw_name in blocks:
+		var block_name := str(raw_name)
+		if _creature_can_be_prepared_as_meal(block_name):
+			result.append({
+				"in": {block_name: 1},
+				"out": {"prepared_meal": 1},
+				"station": "furnace",
+				"station_available": _station_available(snapshot, "furnace"),
+			})
 	return result
+
+
+func _creature_can_be_prepared_as_meal(block_name: String) -> bool:
+	var entry := _block_entry(block_name)
+	if not bool(entry.get("creature_item", false)):
+		return false
+	var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
+	if "sapient" in (definition.get("tags", []) as Array):
+		return false
+	var stats: Dictionary = definition.get("stats", {}) if definition.get("stats", {}) is Dictionary else {}
+	return float(stats.get("size", 0.0)) >= MIN_PREPARED_MEAL_CREATURE_SIZE
 
 
 func _resolve_content_recipe(raw_recipe: Dictionary) -> Dictionary:
@@ -1856,13 +1883,16 @@ func _resolve_content_recipe(raw_recipe: Dictionary) -> Dictionary:
 func _station_available(snapshot: Dictionary, station: String) -> bool:
 	if station.is_empty():
 		return true
-	var tiles: Array = snapshot.get("tiles", []) if snapshot.get("tiles", []) is Array else []
-	for raw_tile in tiles:
-		if not raw_tile is Dictionary:
-			continue
-		var name := _block_name_for_content_id(str((raw_tile as Dictionary).get("content_id", "")))
-		if not name.is_empty() and str(_block_entry(name).get("station", "")) == station:
-			return true
+	var self_state: Dictionary = snapshot.get("self", {}) if snapshot.get("self", {}) is Dictionary else {}
+	var center := Vector2i(
+		floori((float(self_state.get("x", 0.0)) + float(self_state.get("w", 20.0)) * 0.5) / float(BlockDefs.TILE)),
+		floori((float(self_state.get("y", 0.0)) + float(self_state.get("h", 28.0)) * 0.5) / float(BlockDefs.TILE)),
+	)
+	for tile_y in range(center.y - STATION_RADIUS_TILES, center.y + STATION_RADIUS_TILES + 1):
+		for tile_x in range(center.x - STATION_RADIUS_TILES, center.x + STATION_RADIUS_TILES + 1):
+			var name := str(_terrain_tiles.get("%d:%d" % [tile_x, tile_y], ""))
+			if not name.is_empty() and str(_block_entry(name).get("station", "")) == station:
+				return true
 	return false
 
 
@@ -2200,6 +2230,13 @@ func _apply_local_craft(output_name: String) -> bool:
 		if int(next[plank_name]) <= 0:
 			next.erase(plank_name)
 		next["workbench"] = int(next.get("workbench", 0)) + 1
+	elif output_name == "furnace":
+		if int(next.get("cobblestone", 0)) < 4:
+			return false
+		next["cobblestone"] = int(next.get("cobblestone", 0)) - 4
+		if int(next["cobblestone"]) <= 0:
+			next.erase("cobblestone")
+		next["furnace"] = int(next.get("furnace", 0)) + 1
 	elif output_name == "chest":
 		var plank_name := ""
 		for candidate in ["planks", "palm_planks", "pine_planks", "weeping_planks"]:
@@ -2310,6 +2347,9 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["craft_blocked_outputs"] = _active_craft_blocked_outputs(now_msec)
 	snapshot["food_eat_cooldown_until_msec"] = _food_eat_cooldown_until_msec
 	snapshot["terrain_tiles"] = _terrain_observation(snapshot["self"] as Dictionary)
+	# Station availability changes when the bot places a workbench/furnace or
+	# walks out of its radius, so recipes cannot remain frozen at join time.
+	snapshot["recipes"] = _recipe_catalog(snapshot)
 	# Rebuild every tick from the live terrain index. A one-shot list from the
 	# join snapshot froze the bot on nearby ice while the starter tree grew and
 	# stayed out of the stale resource set.
@@ -2853,15 +2893,30 @@ func _on_decision_started(decision: Dictionary) -> void:
 				"at_msec": now_msec,
 			})
 		else:
-			# Unsupported/unavailable recipe: cool only that output so it cannot
-			# freeze the whole craft progression gate for several seconds.
-			_block_craft_output(craft_output, now_msec)
-			_craft_pending_output = ""
-			_craft_retry_after_msec = now_msec + 500
-			_pending_action_targets.erase("craft")
-			behavior.executor.cancel("craft_failed")
-			decision_logged.emit({"event": "decision_failed", "decision": decision.duplicate(true), "reason": "craft_failed", "at_msec": now_msec})
-			return
+			# Station recipes must be resolved by the authoritative host so recipe
+			# proximity and multi-input inventory updates stay identical to a human
+			# player. The executor intentionally skips CRAFT network sends; send the
+			# one request here and wait for action_result/inventory_snapshot.
+			var sent := false
+			if network_client != null and network_client.has_method("send_command"):
+				var send_result: Variant = network_client.call("send_command", "craft_recipe", {"output": craft_output})
+				sent = bool(send_result) if send_result is bool else true
+			if sent:
+				_craft_pending_output = craft_output
+				_craft_retry_after_msec = now_msec + CRAFT_RESPONSE_TIMEOUT_MSEC
+				structured_log.emit({
+					"event": "craft_requested",
+					"output": craft_output,
+					"at_msec": now_msec,
+				})
+			else:
+				_block_craft_output(craft_output, now_msec)
+				_craft_pending_output = ""
+				_craft_retry_after_msec = now_msec + 500
+				_pending_action_targets.erase("craft")
+				behavior.executor.cancel("craft_failed")
+				decision_logged.emit({"event": "decision_failed", "decision": decision.duplicate(true), "reason": "craft_failed", "at_msec": now_msec})
+				return
 	elif action == Contract.ACTION_EAT:
 		if not _apply_local_eat(str(decision.get("target_id", ""))):
 			behavior.executor.cancel("eat_failed")

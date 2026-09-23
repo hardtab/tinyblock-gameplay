@@ -53,6 +53,8 @@ func request_decision(now_msec: int = 0) -> void:
 func reset(now_msec: int = 0) -> void:
 	executor.cancel("behavior_reset")
 	safety.reset_session()
+	if provider != null and provider.has_method("reset"):
+		provider.call("reset")
 	_last_goal = ""
 	_next_decision_msec = now_msec
 
