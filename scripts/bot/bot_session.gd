@@ -84,6 +84,7 @@ var _equipment_slots := {"hand": "", "feet": ""}
 var _pending_action_targets: Dictionary = {}
 var _blocked_action_targets: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
+var _support_preserving_mine_tiles: Dictionary = {}
 var _plant_tiles: Dictionary = {}
 var _physics_route: Array[Dictionary] = []
 var _physics_route_target := Vector2i(2147483647, 2147483647)
@@ -258,6 +259,7 @@ func join_session(record: Dictionary) -> void:
 	_blocked_action_targets.clear()
 	_action_loop_blocked_until.clear()
 	_terrain_tiles.clear()
+	_support_preserving_mine_tiles.clear()
 	_physics_route.clear()
 	_physics_route_target = Vector2i(2147483647, 2147483647)
 	_physics_route_target_id = ""
@@ -660,6 +662,18 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	var route_kind := str(route_step.get("kind", ""))
 	if not route_step.is_empty():
 		destination = route_step.get("position", destination)
+	# Guard the edge before a movement hint can start a jump. A navigator jump is
+	# still allowed because its destination was built from a known standable tile;
+	# direct movement toward unknown void has no such landing guarantee.
+	if (
+		bool(self_state.get("on_ground", false))
+		and _would_step_into_void(origin, destination)
+		and route_kind != "jump"
+	):
+		_set_desired_input(false, false, false)
+		_advance_local_physics(self_state, delta, false)
+		_world_snapshot["self"] = self_state
+		return {"done": true, "reason": "edge_guard"}
 	var hint := ""
 	if _is_pvp_world():
 		hint = _pvp_jump_hint(origin, destination)
@@ -679,15 +693,6 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# Movement snapshots are still needed for older P2P hosts.  Run those
 	# snapshots through the same collision/gravity adapter as the dedicated
 	# host instead of teleporting x/y and claiming the player is grounded.
-	if bool(self_state.get("on_ground", false)) and _would_step_into_void(origin, destination):
-		_set_desired_input(false, false, false)
-		_advance_local_physics(self_state, delta, false)
-		_world_snapshot["self"] = self_state
-		# Finish the movement action at a safe edge so the rule provider can
-		# re-evaluate the next step. In PvP this hands control to the bounded
-		# bridge planner instead of holding MOVE_TO until the bot walks/falls off
-		# the island.
-		return {"done": true, "reason": "edge_guard"}
 	# Flee may still need to step out of lava underfoot. Ordinary MOVE_TO /
 	# FOLLOW / wander must not walk onto a known lava column.
 	if action != Contract.ACTION_FLEE_FROM and bool(self_state.get("on_ground", false)) and _would_step_into_lava(origin, destination):
@@ -841,6 +846,7 @@ func _terrain_climbable_tile(tile: Vector2i) -> bool:
 
 func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 	_terrain_tiles.clear()
+	_support_preserving_mine_tiles.clear()
 	if not raw_tiles is Array:
 		return
 	for raw_tile in raw_tiles:
@@ -851,7 +857,10 @@ func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 		if name.is_empty():
 			name = str(tile.get("block_name", ""))
 		if not name.is_empty():
-			_terrain_tiles["%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]] = name
+			var key := "%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]
+			_terrain_tiles[key] = name
+			if bool(tile.get("preserves_support_on_mine", false)):
+				_support_preserving_mine_tiles[key] = true
 	_physics_route_replan_msec = 0
 
 
@@ -967,8 +976,14 @@ func _apply_tile_batch(payload: Dictionary) -> void:
 				name = str(defs.call("get_block_name", int(tile.get("block_id", 0))))
 		if int(tile.get("block_id", 1)) == 0 or name == "air":
 			_terrain_tiles.erase(key)
+			_support_preserving_mine_tiles.erase(key)
 		elif not name.is_empty():
 			_terrain_tiles[key] = name
+			if tile.has("preserves_support_on_mine"):
+				if bool(tile.get("preserves_support_on_mine", false)):
+					_support_preserving_mine_tiles[key] = true
+				else:
+					_support_preserving_mine_tiles.erase(key)
 		# Host death caches / chests arrive on the same tile_batch as terrain.
 		# Without this merge the bot never learns about a cache created after join
 		# (including its own drop after lava/combat defeat).
@@ -2609,6 +2624,7 @@ func _append_visible_resource(
 		"hardness": float(block_definition.get("hardness", 0.0)),
 		"position": [position.x, position.y],
 		"reachable": origin.distance_to(position) <= float(BlockDefs.TILE) * 2.5,
+		"preserves_support_on_mine": bool(_support_preserving_mine_tiles.get(key, false)),
 	})
 
 
@@ -2633,6 +2649,7 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 		var position := Vector2((float(tile_x) + 0.5) * BlockDefs.TILE, (float(tile_y) + 0.5) * BlockDefs.TILE)
 		if origin.distance_to(position) > max_distance:
 			continue
+		var key := "%d:%d" % [tile_x, tile_y]
 		resources.append({
 			"id": "tile:%d:%d" % [tile_x, tile_y],
 			"x": tile_x,
@@ -2643,6 +2660,7 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 			"hardness": float(block_definition.get("hardness", 0.0)),
 			"position": [position.x, position.y],
 			"reachable": origin.distance_to(position) <= float(BlockDefs.TILE) * 2.5,
+			"preserves_support_on_mine": bool(tile.get("preserves_support_on_mine", _support_preserving_mine_tiles.get(key, false))),
 		})
 		if resources.size() >= 256:
 			break

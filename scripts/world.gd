@@ -5071,11 +5071,14 @@ func serialize_state(stable_order: bool = true) -> Dictionary:
 		var block_name := BlockDefs.get_block_name(int(tiles[pos]))
 		if block_name == "air":
 			continue
-		tile_entries.append({
+		var tile_entry := {
 			"x": pos.x,
 			"y": pos.y,
 			"content_id": _content_id_for_block_name(block_name),
-		})
+		}
+		if mine_preserves_support(pos.x, pos.y):
+			tile_entry["preserves_support_on_mine"] = true
+		tile_entries.append(tile_entry)
 
 	var fluid_entries: Array[Dictionary] = []
 	for pos: Vector2i in positions:
@@ -11986,6 +11989,16 @@ func finish_break(tx: int, ty: int) -> bool:
 	damage_equipped_item("hand")
 	inventory_changed.emit()
 	return true
+
+
+func mine_preserves_support(tx: int, ty: int) -> bool:
+	"""Whether breaking this cell atomically leaves another solid support cell.
+
+	Consumers use this capability instead of branching on a world mode. Future
+	regenerating blocks can opt into the same safety contract without changing bot
+	decision logic.
+	"""
+	return world_mode == WORLD_MODE_ONE_BLOCK and Vector2i(tx, ty) == one_block_position
 
 
 func place_block(tx: int, ty: int) -> bool:

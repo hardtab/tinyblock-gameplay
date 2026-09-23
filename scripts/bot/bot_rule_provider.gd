@@ -615,22 +615,25 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var needs_cobblestone := _needs_cobblestone_progression(observation)
 	var filler_count := _count_named(inventory, FILLER_BLOCK_NAMES)
 	var has_tree_target := false
+	var has_support_preserving_target := false
 	if needs_wood or needs_leaves:
 		for raw_probe in values:
 			if not raw_probe is Dictionary:
 				continue
+			if bool((raw_probe as Dictionary).get("preserves_support_on_mine", false)):
+				has_support_preserving_target = true
 			var probe_name := str((raw_probe as Dictionary).get("block_name", "")).to_lower()
 			if _is_wood_log_name(probe_name) or _is_leaf_name(probe_name):
 				has_tree_target = true
-				break
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var nourishment := clampi(int(self_state.get("nourishment", MAX_NOURISHMENT)), 0, MAX_NOURISHMENT)
 	var needs_food := nourishment <= HUNGER_FORAGE_THRESHOLD and _best_food_in_inventory(observation).is_empty()
 	# Adventure islands always have a useful wood path, but the nearest tree can
 	# start just outside the resource radius. Do not mistake the sand below the
 	# avatar for progression and excavate a crater while the bot should explore.
-	# One Block is the deliberate exception: its renewable anchor must be mined.
-	if _needs_wood_progression(inventory) and not has_tree_target and str(observation.get("world_mode", "")).to_lower() != "one_block":
+	# A support-preserving resource can progress a sparse world without teaching
+	# the decision layer about a particular world mode.
+	if _needs_wood_progression(inventory) and not has_tree_target and not has_support_preserving_target:
 		return {}
 	for raw_value in values:
 		if not raw_value is Dictionary:

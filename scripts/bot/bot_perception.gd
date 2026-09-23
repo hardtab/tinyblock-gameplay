@@ -139,9 +139,9 @@ static func mine_target_is_safe(observation: Dictionary, target: Dictionary) -> 
 	var target_y := int(target.get("y", 2147483647))
 	if target_y != support_y or target_x < left or target_x > right:
 		return true
-	# The One Block anchor is synchronously replaced by the authoritative host.
-	# It is intentionally mined while standing on it and never opens a void.
-	if str(observation.get("world_mode", "")).to_lower() == "one_block":
+	# Some authoritative cells are replaced atomically when mined. Treat that as
+	# an explicit tile capability instead of special-casing a world mode.
+	if bool(target.get("preserves_support_on_mine", false)):
 		return true
 	var terrain := _terrain_cell_map(observation.get("terrain_tiles", []))
 	terrain.erase(Vector2i(target_x, target_y))

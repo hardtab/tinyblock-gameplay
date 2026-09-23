@@ -11,6 +11,7 @@ const BotDecisionProviderClass = preload("res://gameplay/scripts/bot/bot_decisio
 const BotRuleProviderClass = preload("res://gameplay/scripts/bot/bot_rule_provider.gd")
 const BotSafetyPolicyClass = preload("res://gameplay/scripts/bot/bot_safety_policy.gd")
 const BotExecutorClass = preload("res://gameplay/scripts/bot/bot_executor.gd")
+const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 
 const DEFAULT_DECISION_INTERVAL_MSEC := 900
 const REJECTION_RETRY_MSEC := 350
@@ -60,6 +61,11 @@ func reset(now_msec: int = 0) -> void:
 
 
 func tick(observation: Dictionary, delta: float, now_msec: int) -> void:
+	# A held mine can last several seconds. Terrain may change after the original
+	# decision, so revalidate the support immediately before each executor tick;
+	# cancel sends mine_cancel and prevents the final mine_block command.
+	if _mining_target_became_unsafe(observation):
+		executor.cancel("mine_target_became_unsafe")
 	# Mining can last several seconds. A duel opponent or a recent player
 	# attacker may become actionable after the mining decision started, so do not
 	# let the busy executor hide that combat state until the block is destroyed.
@@ -101,6 +107,13 @@ func tick(observation: Dictionary, delta: float, now_msec: int) -> void:
 	decision_started.emit(decision.duplicate(true))
 	var next_interval_msec := AGGRESSIVE_PLAYER_DECISION_INTERVAL_MSEC if aggressive_player else decision_interval_msec
 	_next_decision_msec = now_msec + maxi(next_interval_msec, int(decision.get("commit_for_ms", 0)))
+
+
+func _mining_target_became_unsafe(observation: Dictionary) -> bool:
+	if executor == null or executor.current_action() != Contract.ACTION_MINE:
+		return false
+	var target: Dictionary = executor.current_decision.get("target", {}) if executor.current_decision.get("target", {}) is Dictionary else {}
+	return not Perception.mine_target_is_safe(observation, target)
 
 
 func _combat_should_preempt_mining(observation: Dictionary) -> bool:
