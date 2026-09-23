@@ -301,6 +301,7 @@ func join_session(record: Dictionary) -> void:
 	safety.reset_session()
 	_world_snapshot.clear()
 	_equipment_slots = {"hand": "", "feet": ""}
+	session_id = str(record.get("session_id", ""))
 	world_id = str(record.get("world_id", ""))
 	_set_state(STATE_JOINING)
 	if backend == null or not backend.has_method("join_multiplayer_session"):
@@ -317,9 +318,26 @@ func join_session(record: Dictionary) -> void:
 	if state == STATE_LEAVING or _left_emitted:
 		return
 	if not response is Dictionary or not bool((response as Dictionary).get("ok", false)):
-		_emit_left(str((response as Dictionary).get("error", "join_failed")) if response is Dictionary else "join_failed")
+		var failure := response as Dictionary if response is Dictionary else {}
+		structured_log.emit(join_failure_log_event(record, failure))
+		_emit_left(str(failure.get("error", "join_failed")))
 		return
 	_connect_join_response(response as Dictionary, record)
+
+
+func join_failure_log_event(record: Dictionary, response: Dictionary) -> Dictionary:
+	var event := {
+		"event": "session_join_failed",
+		"session_id": str(record.get("session_id", session_id)),
+		"world_id": str(record.get("world_id", world_id)),
+		"reason": str(response.get("error", "join_failed")),
+		"at_msec": Time.get_ticks_msec(),
+	}
+	if response.has("code"):
+		event["transport_code"] = int(response.get("code", 0))
+	if response.has("status_code"):
+		event["status_code"] = int(response.get("status_code", 0))
+	return event
 
 
 func connect_join_response(response: Dictionary, record: Dictionary = {}) -> bool:

@@ -231,9 +231,10 @@ func _on_session_left(reason: String) -> void:
 		visited_key = str(finished.get("world_id", ""))
 	if not visited_key.is_empty():
 		var now_msec := Time.get_ticks_msec()
-		if reason.begins_with("disconnected_"):
+		if reason == "transport_error" or reason.begins_with("disconnected_"):
 			# MultiplayerClient has already exhausted its bounded WebRTC reconnect
-			# attempts. Let discovery establish a fresh guest transport shortly;
+			# attempts, or the join-ticket HTTP request failed before the socket
+			# existed. Let discovery establish a fresh guest transport shortly;
 			# the normal five-minute visit cooldown made a healthy public world look
 			# abandoned after one transient mobile-network interruption.
 			blacklisted_sessions[visited_key] = now_msec + int(TRANSIENT_DISCONNECT_RETRY_SECONDS * 1000.0)
