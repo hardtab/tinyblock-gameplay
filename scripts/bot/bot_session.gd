@@ -2579,6 +2579,11 @@ func _build_observation(now_msec: int) -> Dictionary:
 			snapshot["visible_containers"].append(_duel_fallback_container(snapshot["self"] as Dictionary))
 	var generation: Dictionary = snapshot.get("generation", {}) if snapshot.get("generation", {}) is Dictionary else {}
 	snapshot["world_mode"] = str(generation.get("mode", _session_world_mode)).to_lower()
+	var regenerating_block := _regenerating_block_observation()
+	if regenerating_block.is_empty():
+		snapshot.erase("regenerating_block")
+	else:
+		snapshot["regenerating_block"] = regenerating_block
 	snapshot["pvp_world"] = _is_pvp_world()
 	snapshot["duel_started"] = _duel_started
 	snapshot["pvp_chest_opened"] = _pvp_chest_opened
@@ -2693,6 +2698,39 @@ func _is_pvp_world() -> bool:
 	)
 
 
+func _regenerating_block_observation() -> Dictionary:
+	var generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
+	if str(generation.get("mode", _session_world_mode)).to_lower() != "one_block":
+		return {}
+	var source: Dictionary = _world_snapshot.get("one_block", {}) if _world_snapshot.get("one_block", {}) is Dictionary else {}
+	if not source.has("x") or not source.has("y"):
+		return {}
+	var tile_x := int(source.get("x", 0))
+	var tile_y := int(source.get("y", 0))
+	return {
+		"id": "tile:%d:%d" % [tile_x, tile_y],
+		"x": tile_x,
+		"y": tile_y,
+		"position": [
+			(float(tile_x) + 0.5) * BlockDefs.TILE,
+			(float(tile_y) + 0.5) * BlockDefs.TILE,
+		],
+		"mined": maxi(0, int(source.get("mined", 0))),
+		"phase": maxi(0, int(source.get("phase", 0))),
+		"regenerates_on_mine": true,
+		"preserves_support_on_mine": true,
+	}
+
+
+func _is_regenerating_block_tile(tile_x: int, tile_y: int) -> bool:
+	var source := _regenerating_block_observation()
+	return (
+		not source.is_empty()
+		and int(source.get("x", 2147483647)) == tile_x
+		and int(source.get("y", 2147483647)) == tile_y
+	)
+
+
 func _terrain_observation(self_state: Dictionary) -> Array:
 	var result: Array = []
 	var origin := Contract.target_position(self_state)
@@ -2711,6 +2749,7 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 			continue
 		var block_name := str(_terrain_tiles[key])
 		var block := _block_entry(block_name)
+		var regenerates_on_mine := _is_regenerating_block_tile(tile_x, tile_y)
 		result.append({
 			"x": tile_x,
 			"y": tile_y,
@@ -2719,6 +2758,8 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 			"fluid": bool(block.get("fluid", false)),
 			"harvest_tier": _block_harvest_tier(block),
 			"hardness": float(block.get("hardness", 0.0)),
+			"preserves_support_on_mine": bool(_support_preserving_mine_tiles.get(key, false)) or regenerates_on_mine,
+			"regenerates_on_mine": regenerates_on_mine,
 		})
 	return result
 
@@ -2792,6 +2833,7 @@ func _append_visible_resource(
 		return
 	seen[key] = true
 	var content_id := str(block_definition.get("content_id", "core.%s" % block_name))
+	var regenerates_on_mine := _is_regenerating_block_tile(tile_x, tile_y)
 	resources.append({
 		"id": "tile:%d:%d" % [tile_x, tile_y],
 		"x": tile_x,
@@ -2802,7 +2844,8 @@ func _append_visible_resource(
 		"hardness": float(block_definition.get("hardness", 0.0)),
 		"position": [position.x, position.y],
 		"reachable": origin.distance_to(position) <= float(BlockDefs.TILE) * 2.5,
-		"preserves_support_on_mine": bool(_support_preserving_mine_tiles.get(key, false)),
+		"preserves_support_on_mine": bool(_support_preserving_mine_tiles.get(key, false)) or regenerates_on_mine,
+		"regenerates_on_mine": regenerates_on_mine,
 	})
 
 
@@ -2828,6 +2871,7 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 		if origin.distance_to(position) > max_distance:
 			continue
 		var key := "%d:%d" % [tile_x, tile_y]
+		var regenerates_on_mine := _is_regenerating_block_tile(tile_x, tile_y)
 		resources.append({
 			"id": "tile:%d:%d" % [tile_x, tile_y],
 			"x": tile_x,
@@ -2838,7 +2882,8 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 			"hardness": float(block_definition.get("hardness", 0.0)),
 			"position": [position.x, position.y],
 			"reachable": origin.distance_to(position) <= float(BlockDefs.TILE) * 2.5,
-			"preserves_support_on_mine": bool(tile.get("preserves_support_on_mine", _support_preserving_mine_tiles.get(key, false))),
+			"preserves_support_on_mine": bool(tile.get("preserves_support_on_mine", _support_preserving_mine_tiles.get(key, false))) or regenerates_on_mine,
+			"regenerates_on_mine": regenerates_on_mine,
 		})
 		if resources.size() >= 256:
 			break

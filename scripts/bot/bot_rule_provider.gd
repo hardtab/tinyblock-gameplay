@@ -339,6 +339,17 @@ func decide(observation: Dictionary) -> Dictionary:
 			var tree_target := _nearest_named_resource(resources, true, true)
 			if not tree_target.is_empty():
 				return _decision(Contract.GOAL_GATHER, Contract.ACTION_MOVE_TO, tree_target, 2200, 0.85)
+	# The One Block source remains globally known even after exploration takes it
+	# outside the compact resource radius. Return to the authoritative coordinate
+	# instead of treating the renewable progression source as a forgotten tile.
+	var regenerating_block: Dictionary = observation.get("regenerating_block", {}) if observation.get("regenerating_block", {}) is Dictionary else {}
+	if (
+		mining_streak < MAX_CONSECUTIVE_MINING_ACTIONS
+		and not regenerating_block.is_empty()
+		and not bool(regenerating_block.get("reachable", false))
+		and Contract.ACTION_MOVE_TO in legal
+	):
+		return _decision(Contract.GOAL_GATHER, Contract.ACTION_MOVE_TO, regenerating_block, 2600, 0.82)
 
 	var containers: Array = _as_array(observation.get("visible_containers", []))
 	if not containers.is_empty() and Contract.ACTION_OPEN_CONTAINER in legal:
@@ -609,7 +620,7 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 		for raw_probe in values:
 			if not raw_probe is Dictionary:
 				continue
-			if bool((raw_probe as Dictionary).get("preserves_support_on_mine", false)):
+			if bool((raw_probe as Dictionary).get("preserves_support_on_mine", false)) or bool((raw_probe as Dictionary).get("regenerates_on_mine", false)):
 				has_support_preserving_target = true
 			var probe_name := str((raw_probe as Dictionary).get("block_name", "")).to_lower()
 			if _is_wood_log_name(probe_name) or _is_leaf_name(probe_name):
@@ -628,8 +639,9 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 		if not raw_value is Dictionary:
 			continue
 		var resource := raw_value as Dictionary
+		var regenerates_on_mine := bool(resource.get("regenerates_on_mine", false))
 		var resource_cell := "%d:%d" % [int(resource.get("x", 2147483647)), int(resource.get("y", 2147483647))]
-		if recent_build_cells.has(resource_cell):
+		if recent_build_cells.has(resource_cell) and not regenerates_on_mine:
 			continue
 		if resource.has("solid") and not bool(resource.get("solid", true)):
 			continue
@@ -660,7 +672,7 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			"stick", "workbench", "chest", "furnace", "torch",
 		]:
 			continue
-		if block_name in FILLER_BLOCK_NAMES and filler_count >= MAX_FILLER_RESERVE:
+		if block_name in FILLER_BLOCK_NAMES and filler_count >= MAX_FILLER_RESERVE and not regenerates_on_mine:
 			continue
 		var score := distance
 		if not bool(resource.get("reachable", false)):
@@ -678,6 +690,8 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 		elif block_name in FILLER_BLOCK_NAMES:
 			score += 110.0
 		elif block_name in ["copper_ore", "amethyst_crystal", "obsidian", "moonstone_ore", "emerald_crystal", "rose_crystal"]:
+			score -= 80.0
+		if regenerates_on_mine:
 			score -= 80.0
 		# Leaves are the ordinary forage path for wild berries. Prefer them when
 		# hungry and the inventory has no ready food, otherwise the bot starves

@@ -30,6 +30,13 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 
 	var recent_events := _bounded_events(snapshot.get("recent_events", []), DEFAULT_MAX_EVENTS)
 	var emoji_events := _normalize_emoji_events(snapshot.get("emoji_events", []), own_player_id, self_position, radius)
+	var regenerating_block := _dictionary(snapshot.get("regenerating_block", {})).duplicate(true)
+	if not regenerating_block.is_empty():
+		var source_position := Contract.target_position(regenerating_block)
+		regenerating_block["position"] = [source_position.x, source_position.y]
+		regenerating_block["relative_position"] = [source_position.x - self_position.x, source_position.y - self_position.y]
+		regenerating_block["distance"] = self_position.distance_to(source_position)
+		regenerating_block["reachable"] = float(regenerating_block["distance"]) <= REACHABLE_DISTANCE
 	var observation := {
 		"observed_at_msec": now_msec,
 		"self": self_state,
@@ -48,6 +55,7 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 		"world_id": str(snapshot.get("world_id", "")),
 		"own_player_id": own_player_id,
 		"active_projectiles": _as_array(snapshot.get("active_projectiles", [])).duplicate(true),
+		"regenerating_block": regenerating_block,
 	}
 	for key in ["self_defense", "social_emoji", "social_target_id", "preferred_player_distance", "creature_attack_distance", "bow_attack_distance", "pvp_world", "duel_started", "enemy_player_id", "aggressive_player_id", "pvp_chest_opened", "world_mode", "recipes", "achievements", "equipment_slots", "craft_pending_output", "craft_retry_after_msec", "craft_blocked_outputs", "food_eat_cooldown_until_msec", "action_loop_blocked", "protected_build_cells"]:
 		if snapshot.has(key):
