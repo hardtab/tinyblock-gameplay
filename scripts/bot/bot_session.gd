@@ -152,6 +152,7 @@ const STATION_RADIUS_TILES := 4
 const MIN_PREPARED_MEAL_CREATURE_SIZE := 0.65
 const FOOD_EAT_COOLDOWN_MSEC := 8_000
 const ACTION_RETRY_BLOCK_MSEC := 8_000
+const UNSAFE_ROUTE_RETRY_BLOCK_MSEC := 30_000
 const EMOJI_EVENT_TTL_MSEC := 8_000
 const SUPPORT_PLACE_COOLDOWN_MSEC := 650
 const SUPPORT_PLACE_MAX_DISTANCE := BlockDefs.TILE * 4.5
@@ -3176,8 +3177,9 @@ func _clear_social_emoji_queue() -> void:
 
 func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 	var target_id := str(decision.get("target_id", ""))
-	if reason in ["blocked_obstacle", "edge_guard", "timeout"] and target_id.begins_with("tile:"):
-		_blocked_action_targets[target_id] = Time.get_ticks_msec() + ACTION_RETRY_BLOCK_MSEC
+	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "timeout"] and target_id.begins_with("tile:"):
+		var retry_delay := UNSAFE_ROUTE_RETRY_BLOCK_MSEC if reason in ["unsafe_jump_route", "route_unreachable"] else ACTION_RETRY_BLOCK_MSEC
+		_blocked_action_targets[target_id] = Time.get_ticks_msec() + retry_delay
 	_record_action_history("finished", decision, reason)
 
 
