@@ -142,6 +142,7 @@ const HOST_KILL_EMOJIS: PackedStringArray = ["😱", "😡", "👎"]
 const DUEL_PROTOCOL_VERSION := 3
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const LOCAL_MAX_FALL_SPEED := 12.0
+const MAX_AUTHORITATIVE_MOTION_DIVERGENCE := BlockDefs.TILE * 3.0
 const TREE_CLIMB_SPEED := -3.2
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
@@ -2087,7 +2088,32 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 			var host_revision := int(entry.get("respawn_revision", local_state.get("respawn_revision", 0)))
 			var local_revision := int(local_state.get("respawn_revision", 0))
 			var respawned := host_revision > local_revision
-			var reconcile_motion := respawned or (not _jump_active and not _climb_active)
+			var local_position := Contract.target_position(local_state)
+			var host_position := Contract.target_position(entry)
+			var motion_diverged := (
+				entry.has("x")
+				and entry.has("y")
+				and local_position.distance_to(host_position) > MAX_AUTHORITATIVE_MOTION_DIVERGENCE
+			)
+			var reconcile_motion := respawned or motion_diverged or (not _jump_active and not _climb_active)
+			if motion_diverged:
+				# Preserve normal jump interpolation, but never let a rejected host jump
+				# leave the predictor permanently airborne. The authoritative avatar is
+				# still safe at the edge; rejoin it before issuing another decision.
+				_jump_active = false
+				_climb_active = false
+				_physics_route.clear()
+				_physics_route_replan_msec = 0
+				_set_desired_input(false, false, false)
+				structured_log.emit({
+					"event": "authoritative_motion_recovered",
+					"local_x": local_position.x,
+					"local_y": local_position.y,
+					"host_x": host_position.x,
+					"host_y": host_position.y,
+					"distance": local_position.distance_to(host_position),
+					"at_msec": Time.get_ticks_msec(),
+				})
 			if respawned:
 				_handle_confirmed_respawn(Time.get_ticks_msec())
 				_was_in_harmful_fluid = false
