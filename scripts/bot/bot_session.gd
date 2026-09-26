@@ -2311,9 +2311,8 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 		var entry := (players[raw_id] as Dictionary).duplicate(true)
 		if player_id == own_player_id:
 			# Input-driven hosts are authoritative for the bot's position. Keep the
-			# collision dimensions from the initial snapshot, but do not hard-snap
-			# mid-jump: a late players_snapshot would yank the local prediction back
-			# to the previous edge and look like a teleport.
+			# collision dimensions from the initial snapshot, and only predict a jump
+			# until the host confirms that the avatar actually left the ground.
 			var local_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 			var host_revision := int(entry.get("respawn_revision", local_state.get("respawn_revision", 0)))
 			var local_revision := int(local_state.get("respawn_revision", 0))
@@ -2325,11 +2324,22 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 				and entry.has("y")
 				and local_position.distance_to(host_position) > MAX_AUTHORITATIVE_MOTION_DIVERGENCE
 			)
-			var reconcile_motion := respawned or motion_diverged or (not _jump_active and not _climb_active)
-			if motion_diverged:
-				# Preserve normal jump interpolation, but never let a rejected host jump
-				# leave the predictor permanently airborne. The authoritative avatar is
-				# still safe at the edge; rejoin it before issuing another decision.
+			var host_grounded := entry.has("on_ground") and bool(entry.get("on_ground", false))
+			var host_rejected_air_motion := host_grounded and (
+				_jump_active
+				or (_climb_active and not bool(entry.get("climbing", false)) and not bool(entry.get("tree_ghost", false)))
+			)
+			var reconcile_motion := (
+				respawned
+				or motion_diverged
+				or host_rejected_air_motion
+				or (not _jump_active and not _climb_active)
+			)
+			if motion_diverged or host_rejected_air_motion:
+				# Never let a host-rejected jump/climb leave the local predictor
+				# airborne. Even a small drift matters here: continuing the private
+				# arc makes later plans target terrain the authoritative avatar never
+				# reached, eventually causing snap-backs and apparent floating.
 				_jump_active = false
 				_climb_active = false
 				_physics_route.clear()
@@ -2337,6 +2347,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 				_set_desired_input(false, false, false)
 				structured_log.emit({
 					"event": "authoritative_motion_recovered",
+					"reason": "host_rejected_air_motion" if host_rejected_air_motion else "distance_diverged",
 					"local_x": local_position.x,
 					"local_y": local_position.y,
 					"host_x": host_position.x,
