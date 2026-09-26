@@ -15,6 +15,9 @@ var _last_plant_msec := -1
 var _explore_direction := 0
 var _last_explore_origin_x := INF
 var _last_explore_target_id := ""
+var _last_explore_left_failure_msec := -1
+var _last_explore_right_failure_msec := -1
+var _explore_suspended_until_msec := -1
 ## Identity of the finished/failed explore outcome already applied to the
 ## heading. The action history keeps terminal entries for the whole bounded
 ## window, so without this the same stale outcome was re-evaluated on every
@@ -31,6 +34,8 @@ const WANDER_COMMIT_MSEC := 1800
 const EXPLORE_RADIUS := 384.0
 const EXPLORE_COMMIT_MSEC := 4200
 const MIN_EXPLORE_PROGRESS_PX := 24.0
+const EXPLORE_BOTH_SIDES_WINDOW_MSEC := 20_000
+const EXPLORE_BOTH_SIDES_COOLDOWN_MSEC := 12_000
 const BOW_ARROW_MIN_SPEED := 250.0
 const BOW_ARROW_MAX_SPEED := 560.0
 const BOW_ARROW_GRAVITY := 310.0
@@ -90,6 +95,9 @@ func reset() -> void:
 	_explore_direction = 0
 	_last_explore_origin_x = INF
 	_last_explore_target_id = ""
+	_last_explore_left_failure_msec = -1
+	_last_explore_right_failure_msec = -1
+	_explore_suspended_until_msec = -1
 	_last_explore_outcome_key = ""
 
 
@@ -471,7 +479,9 @@ func decide(observation: Dictionary) -> Dictionary:
 	# from the short social wander below: it keeps a direction until an edge or
 	# obstacle proves that side unproductive, then explores the other way.
 	if Contract.ACTION_MOVE_TO in legal and _best_resource(resources, observation).is_empty():
-		return _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, _exploration_target(observation), EXPLORE_COMMIT_MSEC, 0.72)
+		var explore_target := _exploration_target(observation)
+		if not explore_target.is_empty():
+			return _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, explore_target, EXPLORE_COMMIT_MSEC, 0.72)
 
 	# Social proximity is a context, not the bot's whole job.  Only follow after
 	# the nearby achievement, gathering, and building opportunities have been
@@ -866,6 +876,7 @@ func _wander_target(self_state: Dictionary) -> Dictionary:
 func _exploration_target(observation: Dictionary) -> Dictionary:
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var origin := Contract.target_position(self_state)
+	var now_msec := int(observation.get("observed_at_msec", 0))
 	var history: Array = _as_array(observation.get("action_history", []))
 	for index in range(history.size() - 1, -1, -1):
 		if not history[index] is Dictionary:
@@ -898,8 +909,15 @@ func _exploration_target(observation: Dictionary) -> Dictionary:
 					# movement window stalled. Explicit route/obstacle failures
 					# always make the opposite side worth probing.
 					if route_failed or progress < MIN_EXPLORE_PROGRESS_PX:
+						_note_explore_direction_failure(target_id, now_msec)
 						_explore_direction *= -1
 		break
+	if _explore_suspended_until_msec >= 0:
+		if now_msec < _explore_suspended_until_msec:
+			return {}
+		_explore_suspended_until_msec = -1
+		_last_explore_left_failure_msec = -1
+		_last_explore_right_failure_msec = -1
 	if _explore_direction == 0:
 		_explore_direction = -1 if _rng.randf() < 0.5 else 1
 	var label := "left" if _explore_direction < 0 else "right"
@@ -911,6 +929,24 @@ func _exploration_target(observation: Dictionary) -> Dictionary:
 		"position": [origin.x + float(_explore_direction) * EXPLORE_RADIUS, origin.y],
 		"reason": "discover_terrain",
 	}
+
+
+func _note_explore_direction_failure(target_id: String, now_msec: int) -> void:
+	if target_id == "explore:left":
+		_last_explore_left_failure_msec = now_msec
+	elif target_id == "explore:right":
+		_last_explore_right_failure_msec = now_msec
+	else:
+		return
+	if (
+		_last_explore_left_failure_msec >= 0
+		and _last_explore_right_failure_msec >= 0
+		and absi(_last_explore_left_failure_msec - _last_explore_right_failure_msec) <= EXPLORE_BOTH_SIDES_WINDOW_MSEC
+	):
+		_explore_suspended_until_msec = maxi(
+			_explore_suspended_until_msec,
+			now_msec + EXPLORE_BOTH_SIDES_COOLDOWN_MSEC,
+		)
 
 
 ## Stable identity of a recorded explore outcome. Real history entries always
