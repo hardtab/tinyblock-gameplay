@@ -187,6 +187,7 @@ const DUEL_PROTOCOL_VERSION := 3
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const LOCAL_MAX_FALL_SPEED := 12.0
 const MAX_AUTHORITATIVE_MOTION_DIVERGENCE := BlockDefs.TILE * 3.0
+const HOST_GROUNDED_AIR_REJECTION_TOLERANCE := BlockDefs.TILE * 0.25
 const HOST_REJECTED_TRANSITION_COOLDOWN_MSEC := 8_000
 const TREE_CLIMB_SPEED := -3.2
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
@@ -199,6 +200,7 @@ const STONE_AGE_CONFIRM_TIMEOUT_MSEC := 20_000
 const STONE_AGE_RETRY_COOLDOWN_MSEC := 12_000
 const STONE_AGE_ABANDON_COOLDOWN_MSEC := 60_000
 const STONE_AGE_MAX_STAGE_FAILURES := 3
+const STONE_AGE_NO_ACTION_TIMEOUT_MSEC := 15_000
 const ACHIEVEMENT_GOAL_RETRY_MSEC := 20_000
 const ACHIEVEMENT_GOAL_ABANDON_MSEC := 90_000
 const ACHIEVEMENT_GOAL_MAX_FAILURES := 3
@@ -2683,8 +2685,11 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 			)
 			var host_grounded := entry.has("on_ground") and bool(entry.get("on_ground", false))
 			var host_rejected_air_motion := host_grounded and (
-				_jump_active
-				or (_climb_active and not bool(entry.get("climbing", false)) and not bool(entry.get("tree_ghost", false)))
+				local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
+				and (
+					_jump_active
+					or (_climb_active and not bool(entry.get("climbing", false)) and not bool(entry.get("tree_ghost", false)))
+				)
 			)
 			var reconcile_motion := (
 				respawned
@@ -3652,9 +3657,9 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 func _visible_resources_from_terrain(self_state: Dictionary) -> Array:
 	var resources: Array = []
 	var origin := Contract.target_position(self_state)
-	# Starter trees sit above the ice/dirt pad. Keep a wide read so the bot can
-	# still lock onto wood after it digs a few blocks downward.
-	var scan_radius := maxf(observation_radius, STARTER_TOOLING_RESOURCE_SCAN_RADIUS) if _starter_tooling_gathering_wood() else maxf(observation_radius, 420.0)
+	# Trees can sit well above the bot's current tile after it has dug or fallen.
+	# Keep a wide, wood-only read during either Stone Age bootstrap goal.
+	var scan_radius := maxf(observation_radius, STARTER_TOOLING_RESOURCE_SCAN_RADIUS) if _stone_age_gathering_wood() else maxf(observation_radius, 420.0)
 	var max_distance := scan_radius + float(BlockDefs.TILE)
 	var seen: Dictionary = {}
 	for key in _terrain_tiles:
@@ -3710,7 +3715,7 @@ func _append_visible_resource(
 	var key := "%d:%d" % [tile_x, tile_y]
 	if seen.has(key):
 		return
-	if _starter_tooling_gathering_wood() and not _is_starter_wood_log_name(block_name):
+	if _stone_age_gathering_wood() and not _is_starter_wood_log_name(block_name):
 		return
 	var block_definition: Dictionary = _block_entry(block_name)
 	var solid := bool(block_definition.get("solid", false)) and not bool(block_definition.get("fluid", false))
@@ -3737,9 +3742,9 @@ func _append_visible_resource(
 	})
 
 
-func _starter_tooling_gathering_wood() -> bool:
+func _stone_age_gathering_wood() -> bool:
 	return (
-		str(_stone_age_goal_state.get("goal_id", "")) == "starter_tooling"
+		str(_stone_age_goal_state.get("goal_id", "")) in ["stone_age", "starter_tooling"]
 		and str(_stone_age_goal_state.get("status", "")) == "active"
 		and str(_stone_age_goal_state.get("stage", "")) == "gather_wood"
 	)
@@ -3751,7 +3756,7 @@ func _is_starter_wood_log_name(block_name: String) -> bool:
 
 
 func _decision_observation_radius() -> float:
-	if _starter_tooling_gathering_wood():
+	if _stone_age_gathering_wood():
 		return maxf(observation_radius, STARTER_TOOLING_RESOURCE_SCAN_RADIUS)
 	return observation_radius
 
@@ -3761,7 +3766,7 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 	if not raw_tiles is Array:
 		return resources
 	var origin := Contract.target_position(self_state)
-	var scan_radius := maxf(observation_radius, STARTER_TOOLING_RESOURCE_SCAN_RADIUS) if _starter_tooling_gathering_wood() else observation_radius
+	var scan_radius := maxf(observation_radius, STARTER_TOOLING_RESOURCE_SCAN_RADIUS) if _stone_age_gathering_wood() else observation_radius
 	var max_distance := scan_radius + float(BlockDefs.TILE)
 	for raw_tile in raw_tiles:
 		if not raw_tile is Dictionary:
@@ -3771,7 +3776,7 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 		var tile_y := int(tile.get("y", 0))
 		var content_id := str(tile.get("content_id", ""))
 		var block_name := _block_name_for_content_id(content_id)
-		if _starter_tooling_gathering_wood() and not _is_starter_wood_log_name(block_name):
+		if _stone_age_gathering_wood() and not _is_starter_wood_log_name(block_name):
 			continue
 		var block_definition: Dictionary = _block_entry(block_name)
 		var solid := bool(block_definition.get("solid", false)) and not bool(block_definition.get("fluid", false))
@@ -4012,7 +4017,54 @@ func _active_emoji_events(now_msec: int) -> Array[Dictionary]:
 
 
 func _on_decision_proposed(decision: Dictionary) -> void:
-	decision_logged.emit({"event": "decision_proposed", "decision": decision.duplicate(true), "at_msec": Time.get_ticks_msec()})
+	var now_msec := Time.get_ticks_msec()
+	_stone_age_note_no_action(decision, now_msec)
+	decision_logged.emit({"event": "decision_proposed", "decision": decision.duplicate(true), "at_msec": now_msec})
+
+
+func _stone_age_note_no_action(decision: Dictionary, now_msec: int) -> void:
+	if _stone_age_goal_state.is_empty() or str(_stone_age_goal_state.get("status", "")) != "active":
+		return
+	var pending: Dictionary = _stone_age_goal_state.get("pending", {}) if _stone_age_goal_state.get("pending", {}) is Dictionary else {}
+	if not pending.is_empty():
+		_stone_age_goal_state["no_action_since_msec"] = -1
+		return
+	var stage := str(_stone_age_goal_state.get("stage", ""))
+	var decision_stage := str(decision.get("stone_age_stage", ""))
+	var decision_goal := str(decision.get("stone_age_goal_id", _stone_age_goal_name()))
+	if decision_stage == stage and decision_goal == _stone_age_goal_name():
+		# A real Stone Age choice (including a safe MOVE_TO search) means the
+		# stage is actionable; don't classify it as a stall.
+		_stone_age_goal_state["no_action_since_msec"] = -1
+		_stone_age_goal_state["no_action_failures"] = 0
+		return
+	if str(decision.get("action", "")) != Contract.ACTION_WAIT or str(decision.get("goal", "")) != Contract.GOAL_IDLE:
+		# Survival, combat, social behavior, or generic exploration is already
+		# yielding the turn. Only an otherwise idle bot can stall this goal.
+		_stone_age_goal_state["no_action_since_msec"] = -1
+		return
+	var since := int(_stone_age_goal_state.get("no_action_since_msec", -1))
+	if since < 0:
+		_stone_age_goal_state["no_action_since_msec"] = now_msec
+		return
+	if now_msec - since < STONE_AGE_NO_ACTION_TIMEOUT_MSEC:
+		return
+	var failures := int(_stone_age_goal_state.get("no_action_failures", 0)) + 1
+	var abandoned := failures >= STONE_AGE_MAX_STAGE_FAILURES
+	_stone_age_goal_state["no_action_failures"] = failures
+	_stone_age_goal_state["no_action_since_msec"] = -1
+	_stone_age_goal_state["status"] = "abandoned" if abandoned else "cooldown"
+	_stone_age_goal_state["retry_after_msec"] = now_msec + (STONE_AGE_ABANDON_COOLDOWN_MSEC if abandoned else STONE_AGE_RETRY_COOLDOWN_MSEC)
+	structured_log.emit({
+		"event": "goal_abandoned" if abandoned else "step_failed",
+		"goal": _stone_age_goal_name(),
+		"stage": stage,
+		"reason": "no_actionable_step",
+		"failures": failures,
+		"retry_after_msec": _stone_age_goal_state["retry_after_msec"],
+		"world_id": world_id,
+		"at_msec": now_msec,
+	})
 
 
 func _on_decision_rejected(decision: Dictionary, reason: String) -> void:
@@ -4252,6 +4304,7 @@ func _complete_build_project(project_id: String, now_msec: int) -> void:
 
 
 func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
+	_clear_aborted_movement_transition_if_needed(decision, reason)
 	if bool(decision.get("descent_transition", false)) and reason not in ["movement_step"]:
 		_descent_planner.cancel_intended_transition()
 	var target_id := str(decision.get("target_id", ""))
@@ -4265,11 +4318,37 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 
 
 func _on_executor_action_failed(decision: Dictionary, reason: String) -> void:
+	_clear_aborted_movement_transition_if_needed(decision, reason)
 	if bool(decision.get("descent_transition", false)):
 		_descent_planner.cancel_intended_transition()
 	_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
 	_achievement_goal_note_failure(decision, reason, Time.get_ticks_msec())
 	_record_action_history("failed", decision, reason)
+
+
+func _clear_aborted_movement_transition_if_needed(decision: Dictionary, reason: String) -> void:
+	var action := str(decision.get("action", ""))
+	if action not in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_MOVE_TO, Contract.ACTION_FOLLOW, Contract.ACTION_FLEE_FROM, Contract.ACTION_LOOK_AT]:
+		return
+	if reason in ["movement_step", "jump_step", "climb_step", "look_complete", "already_at_target", "movement_done"]:
+		return
+	# A terminal guard, timeout, or cancellation can end an action halfway through
+	# a locally predicted transition. Do not carry its held jump/climb state into
+	# the next target; ordinary physics still resolves the current airborne pose.
+	_active_air_transition.clear()
+	_jump_active = false
+	_jump_velocity = 0.0
+	_jump_ground_y = 0.0
+	_jump_start_x = 0.0
+	_climb_active = false
+	_climb_column = 0
+	_climb_time_left_msec = 0
+	_set_desired_input(false, false, false)
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	if not self_state.is_empty():
+		self_state["climbing"] = false
+		self_state["climb_col"] = -1
+		_world_snapshot["self"] = self_state
 
 
 func _record_action_history(phase: String, decision: Dictionary, reason: String = "") -> void:
@@ -4574,15 +4653,19 @@ func _sync_stone_age_goal(achievements: Dictionary, now_msec: int = -1) -> void:
 			"status": "active",
 			"stage_failures": 0,
 			"stage_attempts": 0,
+			"no_action_failures": 0,
+			"no_action_since_msec": -1,
 			"retry_after_msec": 0,
 			"pending": {},
 		}
 		structured_log.emit({"event": "goal_selected", "goal": goal_id, "stage": "gather_wood", "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
 	if not _stone_age_progression_allowed(mode):
 		_stone_age_goal_state["status"] = "paused"
+		_stone_age_goal_state["no_action_since_msec"] = -1
 		return
 	if community_locked and _stone_age_goal_name() == "stone_age":
 		_stone_age_goal_state["status"] = "paused"
+		_stone_age_goal_state["no_action_since_msec"] = -1
 		return
 	if str(_stone_age_goal_state.get("status", "")) == "completed":
 		return
@@ -4595,6 +4678,7 @@ func _sync_stone_age_goal(achievements: Dictionary, now_msec: int = -1) -> void:
 		structured_log.emit({"event": "goal_resumed", "goal": _stone_age_goal_name(), "stage": str(_stone_age_goal_state.get("stage", "")), "world_id": world_id, "at_msec": now_msec})
 	elif str(_stone_age_goal_state.get("status", "")) == "paused":
 		_stone_age_goal_state["status"] = "active"
+		_stone_age_goal_state["no_action_since_msec"] = -1
 	_stone_age_confirm_pending_if_observed(now_msec)
 	var next_stage := _stone_age_authoritative_stage()
 	var previous_stage := str(_stone_age_goal_state.get("stage", ""))
@@ -4602,12 +4686,16 @@ func _sync_stone_age_goal(achievements: Dictionary, now_msec: int = -1) -> void:
 		_stone_age_goal_state["stage"] = "complete"
 		_stone_age_goal_state["status"] = "completed"
 		_stone_age_goal_state["pending"] = {}
+		_stone_age_goal_state["no_action_since_msec"] = -1
+		_stone_age_goal_state["no_action_failures"] = 0
 		structured_log.emit({"event": "goal_completed", "goal": _stone_age_goal_name(), "world_id": world_id, "at_msec": now_msec})
 		return
 	if next_stage != previous_stage:
 		_stone_age_goal_state["stage"] = next_stage
 		_stone_age_goal_state["stage_failures"] = 0
 		_stone_age_goal_state["stage_attempts"] = 0
+		_stone_age_goal_state["no_action_failures"] = 0
+		_stone_age_goal_state["no_action_since_msec"] = -1
 		_stone_age_goal_state["retry_after_msec"] = 0
 		_stone_age_goal_state["pending"] = {}
 		structured_log.emit({"event": "step_confirmed", "goal": _stone_age_goal_name(), "previous_stage": previous_stage, "stage": next_stage, "world_id": world_id, "at_msec": now_msec})
@@ -4985,6 +5073,8 @@ func _stone_age_note_action_started(decision: Dictionary, now_msec: int) -> void
 	var previous: Dictionary = _stone_age_goal_state.get("pending", {}) if _stone_age_goal_state.get("pending", {}) is Dictionary else {}
 	if str(previous.get("stage", "")) == stage and str(previous.get("target_id", "")) == target_id and not previous.is_empty():
 		return
+	_stone_age_goal_state["no_action_since_msec"] = -1
+	_stone_age_goal_state["no_action_failures"] = 0
 	var pending := {
 		"stage": stage,
 		"action": action,
@@ -5033,6 +5123,8 @@ func _stone_age_confirm_pending_if_observed(now_msec: int) -> void:
 	_stone_age_goal_state["pending"] = {}
 	_stone_age_goal_state["stage_failures"] = 0
 	_stone_age_goal_state["stage_attempts"] = 0
+	_stone_age_goal_state["no_action_failures"] = 0
+	_stone_age_goal_state["no_action_since_msec"] = -1
 	_stone_age_goal_state["retry_after_msec"] = 0
 	if str(_stone_age_goal_state.get("status", "")) in ["cooldown", "abandoned"]:
 		_stone_age_goal_state["status"] = "active"

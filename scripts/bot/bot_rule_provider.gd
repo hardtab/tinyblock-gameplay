@@ -1195,10 +1195,9 @@ func _stone_age_progression_action(observation: Dictionary, legal: PackedStringA
 			var gather_action := _stone_age_gather_wood_action(observation, legal, stage)
 			if not gather_action.is_empty():
 				return gather_action
-			if str(goal.get("goal_id", "stone_age")) == "starter_tooling":
-				var search_action := _starter_tooling_player_search_action(observation, legal, stage)
-				if not search_action.is_empty():
-					return search_action
+			var search_action := _stone_age_player_search_action(observation, legal, stage)
+			if not search_action.is_empty():
+				return search_action
 		"craft_planks":
 			var required := maxi(1, int(goal.get("required_planks", 3)))
 			var plank_output := _craftable_plank_output(recipes, inventory, blocked, required)
@@ -1256,9 +1255,9 @@ func _stone_age_craft_or_gather(observation: Dictionary, legal: PackedStringArra
 	return {}
 
 
-func _starter_tooling_player_search_action(observation: Dictionary, legal: PackedStringArray, stage: String) -> Dictionary:
-	# A fresh-world starter objective may spawn away from trees (for example, on
-	# a stone shelf across water). If no safe wood target is currently visible,
+func _stone_age_player_search_action(observation: Dictionary, legal: PackedStringArray, stage: String) -> Dictionary:
+	# A fresh-world wood objective may spawn away from trees (for example, on a
+	# stone shelf across water). If no safe wood target is currently visible,
 	# approach a live player so their already-loaded surroundings can reveal one.
 	# Once a log enters perception, the normal gather/craft chain above takes over.
 	if Contract.ACTION_MOVE_NEAR_PLAYER not in legal and Contract.ACTION_MOVE_TO not in legal:
