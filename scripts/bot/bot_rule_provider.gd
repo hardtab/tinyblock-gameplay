@@ -2,8 +2,10 @@ class_name BotRuleProvider
 extends BotDecisionProvider
 
 const DigPlanner = preload("res://gameplay/scripts/bot/bot_dig_planner.gd")
+const DescentPlanner = preload("res://gameplay/scripts/bot/bot_descent_planner.gd")
 const BuildPlanner = preload("res://gameplay/scripts/bot/bot_build_planner.gd")
 const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
+const RecipePlanner = preload("res://gameplay/scripts/bot/bot_recipe_planner.gd")
 
 var _rng := RandomNumberGenerator.new()
 var _last_build_msec := -1
@@ -27,6 +29,11 @@ const CREATURE_DANGER_RADIUS := 224.0
 const BUILD_ACTION_COOLDOWN_MSEC := 2_500
 const PLANT_ACTION_COOLDOWN_MSEC := 6_000
 const MAX_CONSECUTIVE_MINING_ACTIONS := 2
+## Keep a small, explicit construction reserve on isolated maps. Floating-island
+## routes remain walkable behind the bot, while these two spare blocks cover a
+## short repair/stair if the destination snapshot changes mid-crossing.
+const FLOATING_ISLANDS_RETURN_BLOCK_RESERVE := 2
+const SKYBLOCK_LAST_SUPPORT_RESERVE := 1
 # Only outputs `_apply_local_craft` can fulfill. Advanced station-gated outputs
 # use the authoritative host craft path instead of optimistic inventory edits.
 const LOCAL_OPTIMISTIC_CRAFTS := [
@@ -42,6 +49,10 @@ const PROGRESSION_CRAFTS := [
 	"stone_axe", "stone_sword", "chest", "crystal_pickaxe",
 	"obsidian_pickaxe", "resonance_pickaxe",
 ]
+## Adventure modes where the survival-tool chain is meaningful. Challenge Run
+## stays a directed course, while Duel is governed by its pinned combat target.
+const TOOL_PROGRESSION_MODES := ["skyblock", "floating_islands", "procedural", "one_block"]
+const MID_TIER_TOOL_OUTPUTS := ["copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "stone_axe", "stone_sword"]
 const WOOD_BLOCK_NAMES := ["wood", "palm_wood", "pine_wood", "weeping_wood"]
 const LEAF_BLOCK_NAMES := ["leaves", "palm_leaves", "pine_needles", "weeping_leaves"]
 const PLANK_OUTPUTS := ["planks", "palm_planks", "pine_planks", "weeping_planks"]
@@ -183,7 +194,7 @@ func decide(observation: Dictionary) -> Dictionary:
 			return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, loot_cache, 1800, 0.9)
 
 	if not bridge_step.is_empty() and Contract.ACTION_PLACE in legal:
-		return Contract.normalize_decision(bridge_step)
+		return _tag_useful_home_placement(Contract.normalize_decision(bridge_step), observation)
 
 	# Equip battle gear before choosing the combat action. Outside PvP, tools are
 	# equipped only when mining or fighting creatures so the bot does not spin
@@ -251,6 +262,43 @@ func decide(observation: Dictionary) -> Dictionary:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_ATTACK_PLAYER, aggressive_target, 550, 0.98)
 		if Contract.ACTION_MOVE_TO in legal:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_MOVE_TO, aggressive_target, 1800, 0.96)
+	# If movement is unavailable because a solid block directly obstructs the
+	# pinned opponent, permit only the DigPlanner's explicit combat-route step.
+	# Do this before the generic PvP WAIT fallback; ordinary resource mining stays
+	# disabled throughout an active duel.
+	if bool(observation.get("pvp_world", false)) and bool(observation.get("duel_started", false)):
+		var combat_dig_step := DigPlanner.next_step(observation)
+		var combat_dig_target: Dictionary = combat_dig_step.get("target", {}) if combat_dig_step.get("target", {}) is Dictionary else {}
+		var combat_dig_action := str(combat_dig_step.get("action", ""))
+		if bool(combat_dig_target.get("combat_route", false)) and combat_dig_action in legal:
+			return Contract.normalize_decision(combat_dig_step)
+	# Keep an active duel or retained retaliation target ahead of every long-term
+	# progression stage, even if its live player entry is temporarily absent.
+	if bool(observation.get("pvp_world", false)) and bool(observation.get("duel_started", false)):
+		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.88)
+	if not aggressive_player_id.is_empty():
+		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.88)
+	# Achievement goals are advisory progression, never a survival or combat
+	# override. One Block is the exception to ordinary progression order because
+	# its authoritative source is renewable and is the world's central resource.
+	var one_block_goal := _open_achievement(observation, "one_block_world")
+	if str(observation.get("world_mode", "")).to_lower() == "one_block" and not one_block_goal.is_empty():
+		var one_block_action := _one_block_achievement_action(observation, legal)
+		if not one_block_action.is_empty():
+			return _tag_achievement_goal(one_block_action, "one_block_world")
+	# Challenge Run is a directed course, not a general survival sandbox. Once
+	# immediate danger and combat have been handled, forward distance outranks
+	# optional recipes, mining and base-building.
+	if str(observation.get("world_mode", "")).to_lower() == "challenge_run":
+		var challenge_action := _mode_achievement_action(observation, legal)
+		if not challenge_action.is_empty():
+			return _tag_achievement_goal(challenge_action, "dont_look_back")
+	var stone_age_action := _stone_age_progression_action(observation, legal)
+	if not stone_age_action.is_empty():
+		return stone_age_action
+	var mode_achievement_action := _mode_achievement_action(observation, legal)
+	if not mode_achievement_action.is_empty():
+		return mode_achievement_action
 	# Functional stations are part of progression, not decoration. Place an owned
 	# workbench/furnace before more gathering, or walk back to a visible station
 	# when the next affordable recipe requires it.
@@ -258,12 +306,19 @@ func decide(observation: Dictionary) -> Dictionary:
 	if not station_action.is_empty():
 		var station_action_name := str(station_action.get("action", ""))
 		if station_action_name in legal:
-			return Contract.normalize_decision(station_action)
+			return _tag_useful_home_placement(Contract.normalize_decision(station_action), observation)
 	var craft_target := _craftable_output(observation)
 	if foraging:
 		var meal_target := _craftable_food_output(observation)
 		if not meal_target.is_empty() and Contract.ACTION_CRAFT in legal:
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_CRAFT, {"id": meal_target}, 700, 0.93)
+	# After Stone Age and the active mode objective, continue through real
+	# mid-tier tool recipes one verified dependency at a time. If a required
+	# resource is not currently reachable, the helper yields to other behaviour
+	# instead of reissuing a failed ingredient target forever.
+	var tool_progression_action := _mid_tier_tool_progression_action(observation, legal)
+	if not tool_progression_action.is_empty():
+		return tool_progression_action
 	if not craft_target.is_empty() and Contract.ACTION_CRAFT in legal:
 		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_CRAFT, {"id": craft_target}, 700, 0.9)
 	# Outside PvP the bot crafts trail boots but never wore them — feet stayed
@@ -316,6 +371,9 @@ func decide(observation: Dictionary) -> Dictionary:
 		if not construction_plant.is_empty() and Contract.ACTION_PLACE in legal:
 			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, construction_plant, 900, 0.84)
 		var construction_target := _build_target(observation)
+		var project_status := _build_project_status_decision(construction_target)
+		if not project_status.is_empty():
+			return project_status
 		if not construction_target.is_empty() and Contract.ACTION_PLACE in legal:
 			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, construction_target, 700, 0.83)
 	# Mining is useful background work, but an endless stream of nearby MINE
@@ -375,8 +433,14 @@ func decide(observation: Dictionary) -> Dictionary:
 	# containers always win first; otherwise the bot can place dirt on top of the
 	# same local mining target and look idle while it repeats PLACE commands.
 	var build_target := _build_target(observation)
+	var build_project_status := _build_project_status_decision(build_target)
+	if not build_project_status.is_empty():
+		return build_project_status
 	if not build_target.is_empty() and Contract.ACTION_PLACE in legal:
-		return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, build_target, 700, 0.61)
+		return _tag_useful_home_placement(
+			_decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, build_target, 700, 0.61),
+			observation,
+		)
 
 	# If none of the currently visible blocks advances progression, walk far
 	# enough to make the host stream/generate another chunk. This is distinct
@@ -816,7 +880,7 @@ func _needed_station_for_affordable_recipe(observation: Dictionary, foraging: bo
 	var inventory := _inventory(observation)
 	var recipes: Array = _as_array(observation.get("recipes", []))
 	var blocked_outputs: Array = _as_array(observation.get("craft_blocked_outputs", []))
-	var wanted_outputs: Array = PROGRESSION_CRAFTS.duplicate()
+	var wanted_outputs: Array = _ordered_progression_crafts(observation)
 	if foraging:
 		wanted_outputs.push_front("prepared_meal")
 	for wanted in wanted_outputs:
@@ -904,16 +968,20 @@ func _craftable_output(observation: Dictionary) -> String:
 	var achievements: Dictionary = observation.get("achievements", {}) if observation.get("achievements", {}) is Dictionary else {}
 	var unlocked: Array = achievements.get("unlocked", []) if achievements.get("unlocked", []) is Array else []
 	var recipes: Array = observation.get("recipes", []) if observation.get("recipes", []) is Array else []
-	for wanted in PROGRESSION_CRAFTS:
+	for wanted in _ordered_progression_crafts(observation):
 		if wanted in blocked_outputs:
 			continue
 		if _progression_output_satisfied(inventory, str(wanted), observation, unlocked):
 			continue
 		if _recipe_available(recipes, inventory, wanted):
 			return wanted
-		# Prefer converting wood into planks when a wooden tool is the next goal.
-		if wanted == "wooden_pickaxe":
-			var plank_output := _craftable_plank_output(recipes, inventory, blocked_outputs)
+		# Same-family planks gate wooden tools, workbenches, and chests. Use the
+		# next unmet recipe's own required stack so a partially filled stack
+		# (1-3 planks) does not deadlock a four-plank workbench behind the
+		# generic fallback, which only ever tops up an empty stack.
+		var required_planks := _unmet_plank_requirement(recipes, inventory, str(wanted))
+		if required_planks > 0:
+			var plank_output := _craftable_plank_output(recipes, inventory, blocked_outputs, required_planks)
 			if not plank_output.is_empty():
 				return plank_output
 	# Do not repeatedly crush the same raw material merely because a server
@@ -958,13 +1026,673 @@ func _owns_any(inventory: Dictionary, names: Array) -> bool:
 	return false
 
 
-func _craftable_plank_output(recipes: Array, inventory: Dictionary, blocked_outputs: Array) -> String:
+func _ordered_progression_crafts(observation: Dictionary) -> Array:
+	var wanted_outputs: Array = PROGRESSION_CRAFTS.duplicate()
+	# When Stone Age is still open, don't let optional footwear get ahead of its
+	# concrete prerequisite chain. Recipes and station checks still determine
+	# whether the stone pickaxe can actually be made now.
+	if not _open_achievement(observation, "stone_age").is_empty():
+		wanted_outputs.erase("stone_pickaxe")
+		wanted_outputs.erase("trail_boots")
+		var workbench_index := wanted_outputs.find("workbench")
+		wanted_outputs.insert(workbench_index + 1 if workbench_index >= 0 else 1, "stone_pickaxe")
+		wanted_outputs.append("trail_boots")
+	return wanted_outputs
+
+
+func _stone_age_progression_action(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
+	var goal: Dictionary = observation.get("stone_age_goal", {}) if observation.get("stone_age_goal", {}) is Dictionary else {}
+	if goal.is_empty() or str(goal.get("status", "")) != "active":
+		return {}
+	var stage := str(goal.get("stage", ""))
+	var pending: Dictionary = goal.get("pending", {}) if goal.get("pending", {}) is Dictionary else {}
+	# A craft/equip/place command is still awaiting the host. Don't repeat it off
+	# an optimistic local view; the session advances this step on authoritative
+	# inventory/equipment/terrain evidence, or applies a bounded timeout.
+	if not pending.is_empty() and str(pending.get("action", "")) in [Contract.ACTION_CRAFT, Contract.ACTION_EQUIP, Contract.ACTION_PLACE]:
+		if Contract.ACTION_WAIT in legal:
+			return _stone_age_decision(stage, Contract.ACTION_WAIT, {}, 700, 0.75)
+		return {}
+	var inventory := _inventory(observation)
+	var recipes: Array = _as_array(observation.get("recipes", []))
+	var blocked: Array = _as_array(observation.get("craft_blocked_outputs", []))
+	match stage:
+		"gather_wood":
+			return _stone_age_gather_wood_action(observation, legal, stage)
+		"craft_planks":
+			var required := maxi(1, int(goal.get("required_planks", 3)))
+			var plank_output := _craftable_plank_output(recipes, inventory, blocked, required)
+			if not plank_output.is_empty() and Contract.ACTION_CRAFT in legal:
+				return _stone_age_decision(stage, Contract.ACTION_CRAFT, {"id": plank_output}, 700, 0.94)
+			if not _stone_age_gather_wood_action(observation, legal, stage).is_empty():
+				return _stone_age_gather_wood_action(observation, legal, stage)
+		"craft_wooden_pickaxe":
+			return _stone_age_craft_or_gather(observation, legal, stage, "wooden_pickaxe", 3)
+		"craft_workbench":
+			return _stone_age_craft_or_gather(observation, legal, stage, "workbench", 4)
+		"place_workbench":
+			if int(inventory.get("workbench", 0)) > 0 and Contract.ACTION_PLACE in legal:
+				var station_target := _station_place_target(observation, "workbench")
+				if not station_target.is_empty():
+					return _stone_age_decision(stage, Contract.ACTION_PLACE, station_target, 900, 0.96)
+		"equip_cobblestone_tool":
+			var resource_tool := _mining_tool_for_target(observation, {"harvest_tier": 1})
+			if not resource_tool.is_empty() and Contract.ACTION_EQUIP in legal:
+				return _stone_age_decision(stage, Contract.ACTION_EQUIP, {"id": resource_tool}, 350, 0.96)
+		"mine_cobblestone":
+			var hand := str((observation.get("equipment_slots", {}) as Dictionary).get("hand", "")) if observation.get("equipment_slots", {}) is Dictionary else ""
+			if _tool_harvest_tier(hand) < 1:
+				var available_tool := _mining_tool_for_target(observation, {"harvest_tier": 1})
+				if not available_tool.is_empty() and Contract.ACTION_EQUIP in legal:
+					return _stone_age_decision(stage, Contract.ACTION_EQUIP, {"id": available_tool}, 350, 0.96)
+				return {}
+			var cobble := _stone_age_cobblestone_target(observation)
+			if not cobble.is_empty():
+				if bool(cobble.get("reachable", false)) and Contract.ACTION_MINE in legal and _has_required_mining_tier(observation, cobble) and Perception.mine_target_is_safe(observation, cobble):
+					return _stone_age_decision(stage, Contract.ACTION_MINE, cobble, 2200, 0.92)
+				if Contract.ACTION_MOVE_TO in legal and Perception.mine_target_is_safe(observation, cobble):
+					return _stone_age_decision(stage, Contract.ACTION_MOVE_TO, cobble, 2200, 0.8)
+		"craft_stone_pickaxe":
+			return _stone_age_craft_or_gather(observation, legal, stage, "stone_pickaxe", 2)
+		"equip_stone_pickaxe":
+			if int(inventory.get("stone_pickaxe", 0)) > 0 and str((observation.get("equipment_slots", {}) as Dictionary).get("hand", "")) != "stone_pickaxe" and Contract.ACTION_EQUIP in legal:
+				return _stone_age_decision(stage, Contract.ACTION_EQUIP, {"id": "stone_pickaxe"}, 350, 0.98)
+	return {}
+
+
+func _stone_age_craft_or_gather(observation: Dictionary, legal: PackedStringArray, stage: String, output: String, plank_requirement: int) -> Dictionary:
+	var plan := RecipePlanner.plan(output, 1, _inventory(observation), _as_array(observation.get("recipes", [])))
+	var planned_step := _stone_age_recipe_step_action(plan, observation, legal, stage)
+	if not planned_step.is_empty():
+		return planned_step
+	# Preserve a fallback for partially counted, alternate-family planks. The
+	# dependency planner handles the recursive recipe path; this covers legacy
+	# snapshots whose recipe catalog omits a normalized output alias.
+	var plank_output := _craftable_plank_output(_as_array(observation.get("recipes", [])), _inventory(observation), _as_array(observation.get("craft_blocked_outputs", [])), plank_requirement)
+	if Contract.ACTION_CRAFT in legal and not plank_output.is_empty():
+		return _stone_age_decision(stage, Contract.ACTION_CRAFT, {"id": plank_output}, 700, 0.94)
+	if output in ["wooden_pickaxe", "workbench"]:
+		return _stone_age_gather_wood_action(observation, legal, stage)
+	return {}
+
+
+func _stone_age_recipe_step_action(plan: Dictionary, observation: Dictionary, legal: PackedStringArray, stage: String) -> Dictionary:
+	var status := str(plan.get("status", ""))
+	match status:
+		"craft":
+			var output := str(plan.get("output", ""))
+			if output.is_empty() or output in _as_array(observation.get("craft_blocked_outputs", [])):
+				return {}
+			var now_msec := int(observation.get("observed_at_msec", 0))
+			if (
+				Contract.ACTION_CRAFT in legal
+				and str(observation.get("craft_pending_output", "")).is_empty()
+				and int(observation.get("craft_retry_after_msec", -1)) <= now_msec
+			):
+				return _stone_age_decision(stage, Contract.ACTION_CRAFT, {"id": output}, 700, 0.95)
+		"gather":
+			var item := str(plan.get("item", ""))
+			if item.is_empty():
+				return {}
+			var gather_action := _achievement_resource_action(observation, legal, {}, [item])
+			if not gather_action.is_empty():
+				gather_action["stone_age_stage"] = stage
+				return Contract.normalize_decision(gather_action)
+		"need_station":
+			# Station placement/routing is handled by the shared station planner.
+			# Do not turn missing workbench/furnace evidence into a craft command.
+			return {}
+	return {}
+
+
+func _stone_age_gather_wood_action(observation: Dictionary, legal: PackedStringArray, stage: String) -> Dictionary:
+	var best := {}
+	var best_distance := INF
+	for raw_resource in _as_array(observation.get("visible_resources", [])):
+		if not raw_resource is Dictionary:
+			continue
+		var resource := raw_resource as Dictionary
+		var block_name := str(resource.get("block_name", "")).to_lower()
+		if not _is_wood_log_name(block_name) or not Perception.mine_target_is_safe(observation, resource):
+			continue
+		var distance := float(resource.get("distance", 9999.0))
+		if distance < best_distance:
+			best = resource
+			best_distance = distance
+	if best.is_empty():
+		return {}
+	if bool(best.get("reachable", false)) and Contract.ACTION_MINE in legal and _has_required_mining_tier(observation, best):
+		return _stone_age_decision(stage, Contract.ACTION_MINE, best, 1800, 0.91)
+	if Contract.ACTION_MOVE_TO in legal:
+		return _stone_age_decision(stage, Contract.ACTION_MOVE_TO, best, 2200, 0.79)
+	return {}
+
+
+func _stone_age_cobblestone_target(observation: Dictionary) -> Dictionary:
+	var best := {}
+	var best_distance := INF
+	for raw_resource in _as_array(observation.get("visible_resources", [])):
+		if not raw_resource is Dictionary:
+			continue
+		var resource := raw_resource as Dictionary
+		if str(resource.get("block_name", "")).to_lower() != "cobblestone":
+			continue
+		if int(resource.get("harvest_tier", 1)) > 1 or not Perception.mine_target_is_safe(observation, resource):
+			continue
+		var distance := float(resource.get("distance", 9999.0))
+		if distance < best_distance:
+			best = resource
+			best_distance = distance
+	return best
+
+
+func _stone_age_decision(stage: String, action: String, target: Dictionary, commit_for_ms: int, confidence: float) -> Dictionary:
+	var decision := _decision(Contract.GOAL_ACHIEVEMENT, action, target, commit_for_ms, confidence)
+	decision["stone_age_stage"] = stage
+	return Contract.normalize_decision(decision)
+
+
+func _open_achievement(observation: Dictionary, achievement_id: String) -> Dictionary:
+	if achievement_id.is_empty() or _achievement_progression_locked(observation):
+		return {}
+	var achievements: Dictionary = observation.get("achievements", {}) if observation.get("achievements", {}) is Dictionary else {}
+	var unlocked: Array = achievements.get("unlocked", []) if achievements.get("unlocked", []) is Array else []
+	if achievement_id in unlocked:
+		return {}
+	var open: Array = achievements.get("open", []) if achievements.get("open", []) is Array else []
+	var goal_states: Dictionary = observation.get("achievement_goal_states", {}) if observation.get("achievement_goal_states", {}) is Dictionary else {}
+	var goal_state: Dictionary = goal_states.get(achievement_id, {}) if goal_states.get(achievement_id, {}) is Dictionary else {}
+	var goal_status := str(goal_state.get("status", "active"))
+	if goal_status in ["completed", "paused", "inactive"]:
+		return {}
+	if goal_status in ["cooldown", "abandoned"] and int(observation.get("observed_at_msec", 0)) < int(goal_state.get("retry_after_msec", 0)):
+		return {}
+	for raw_goal in open:
+		if not raw_goal is Dictionary:
+			continue
+		var goal := raw_goal as Dictionary
+		if str(goal.get("id", "")) != achievement_id or bool(goal.get("locked", false)):
+			continue
+		if int(goal.get("progress", 0)) >= maxi(1, int(goal.get("target", 1))):
+			return {}
+		return goal
+	return {}
+
+
+func _achievement_progression_locked(observation: Dictionary) -> bool:
+	var achievements: Dictionary = observation.get("achievements", {}) if observation.get("achievements", {}) is Dictionary else {}
+	return bool(observation.get("community_locked", false)) or bool(achievements.get("community_locked", false))
+
+
+func _one_block_achievement_action(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
+	var source: Dictionary = observation.get("regenerating_block", {}) if observation.get("regenerating_block", {}) is Dictionary else {}
+	if source.is_empty() or not bool(source.get("regenerates_on_mine", false)) or not bool(source.get("preserves_support_on_mine", false)):
+		return {}
+	# A renewable source should remain available, not monopolize every decision
+	# until all 750 blocks are mined. The ordinary rotation gives craft/build/
+	# exploration work a turn after a short mining burst.
+	if _consecutive_action_streak(observation, Contract.ACTION_MINE) >= MAX_CONSECUTIVE_MINING_ACTIONS:
+		return {}
+	var source_resource := _visible_resource_at(source, _as_array(observation.get("visible_resources", [])))
+	if source_resource.is_empty():
+		# Never invent a MINE target from the mode marker alone. Move to the
+		# authoritative source coordinate and wait for a fresh resource snapshot.
+		if Contract.ACTION_MOVE_TO in legal:
+			return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, source, 1800, 0.86)
+		return {}
+	if not bool(source_resource.get("regenerates_on_mine", false)) or not bool(source_resource.get("preserves_support_on_mine", false)):
+		return {}
+	if not Perception.mine_target_is_safe(observation, source_resource):
+		return {}
+	var mining_tool := _mining_tool_for_target(observation, source_resource)
+	if not mining_tool.is_empty() and Contract.ACTION_EQUIP in legal:
+		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_EQUIP, {"id": mining_tool}, 350, 0.94)
+	if not _has_required_mining_tier(observation, source_resource):
+		return {}
+	if bool(source_resource.get("reachable", false)) and _has_required_mining_tier(observation, source_resource) and Contract.ACTION_MINE in legal:
+		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MINE, source_resource, 2200, 0.91)
+	if Contract.ACTION_MOVE_TO in legal:
+		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, source_resource, 1800, 0.82)
+	return {}
+
+
+func _visible_resource_at(source: Dictionary, resources: Array) -> Dictionary:
+	var source_id := str(source.get("id", ""))
+	var source_x := int(source.get("x", 2147483647))
+	var source_y := int(source.get("y", 2147483647))
+	for raw_resource in resources:
+		if not raw_resource is Dictionary:
+			continue
+		var resource := raw_resource as Dictionary
+		if (not source_id.is_empty() and str(resource.get("id", "")) == source_id) or (
+			int(resource.get("x", 2147483647)) == source_x and int(resource.get("y", 2147483647)) == source_y
+		):
+			return resource
+	return {}
+
+
+func _mode_achievement_action(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
+	var mode := str(observation.get("world_mode", "")).to_lower()
+	if mode == "challenge_run":
+		var challenge_goal := _open_achievement(observation, "dont_look_back")
+		if not challenge_goal.is_empty():
+			var challenge_action := _challenge_distance_action(observation, legal, challenge_goal)
+			if not challenge_action.is_empty():
+				return challenge_action
+	elif mode == "procedural":
+		var jeweler_goal := _open_achievement(observation, "jeweler")
+		if not jeweler_goal.is_empty():
+			var jewel_action := _achievement_resource_action(observation, legal, jeweler_goal, jeweler_goal.get("missing", []))
+			if not jewel_action.is_empty():
+				return _tag_achievement_goal(jewel_action, "jeweler")
+		# The World Underfoot is a genuine Procedural exploration objective. Do
+		# not invent biome destinations: BotSession exposes only host-generated,
+		# locally verified safe surface cells with a complete physics route.
+		var world_underfoot_goal := _open_achievement(observation, "world_underfoot")
+		if not world_underfoot_goal.is_empty():
+			var biome_action := _world_underfoot_action(observation, legal, world_underfoot_goal)
+			if not biome_action.is_empty():
+				return _tag_achievement_goal(biome_action, "world_underfoot")
+		# Resonance Master is a real late-game objective. Expand its live recipe
+		# graph one verified step at a time instead of waiting until every input is
+		# already in the inventory. This also keeps alternate material recipes and
+		# station requirements data-driven.
+		var resonance_goal := _open_achievement(observation, "resonance_master")
+		if not resonance_goal.is_empty():
+			var resonance_plan := RecipePlanner.plan(
+				"resonance_pickaxe",
+				1,
+				_inventory(observation),
+				_as_array(observation.get("recipes", [])),
+			)
+			var resonance_action := _achievement_recipe_plan_action(resonance_plan, observation, legal)
+			if not resonance_action.is_empty():
+				return _tag_achievement_goal(resonance_action, "resonance_master")
+		var deep_goal := _open_achievement(observation, "below_surface")
+		if not deep_goal.is_empty():
+			var depth_action := _procedural_depth_action(observation, legal, deep_goal)
+			if not depth_action.is_empty():
+				return _tag_achievement_goal(depth_action, "below_surface")
+	return {}
+
+
+func _tag_achievement_goal(decision: Dictionary, achievement_id: String) -> Dictionary:
+	if decision.is_empty():
+		return decision
+	var tagged := decision.duplicate(true)
+	tagged["achievement_goal_id"] = achievement_id
+	return Contract.normalize_decision(tagged)
+
+
+func _tag_useful_home_placement(decision: Dictionary, observation: Dictionary) -> Dictionary:
+	if decision.is_empty() or str(decision.get("action", "")) != Contract.ACTION_PLACE:
+		return decision
+	if bool(observation.get("pvp_world", false)) or str(observation.get("world_mode", "")).to_lower() in ["duel", "pvp"]:
+		return decision
+	if not str(observation.get("aggressive_player_id", "")).is_empty():
+		return decision
+	var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+	var reason := str(target.get("reason", ""))
+	var has_route_target := not _as_array(target.get("route_target", [])).is_empty()
+	var project: Dictionary = target.get("build_project", {}) if target.get("build_project", {}) is Dictionary else {}
+	var useful_placement := (
+		(not project.is_empty() and has_route_target)
+		or (reason == "build_stair" and has_route_target)
+		or reason == "place_station"
+		or (reason == "expand_platform" and str(observation.get("world_mode", "")).to_lower() == "one_block")
+	)
+	if not useful_placement or _open_achievement(observation, "here_will_be_home").is_empty():
+		return decision
+	return _tag_achievement_goal(decision, "here_will_be_home")
+
+
+func _world_underfoot_action(observation: Dictionary, legal: PackedStringArray, goal: Dictionary) -> Dictionary:
+	if Contract.ACTION_MOVE_TO not in legal:
+		return {}
+	var raw_missing: Variant = goal.get("missing", [])
+	if not raw_missing is Array:
+		return {}
+	var missing_biomes: Dictionary = {}
+	for raw_biome in raw_missing:
+		var biome_id := str(raw_biome).strip_edges().to_lower()
+		if not biome_id.is_empty():
+			missing_biomes[biome_id] = true
+	if missing_biomes.is_empty():
+		return {}
+	var best: Dictionary = {}
+	var best_steps := 2147483647
+	var best_distance := INF
+	for raw_waypoint in _as_array(observation.get("biome_waypoints", [])):
+		if not raw_waypoint is Dictionary:
+			continue
+		var waypoint := raw_waypoint as Dictionary
+		var biome_id := str(waypoint.get("biome_id", "")).strip_edges().to_lower()
+		if not missing_biomes.has(biome_id) or not bool(waypoint.get("reachable", false)):
+			continue
+		if not waypoint.has("position") or not waypoint.get("position") is Array:
+			continue
+		var route_steps := maxi(0, int(waypoint.get("route_steps", 2147483647)))
+		var distance := float(waypoint.get("distance", INF))
+		if route_steps > best_steps or (route_steps == best_steps and distance >= best_distance):
+			continue
+		best = waypoint.duplicate(true)
+		best_steps = route_steps
+		best_distance = distance
+	if best.is_empty():
+		return {}
+	best["id"] = "biome:%s" % str(best.get("biome_id", ""))
+	return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, best, 2400, 0.82)
+
+
+func _achievement_recipe_plan_action(plan: Dictionary, observation: Dictionary, legal: PackedStringArray, station_depth: int = 0) -> Dictionary:
+	match str(plan.get("status", "")):
+		"craft":
+			var output := str(plan.get("output", ""))
+			var now_msec := int(observation.get("observed_at_msec", 0))
+			if (
+				output.is_empty()
+				or output in _as_array(observation.get("craft_blocked_outputs", []))
+				or Contract.ACTION_CRAFT not in legal
+				or not str(observation.get("craft_pending_output", "")).is_empty()
+				or int(observation.get("craft_retry_after_msec", -1)) > now_msec
+			):
+				return {}
+			return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_CRAFT, {"id": output}, 700, 0.94)
+		"gather":
+			var item := str(plan.get("item", ""))
+			if item.is_empty():
+				return {}
+			return _achievement_resource_action(observation, legal, {}, [item])
+		"need_station":
+			return _required_station_action(str(plan.get("station", "")), observation, legal, station_depth)
+	return {}
+
+
+func _mid_tier_tool_progression_action(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
+	var mode := str(observation.get("world_mode", "")).to_lower()
+	if (
+		mode not in TOOL_PROGRESSION_MODES
+		or bool(observation.get("pvp_world", false))
+		or _achievement_progression_locked(observation)
+	):
+		return {}
+	var inventory := _inventory(observation)
+	# This is a post-Stone-Age chain, not an alternate way to bypass its first
+	# useful pickaxe. The owned tool is authoritative even if achievement state
+	# is delivered a tick later.
+	var achievements: Dictionary = observation.get("achievements", {}) if observation.get("achievements", {}) is Dictionary else {}
+	var unlocked: Array = achievements.get("unlocked", []) if achievements.get("unlocked", []) is Array else []
+	if int(inventory.get("stone_pickaxe", 0)) <= 0 and "stone_age" not in unlocked:
+		return {}
+	# An open Stone Age goal remains first even when its next resource is absent;
+	# do not jump ahead to a later tier while the foundational achievement is
+	# still being worked on or cooling down.
+	if not _open_achievement(observation, "stone_age").is_empty():
+		return {}
+	var recipes: Array = _as_array(observation.get("recipes", []))
+	if recipes.is_empty():
+		return {}
+	for output in MID_TIER_TOOL_OUTPUTS:
+		if int(inventory.get(output, 0)) > 0 or output in _as_array(observation.get("craft_blocked_outputs", [])):
+			continue
+		var plan := RecipePlanner.plan(str(output), 1, inventory, recipes)
+		if str(plan.get("status", "")) in ["unresolved", "already_owned"]:
+			continue
+		var action := _achievement_recipe_plan_action(plan, observation, legal)
+		if not action.is_empty():
+			return action
+	return {}
+
+
+func _required_station_action(station_name: String, observation: Dictionary, legal: PackedStringArray, depth: int) -> Dictionary:
+	if station_name not in STATION_NAMES or depth >= STATION_NAMES.size():
+		return {}
+	if _station_is_available(observation, station_name):
+		return {}
+	var inventory := _inventory(observation)
+	# Reuse/pursue an already placed station before crafting a duplicate. If it is
+	# not currently near enough for the recipe, route toward the observed station.
+	var existing_station := _nearest_station_target(observation, station_name)
+	if not existing_station.is_empty() and Contract.ACTION_MOVE_TO in legal:
+		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, existing_station, 1800, 0.9)
+	if int(inventory.get(station_name, 0)) > 0:
+		var placement := _station_place_target(observation, station_name)
+		if not placement.is_empty() and Contract.ACTION_PLACE in legal:
+			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, placement, 900, 0.97)
+		return {}
+	# A missing furnace/workbench is itself a recipe goal. Follow its actual
+	# prerequisites (e.g. gather four cobblestone -> craft furnace -> place) and
+	# let an unavailable leaf resource fall through to the ordinary policy.
+	var station_plan := RecipePlanner.plan(station_name, 1, inventory, _as_array(observation.get("recipes", [])))
+	var station_status := str(station_plan.get("status", ""))
+	if station_status in ["craft", "gather"]:
+		return _achievement_recipe_plan_action(station_plan, observation, legal, depth + 1)
+	if station_status == "need_station":
+		var parent_station := str(station_plan.get("station", ""))
+		if parent_station == station_name:
+			return {}
+		return _required_station_action(parent_station, observation, legal, depth + 1)
+	return {}
+
+
+func _achievement_resource_action(observation: Dictionary, legal: PackedStringArray, _goal: Dictionary, raw_names: Variant) -> Dictionary:
+	if not raw_names is Array:
+		return {}
+	var wanted_names: Array[String] = []
+	for raw_name in raw_names:
+		var normalized := _normalized_resource_name(str(raw_name))
+		if not normalized.is_empty():
+			wanted_names.append(normalized)
+	var best: Dictionary = {}
+	var best_distance := INF
+	for raw_resource in _as_array(observation.get("visible_resources", [])):
+		if not raw_resource is Dictionary:
+			continue
+		var resource := raw_resource as Dictionary
+		if _normalized_resource_name(str(resource.get("block_name", resource.get("content_id", "")))) not in wanted_names:
+			continue
+		if not Perception.mine_target_is_safe(observation, resource):
+			continue
+		var distance := float(resource.get("distance", 9999.0))
+		if distance >= best_distance:
+			continue
+		best = resource
+		best_distance = distance
+	if best.is_empty():
+		return {}
+	var mining_tool := _mining_tool_for_target(observation, best)
+	if not mining_tool.is_empty() and Contract.ACTION_EQUIP in legal:
+		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_EQUIP, {"id": mining_tool}, 350, 0.94)
+	# A visible ore node is not progress unless the currently held tool can
+	# harvest it, or a suitable tool exists to equip above.
+	if not _has_required_mining_tier(observation, best):
+		return {}
+	if bool(best.get("reachable", false)) and _has_required_mining_tier(observation, best) and Contract.ACTION_MINE in legal:
+		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MINE, best, 2200, 0.9)
+	if Contract.ACTION_MOVE_TO in legal:
+		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, best, 1800, 0.8)
+	return {}
+
+
+func _normalized_resource_name(raw_name: String) -> String:
+	var normalized := raw_name.to_lower().strip_edges()
+	if normalized.begins_with("core."):
+		normalized = normalized.substr(5)
+	var last_separator := normalized.rfind(".")
+	if last_separator >= 0:
+		normalized = normalized.substr(last_separator + 1)
+	return normalized
+
+
+func _procedural_depth_action(observation: Dictionary, legal: PackedStringArray, goal: Dictionary) -> Dictionary:
+	const RESONANT_DEPTH_TILE := 75
+	if str(observation.get("world_mode", "")).to_lower() != "procedural" or bool(observation.get("pvp_world", false)):
+		return {}
+	var descent_plan: Dictionary = observation.get("descent_plan", {}) if observation.get("descent_plan", {}) is Dictionary else {}
+	if not bool(observation.get("verified_safe_exit", false)) or not bool(descent_plan.get("eligible", false)) or not bool(descent_plan.get("verified_safe_exit", false)):
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var current_depth := floori(float(self_state.get("y", 0.0)) / 32.0)
+	if current_depth >= RESONANT_DEPTH_TILE or int(goal.get("progress", 0)) >= int(goal.get("target", RESONANT_DEPTH_TILE)):
+		return {}
+	match str(descent_plan.get("phase", "stop")):
+		"clear":
+			var clear_target := _descent_clear_target(observation, descent_plan)
+			if clear_target.is_empty() or not Perception.mine_target_is_safe(observation, clear_target):
+				return {}
+			var mining_tool := _mining_tool_for_target(observation, clear_target)
+			if not mining_tool.is_empty() and Contract.ACTION_EQUIP in legal:
+				return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_EQUIP, {"id": mining_tool}, 350, 0.91)
+			if not _has_required_mining_tier(observation, clear_target) or Contract.ACTION_MINE not in legal:
+				return {}
+			var clear_decision := _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MINE, clear_target, 1_400, 0.86)
+			clear_decision["descent_clear"] = true
+			return Contract.normalize_decision(clear_decision)
+		"move":
+			if Contract.ACTION_MOVE_TO not in legal:
+				return {}
+			var from_support: Array = descent_plan.get("current_support", []) if descent_plan.get("current_support", []) is Array else []
+			var to_support: Array = descent_plan.get("next_support", []) if descent_plan.get("next_support", []) is Array else []
+			if from_support.size() < 2 or to_support.size() < 2:
+				return {}
+			var next_x := int(to_support[0])
+			var next_y := int(to_support[1])
+			var width := float(self_state.get("w", 20.0))
+			var height := float(self_state.get("h", 28.0))
+			var target := {
+				"id": "descent-support:%d:%d" % [next_x, next_y],
+				"position": [(float(next_x) + 0.5) * 32.0 - width * 0.5, float(next_y) * 32.0 - height],
+				"descent_transition": true,
+				"descent_from_support": from_support.duplicate(true),
+				"descent_to_support": to_support.duplicate(true),
+			}
+			var move_decision := _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, target, 1_800, 0.84)
+			move_decision["descent_transition"] = true
+			move_decision["descent_from_support"] = from_support.duplicate(true)
+			move_decision["descent_to_support"] = to_support.duplicate(true)
+			return Contract.normalize_decision(move_decision)
+	return {}
+
+
+func _descent_clear_target(observation: Dictionary, descent_plan: Dictionary) -> Dictionary:
+	var raw_tile: Variant = descent_plan.get("clear_tile", [])
+	if not raw_tile is Array or (raw_tile as Array).size() < 2:
+		return {}
+	var tile_x := int((raw_tile as Array)[0])
+	var tile_y := int((raw_tile as Array)[1])
+	for raw_terrain in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_terrain is Dictionary:
+			continue
+		var terrain := raw_terrain as Dictionary
+		if int(terrain.get("x", 2147483647)) != tile_x or int(terrain.get("y", 2147483647)) != tile_y:
+			continue
+		var block_name := str(terrain.get("block_name", terrain.get("name", "")))
+		if block_name.is_empty() or block_name.to_lower() in ["air", "core.air"] or not bool(terrain.get("solid", true)):
+			return {}
+		var target := terrain.duplicate(true)
+		target["id"] = "tile:%d:%d" % [tile_x, tile_y]
+		target["x"] = tile_x
+		target["y"] = tile_y
+		target["position"] = [(float(tile_x) + 0.5) * 32.0, (float(tile_y) + 0.5) * 32.0]
+		target["block_name"] = block_name
+		target["reachable"] = true
+		target["dig_route"] = true
+		return target
+	return {}
+
+
+func _challenge_distance_action(observation: Dictionary, legal: PackedStringArray, goal: Dictionary) -> Dictionary:
+	const TILE := 32.0
+	var distance_goal := maxi(1, int(goal.get("target", 500)))
+	var recorded_distance := maxi(int(goal.get("progress", 0)), int(observation.get("challenge_best_distance", 0)))
+	if recorded_distance >= distance_goal:
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if self_state.is_empty():
+		return {}
+	var origin := Contract.target_position(self_state)
+	var current_tile_x := floori((origin.x + float(self_state.get("w", 20.0)) * 0.5) / TILE)
+	var support_tile_y := floori((origin.y + float(self_state.get("h", 28.0))) / TILE)
+	# challenge chunks are authored/generate only in the positive-X direction.
+	# Ask the shared connected-build planner for a one-step supported bridge or
+	# stair toward a short forward waypoint before issuing ordinary physics MOVE_TO.
+	var route_observation := observation.duplicate(true)
+	# The Challenge Run waypoint is a short-lived, synthetic destination. It must
+	# not take over a persistent bridge/stair project aimed at an observed player
+	# or resource; keep this one-step route projectless and hide unrelated players
+	# from the route selector for this one planning call.
+	route_observation["build_project_state"] = {}
+	route_observation["players"] = []
+	route_observation["visible_resources"] = [{
+		"id": "achievement:challenge:forward",
+		"x": current_tile_x + 6,
+		"y": support_tile_y,
+		"reachable": false,
+	}]
+	if Contract.ACTION_PLACE in legal:
+		var build_step := _build_target(route_observation)
+		var project_status := _build_project_status_decision(build_step)
+		if not project_status.is_empty():
+			return project_status
+		if not build_step.is_empty():
+			return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_PLACE, build_step, 900, 0.86)
+	if Contract.ACTION_MOVE_TO not in legal:
+		return {}
+	return _decision(
+		Contract.GOAL_ACHIEVEMENT,
+		Contract.ACTION_MOVE_TO,
+		{
+			"id": "achievement:challenge:forward:%d" % distance_goal,
+			"position": [origin.x + TILE * 6.0, origin.y],
+		},
+		2400,
+		0.82,
+	)
+
+
+func _unmet_plank_requirement(recipes: Array, inventory: Dictionary, wanted: String) -> int:
+	# Find how many same-family planks the next unmet recipe still needs. The
+	# family with the largest existing stack wins so the bot keeps topping up a
+	# stack it already started instead of mixing tree families.
+	if wanted.is_empty():
+		return 0
+	var best_required := 0
+	var best_existing := -1
+	for raw_recipe in recipes:
+		if not raw_recipe is Dictionary:
+			continue
+		var recipe := raw_recipe as Dictionary
+		var output: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
+		if not output.has(wanted):
+			continue
+		var inputs: Dictionary = recipe.get("in", {}) if recipe.get("in", {}) is Dictionary else {}
+		for raw_name in inputs:
+			var plank_name := str(raw_name)
+			if plank_name not in PLANK_OUTPUTS:
+				continue
+			var required := int(inputs[raw_name])
+			var existing := int(inventory.get(plank_name, 0))
+			if existing >= required:
+				continue
+			if existing > best_existing:
+				best_existing = existing
+				best_required = required
+	# The starter pickaxe recipe can be resolved host-side before the
+	# observation lists it; keep the historical three-plank tool default.
+	if best_required == 0 and wanted == "wooden_pickaxe":
+		return 3
+	return best_required
+
+
+func _craftable_plank_output(recipes: Array, inventory: Dictionary, blocked_outputs: Array, required_planks: int = 3) -> String:
 	# Wooden tools need three planks of the *same* tree family. Counting mixed
 	# palm/pine/oak stacks as "enough" left the bot stuck with 1+1+1 forever.
-	if _max_named_stack(inventory, PLANK_OUTPUTS) >= 3:
+	if _max_named_stack(inventory, PLANK_OUTPUTS) >= required_planks:
 		return ""
 	if _count_named(inventory, WOOD_BLOCK_NAMES) <= 0:
 		return ""
+	var best_output := ""
+	var best_existing := -1
 	for raw_recipe in recipes:
 		if not raw_recipe is Dictionary:
 			continue
@@ -974,9 +1702,15 @@ func _craftable_plank_output(recipes: Array, inventory: Dictionary, blocked_outp
 			var name := str(raw_name)
 			if name not in PLANK_OUTPUTS or name in blocked_outputs:
 				continue
-			if _recipe_inputs_available(recipe, inventory):
-				return name
-	return ""
+			if not _recipe_inputs_available(recipe, inventory):
+				continue
+			# Prefer the family the bot already stocked so the tool/workbench
+			# recipe keeps receiving one same-family stack.
+			var existing := int(inventory.get(name, 0))
+			if existing > best_existing:
+				best_existing = existing
+				best_output = name
+	return best_output
 
 
 func _craftable_food_output(observation: Dictionary) -> String:
@@ -1526,12 +2260,49 @@ func _aggressive_player_target(observation: Dictionary) -> Dictionary:
 
 func _build_target(observation: Dictionary) -> Dictionary:
 	var now_msec := int(observation.get("observed_at_msec", 0))
-	if _last_build_msec >= 0 and now_msec - _last_build_msec < BUILD_ACTION_COOLDOWN_MSEC:
+	var project_state: Dictionary = observation.get("build_project_state", {}) if observation.get("build_project_state", {}) is Dictionary else {}
+	if str(project_state.get("status", "")) in ["cooldown", "abandoned"] and now_msec < int(project_state.get("retry_after_msec", 0)):
 		return {}
 	var target: Dictionary = BuildPlanner.next_step(observation)
+	if bool(target.get("project_complete", false)):
+		return target
+	if _last_build_msec >= 0 and now_msec - _last_build_msec < BUILD_ACTION_COOLDOWN_MSEC:
+		return {}
+	if target.is_empty():
+		return {}
+	var mode := str(observation.get("world_mode", "")).to_lower()
+	var inventory := _inventory(observation)
+	var target_block := str(target.get("block", ""))
+	var remaining := int(inventory.get(target_block, 0))
+	var has_route_target := not _as_array(target.get("route_target", [])).is_empty()
+	if not has_route_target:
+		# A generic pad is not a goal. Keep only the small safety apron around
+		# One Block's single renewable source; all other builds need a destination.
+		if mode != "one_block" or str(target.get("reason", "")) != "expand_platform":
+			return {}
+	if mode == "skyblock" and remaining <= SKYBLOCK_LAST_SUPPORT_RESERVE:
+		# Starter islands are finite: never spend the final available block of the
+		# exact support material selected by BuildPlanner.
+		return {}
+	if mode == "floating_islands" and remaining <= FLOATING_ISLANDS_RETURN_BLOCK_RESERVE:
+		# The placed route is the way back; retain a small repair/stair reserve
+		# rather than expanding the outward route with the last blocks.
+		return {}
 	if not target.is_empty():
 		_last_build_msec = now_msec
 	return target
+
+
+func _build_project_status_decision(target: Dictionary) -> Dictionary:
+	if not bool(target.get("project_complete", false)):
+		return {}
+	return _decision(
+		Contract.GOAL_BUILD,
+		Contract.ACTION_WAIT,
+		{"build_project_complete": true, "project_id": str(target.get("project_id", ""))},
+		500,
+		0.84,
+	)
 
 
 func _should_prioritize_planting(observation: Dictionary, resources: Array) -> bool:

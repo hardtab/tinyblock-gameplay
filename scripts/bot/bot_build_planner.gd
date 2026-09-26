@@ -11,7 +11,10 @@ const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
 ## authoritative for reach, inventory, placement, and collision validation.
 
 const TILE := 32
-const DESIRED_PLATFORM_WIDTH := 5
+# The only purposeless expansion allowed by policy is a tiny safety margin
+# around the single regenerative source in One Block. Route-backed bridges and
+# stairs do not use this cap because they have an explicit destination.
+const DESIRED_PLATFORM_WIDTH := 3
 const MAX_PLACEMENT_REACH_TILES := 2
 const MAX_GOAL_DISTANCE_TILES := 10
 const SUPPORT_BLOCK_NAMES: PackedStringArray = [
@@ -23,33 +26,47 @@ const PLANK_BLOCK_NAMES: PackedStringArray = [
 
 
 static func next_step(observation: Dictionary) -> Dictionary:
+	var origin := _support_tile(observation.get("self", {}))
+	var project_state: Dictionary = observation.get("build_project_state", {}) if observation.get("build_project_state", {}) is Dictionary else {}
+	var navigation_goal := _navigation_goal(observation, origin, project_state)
+	if str(navigation_goal.get("status", "")) == "complete":
+		return {"project_complete": true, "project_id": str(navigation_goal.get("project_id", ""))}
+	if str(navigation_goal.get("status", "")) == "paused":
+		return {}
+	var goal: Vector2i = navigation_goal.get("tile", _invalid_tile())
+	var has_goal := goal != _invalid_tile()
+	var build_project: Dictionary = navigation_goal.get("build_project", {}) if navigation_goal.get("build_project", {}) is Dictionary else {}
 	var terrain := _terrain_map(observation.get("terrain_tiles", []))
 	if terrain.is_empty():
 		return {}
-	var origin := _support_tile(observation.get("self", {}))
 	if not _solid(terrain, origin.x, origin.y):
 		# Never infer a foundation from a world mode or stale airborne position.
 		return {}
 	var block_name := _support_block(observation)
 	if block_name.is_empty():
 		return {}
-
-	var goal := _navigation_goal(observation, origin)
 	var goal_direction := 0
-	if goal != _invalid_tile():
+	if has_goal:
 		goal_direction = signi(goal.x - origin.x)
+		if goal_direction == 0:
+			# Do not disguise a route that cannot be built horizontally as an
+			# unrelated platform expansion.
+			return {}
 		if goal_direction != 0 and goal.y < origin.y:
-			var step := _supported_stair(origin, goal_direction, goal, terrain, observation, block_name)
+			var step := _supported_stair(origin, goal_direction, goal, terrain, observation, block_name, build_project)
 			if not step.is_empty():
 				return step
+	elif str(observation.get("world_mode", "")).to_lower() != "one_block":
+		# A destination-less safety apron is only useful around One Block's lone
+		# regenerating source; other placements must advance an observed route.
+		return {}
 
 	var left_run := _walkable_run(terrain, origin, -1)
 	var right_run := _walkable_run(terrain, origin, 1)
 	var platform_width := left_run + 1 + right_run
 	var directions: Array[int] = []
-	if goal_direction != 0:
+	if has_goal:
 		directions.append(goal_direction)
-		directions.append(-goal_direction)
 	elif left_run < right_run:
 		directions.assign([-1, 1])
 	elif right_run < left_run:
@@ -78,11 +95,11 @@ static func next_step(observation: Dictionary) -> Dictionary:
 		if _overlaps_any_player(target, observation):
 			continue
 		var reason := "bridge_to_goal" if direction == goal_direction and goal_direction != 0 else "expand_platform"
-		return _placement(target, origin, goal, block_name, reason)
+		return _placement(target, origin, goal, block_name, reason, build_project)
 	return {}
 
 
-static func _supported_stair(origin: Vector2i, direction: int, goal: Vector2i, terrain: Dictionary, observation: Dictionary, block_name: String) -> Dictionary:
+static func _supported_stair(origin: Vector2i, direction: int, goal: Vector2i, terrain: Dictionary, observation: Dictionary, block_name: String, build_project: Dictionary) -> Dictionary:
 	var target := Vector2i(origin.x + direction, origin.y - 1)
 	# A stair is only valid when the block directly below already exists. This
 	# forbids diagonal/floating stairs and leaves two cells of headroom above it.
@@ -94,11 +111,11 @@ static func _supported_stair(origin: Vector2i, direction: int, goal: Vector2i, t
 		return {}
 	if _overlaps_any_player(target, observation):
 		return {}
-	return _placement(target, origin, goal, block_name, "build_stair")
+	return _placement(target, origin, goal, block_name, "build_stair", build_project)
 
 
-static func _placement(target: Vector2i, origin: Vector2i, goal: Vector2i, block_name: String, reason: String) -> Dictionary:
-	return {
+static func _placement(target: Vector2i, origin: Vector2i, goal: Vector2i, block_name: String, reason: String, build_project: Dictionary = {}) -> Dictionary:
+	var placement := {
 		"id": "build:%s:%d:%d" % [reason, target.x, target.y],
 		"block": block_name,
 		"x": target.x,
@@ -108,32 +125,78 @@ static func _placement(target: Vector2i, origin: Vector2i, goal: Vector2i, block
 		"route_target": [] if goal == _invalid_tile() else [goal.x, goal.y],
 		"structurally_connected": true,
 	}
+	if not build_project.is_empty():
+		placement["build_project"] = build_project.duplicate(true)
+	return placement
 
 
-static func _navigation_goal(observation: Dictionary, origin: Vector2i) -> Vector2i:
+static func _navigation_goal(observation: Dictionary, origin: Vector2i, project_state: Dictionary = {}) -> Dictionary:
 	var preferred_distance := float(observation.get("preferred_player_distance", 84.0))
-	var best := _invalid_tile()
+	var active_project_id := str(project_state.get("id", "")) if str(project_state.get("status", "")) == "active" else ""
+	var active_target_id := str(project_state.get("target_id", "")) if not active_project_id.is_empty() else ""
+	var best: Dictionary = {}
 	var best_distance := INF
 	for raw_player in _as_array(observation.get("players", [])):
 		if not raw_player is Dictionary or not bool((raw_player as Dictionary).get("alive", true)):
 			continue
 		var player := raw_player as Dictionary
+		var player_id := str(player.get("id", ""))
+		if not active_project_id.is_empty() and player_id == active_target_id:
+			if float(player.get("distance", INF)) <= preferred_distance and bool(player.get("route_reachable", false)):
+				return {"status": "complete", "project_id": active_project_id}
+			var active_tile := _target_tile(player)
+			if active_tile == _invalid_tile():
+				return {"status": "paused"}
+			return _route_goal("player", player_id, active_tile, player, active_project_id)
+		if not active_project_id.is_empty():
+			continue
 		if float(player.get("distance", 9999.0)) <= preferred_distance:
 			continue
 		var candidate := _target_tile(player)
 		var distance := origin.distance_to(candidate)
 		if candidate != _invalid_tile() and distance <= MAX_GOAL_DISTANCE_TILES and distance < best_distance:
-			best = candidate
+			best = _route_goal("player", player_id, candidate, player)
 			best_distance = distance
 	for raw_resource in _as_array(observation.get("visible_resources", [])):
-		if not raw_resource is Dictionary or bool((raw_resource as Dictionary).get("reachable", false)):
+		if not raw_resource is Dictionary:
 			continue
-		var candidate := _target_tile(raw_resource as Dictionary)
+		var resource := raw_resource as Dictionary
+		var candidate := _target_tile(resource)
+		var resource_id := str(resource.get("id", ""))
+		if not active_project_id.is_empty() and resource_id == active_target_id:
+			return {"status": "complete", "project_id": active_project_id} if bool(resource.get("reachable", false)) else _route_goal("resource", resource_id, candidate, resource, active_project_id)
+		if not active_project_id.is_empty():
+			continue
+		if bool(resource.get("reachable", false)):
+			continue
 		var distance := origin.distance_to(candidate)
 		if candidate != _invalid_tile() and distance <= MAX_GOAL_DISTANCE_TILES and distance < best_distance:
-			best = candidate
+			best = _route_goal("resource", resource_id, candidate, resource)
 			best_distance = distance
+	if not active_project_id.is_empty():
+		# The target left the current observation. Preserve the project rather
+		# than silently switching to a closer distraction; resume if it reappears.
+		return {"status": "paused"}
 	return best
+
+
+static func _route_goal(kind: String, target_id: String, tile: Vector2i, raw_target: Dictionary, active_project_id: String = "") -> Dictionary:
+	if tile == _invalid_tile() or target_id.is_empty():
+		return {}
+	if target_id.begins_with("achievement:challenge:"):
+		return {"status": "active", "tile": tile, "build_project": {}}
+	var project_id := active_project_id if not active_project_id.is_empty() else "route:%s:%s" % [kind, target_id]
+	return {
+		"status": "active",
+		"tile": tile,
+		"build_project": {
+			"id": project_id,
+			"target_id": target_id,
+			"target_kind": kind,
+			"goal_tile": [tile.x, tile.y],
+			"target_position": raw_target.get("position", []),
+		},
+	}
 
 
 static func _walkable_run(terrain: Dictionary, origin: Vector2i, direction: int) -> int:

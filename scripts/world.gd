@@ -378,6 +378,9 @@ const CORE_BIOME_BASE_WEIGHTS := {
 const CORE_BIOME_TEMPERATURE_AFFINITY_FLOOR := 0.03
 const CORE_BIOME_TEMPERATURE_STRENGTH := 2.5
 const CORE_BIOME_REGION_WIDTH := 48
+const WORLD_UNDERFOOT_WAYPOINT_CHUNK_RADIUS := 2
+const WORLD_UNDERFOOT_WAYPOINTS_PER_BIOME := 3
+const WORLD_UNDERFOOT_SURFACE_SCAN_RADIUS := 2
 const BIOME_TRANSITION_MIN_SIDE_WIDTH := 4
 const BIOME_TRANSITION_MAX_SIDE_WIDTH := 8
 const BIOME_TRANSITION_VERTICAL_DEPTH := 4
@@ -10515,6 +10518,107 @@ func active_biome_definition() -> Dictionary:
 func active_location_biome_id() -> String:
 	var pos := _player_center_tile()
 	return _ecology_biome_at(pos)
+
+
+## Returns the biome at an authoritative multiplayer player's position.
+## Procedural/challenge regions must already exist in the host's world state;
+## unknown or not-yet-generated chunks return empty instead of awarding a
+## guessed fallback biome. Floating-island biomes are valid only on an island.
+func biome_id_for_player_state(player_state: Dictionary) -> String:
+	if not player_state.has("x") or not player_state.has("y") or world_mode == WORLD_MODE_DUEL:
+		return ""
+	var pos := Vector2i(
+		floori((float(player_state.get("x", 0.0)) + float(player_state.get("w", 20.0)) * 0.5) / float(BlockDefs.TILE)),
+		floori((float(player_state.get("y", 0.0)) + float(player_state.get("h", 28.0)) * 0.5) / float(BlockDefs.TILE)),
+	)
+	var chunk_x := floori(float(pos.x) / float(CHUNK_WIDTH))
+	if world_mode in [WORLD_MODE_PROCEDURAL, WORLD_MODE_CHALLENGE] and not generated_chunks.has(chunk_x):
+		return ""
+	if world_mode == WORLD_MODE_FLOATING_ISLANDS and _floating_island_biome_at(pos).is_empty():
+		return ""
+	return _ecology_biome_at(pos)
+
+
+## Returns nearby safe surface support tiles, grouped as a flat list carrying
+## each tile's host-computed CORE biome ID. Only already-generated Procedural
+## chunks are considered; this helper never creates chunks or predicts biomes.
+## x/y are support-tile coordinates, matching the bot navigation contract.
+func world_underfoot_waypoints_for_player_state(player_state: Dictionary) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	if world_mode != WORLD_MODE_PROCEDURAL or not player_state.has("x") or not player_state.has("y"):
+		return result
+	var player_x := float(player_state.get("x", 0.0))
+	var player_y := float(player_state.get("y", 0.0))
+	var player_w := maxf(0.0, float(player_state.get("w", 20.0)))
+	var player_h := maxf(0.0, float(player_state.get("h", 28.0)))
+	if not is_finite(player_x) or not is_finite(player_y) or not is_finite(player_w) or not is_finite(player_h):
+		return result
+	var player_center := Vector2i(
+		floori((player_x + player_w * 0.5) / float(BlockDefs.TILE)),
+		floori((player_y + player_h * 0.5) / float(BlockDefs.TILE)),
+	)
+	var current_chunk := floori(float(player_center.x) / float(CHUNK_WIDTH))
+	var candidates_by_biome: Dictionary = {}
+	var surface_offsets: Array[int] = [0, -1, 1, -2, 2]
+	for chunk_x in range(current_chunk - WORLD_UNDERFOOT_WAYPOINT_CHUNK_RADIUS, current_chunk + WORLD_UNDERFOOT_WAYPOINT_CHUNK_RADIUS + 1):
+		# In particular, do not call ensure_generated_chunk here: movement goals
+		# may only use terrain the authoritative host has actually generated.
+		if not generated_chunks.has(chunk_x):
+			continue
+		var start_x := chunk_x * CHUNK_WIDTH
+		for tile_x in range(start_x, start_x + CHUNK_WIDTH):
+			var surface_y := _terrain_surface_y(tile_x)
+			var seen_biomes_at_x: Dictionary = {}
+			for offset in surface_offsets:
+				var support_y := surface_y + offset
+				if not in_bounds(tile_x, support_y) or not in_bounds(tile_x, support_y - 2):
+					continue
+				var support := get_block(tile_x, support_y)
+				if not bool(support.get("solid", false)) or bool(support.get("fluid", false)):
+					continue
+				# A standing avatar is 28px high. Require two fully empty cells
+				# above the support so a waypoint cannot send it into a low ceiling,
+				# liquid, foliage or another occupied block.
+				if block_id(tile_x, support_y - 1) != 0 or block_id(tile_x, support_y - 2) != 0:
+					continue
+				var candidate_state := {
+					"x": (float(tile_x) + 0.5) * float(BlockDefs.TILE) - player_w * 0.5,
+					"y": float(support_y * BlockDefs.TILE) - player_h,
+					"w": player_w,
+					"h": player_h,
+				}
+				var biome_id := biome_id_for_player_state(candidate_state)
+				if biome_id not in CORE_BIOME_IDS or seen_biomes_at_x.has(biome_id):
+					continue
+				seen_biomes_at_x[biome_id] = true
+				var distance_sq := Vector2(float(tile_x - player_center.x), float(support_y - player_center.y)).length_squared()
+				var biome_candidates: Array = candidates_by_biome.get(biome_id, []) if candidates_by_biome.get(biome_id, []) is Array else []
+				biome_candidates.append({
+					"biome_id": biome_id,
+					"x": tile_x,
+					"y": support_y,
+					"_distance_sq": distance_sq,
+				})
+				candidates_by_biome[biome_id] = biome_candidates
+	# The vertical search prefers the actual terrain surface. For each biome,
+	# retain only the closest few candidates so periodic multiplayer packets stay
+	# bounded even after many adjacent chunks have been generated.
+	for biome_id in CORE_BIOME_IDS:
+		var biome_candidates: Array = candidates_by_biome.get(biome_id, []) if candidates_by_biome.get(biome_id, []) is Array else []
+		biome_candidates.sort_custom(func(a: Dictionary, b: Dictionary):
+			if float(a.get("_distance_sq", 0.0)) == float(b.get("_distance_sq", 0.0)):
+				if int(a.get("x", 0)) == int(b.get("x", 0)):
+					return int(a.get("y", 0)) < int(b.get("y", 0))
+				return int(a.get("x", 0)) < int(b.get("x", 0))
+			return float(a.get("_distance_sq", 0.0)) < float(b.get("_distance_sq", 0.0))
+		)
+		for index in mini(WORLD_UNDERFOOT_WAYPOINTS_PER_BIOME, biome_candidates.size()):
+			result.append({
+				"biome_id": str(biome_candidates[index].get("biome_id", "")),
+				"x": int(biome_candidates[index].get("x", 0)),
+				"y": int(biome_candidates[index].get("y", 0)),
+			})
+	return result
 
 
 func _player_center_tile() -> Vector2i:

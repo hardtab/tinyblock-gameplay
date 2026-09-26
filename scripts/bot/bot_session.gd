@@ -10,6 +10,7 @@ const EmojiReactions = preload("res://gameplay/scripts/emoji_reactions.gd")
 const BehaviorClass = preload("res://gameplay/scripts/bot/bot_behavior.gd")
 const RuleProviderClass = preload("res://gameplay/scripts/bot/bot_rule_provider.gd")
 const SafetyClass = preload("res://gameplay/scripts/bot/bot_safety_policy.gd")
+const DescentPlannerClass = preload("res://gameplay/scripts/bot/bot_descent_planner.gd")
 const ExecutorClass = preload("res://gameplay/scripts/bot/bot_executor.gd")
 const ActionLoop = preload("res://gameplay/scripts/bot/bot_action_loop.gd")
 const AiClientClass = preload("res://gameplay/scripts/bot/bot_ai_client.gd")
@@ -44,6 +45,23 @@ var session_id := ""
 var own_player_id := ""
 var world_id := ""
 var _session_world_mode := ""
+var _live_one_block_mined := 0
+var _live_challenge_best_distance := 0
+## Progression state is scoped to the active world and advances only from the
+## authoritative initial/player-inventory snapshots or action acknowledgements.
+var _stone_age_goal_state: Dictionary = {}
+var _stone_age_authoritative_inventory: Dictionary = {}
+var _stone_age_authoritative_equipment := {"hand": "", "feet": ""}
+## Goal-level retries for achievement strategies other than Stone Age. State is
+## deliberately scoped to one world; a new world never inherits old attempts.
+var _achievement_goal_states: Dictionary = {}
+## A route-backed construction is a small persistent project: keep the same
+## observed destination across placement steps and finish only when it becomes
+## reachable according to the next authoritative observation.
+var _build_project_state: Dictionary = {}
+var _build_project_route_cache_key := ""
+var _build_project_route_checked_msec := -1
+var _build_project_route_reachable := false
 var protocol_version := 2
 var dedicated_server := false
 var empty_grace_msec := DEFAULT_EMPTY_GRACE_MSEC
@@ -85,6 +103,12 @@ var _pending_action_targets: Dictionary = {}
 var _blocked_action_targets: Dictionary = {}
 var _protected_build_cells: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
+## Explicitly observed tile coordinates. Missing terrain is treated as air only
+## when a complete static-world snapshot or generated chunk proves that cell.
+var _terrain_observed_cells: Dictionary = {}
+var _descent_snapshot_complete := false
+var _descent_planner = DescentPlannerClass.new()
+var _descent_last_plan: Dictionary = {}
 var _support_preserving_mine_tiles: Dictionary = {}
 var _plant_tiles: Dictionary = {}
 var _physics_route: Array[Dictionary] = []
@@ -128,6 +152,12 @@ var _food_eat_cooldown_until_msec := -1
 var _inventory_host_revision := 0
 var _inventory_client_revision := 0
 var _population_logged := false
+## True only while this session owns the /root/Achievements community lock, so
+## a leave never unlocks a lock another system (e.g. the local host player) set.
+var _achievements_lock_owned := false
+## output_name -> true. Host-confirmed inventory snapshots and craft_recipe
+## acknowledgements both funnel through _record_craft_achievement once.
+var _achievements_recorded_crafts: Dictionary = {}
 ## One-shot: drop wooden_pickaxe + trail_boots after join so craft+equip can be
 ## proven from scratch on a community world that still had leftover gear.
 var _strip_progression_gear := false
@@ -151,6 +181,18 @@ const CRAFT_BLOCK_COOLDOWN_MSEC := 12_000
 const STATION_RADIUS_TILES := 4
 const MIN_PREPARED_MEAL_CREATURE_SIZE := 0.65
 const FOOD_EAT_COOLDOWN_MSEC := 8_000
+const STONE_AGE_CONFIRM_TIMEOUT_MSEC := 20_000
+const STONE_AGE_RETRY_COOLDOWN_MSEC := 12_000
+const STONE_AGE_ABANDON_COOLDOWN_MSEC := 60_000
+const STONE_AGE_MAX_STAGE_FAILURES := 3
+const ACHIEVEMENT_GOAL_RETRY_MSEC := 20_000
+const ACHIEVEMENT_GOAL_ABANDON_MSEC := 90_000
+const ACHIEVEMENT_GOAL_MAX_FAILURES := 3
+const ACHIEVEMENT_GOAL_CONFIRM_TIMEOUT_MSEC := 45_000
+const ACHIEVEMENT_GOAL_MOVE_TIMEOUT_MSEC := 90_000
+const BUILD_PROJECT_MAX_FAILURES := 3
+const BUILD_PROJECT_RETRY_MSEC := 30_000
+const BUILD_PROJECT_ROUTE_REPLAN_MSEC := 500
 const ACTION_RETRY_BLOCK_MSEC := 8_000
 const UNSAFE_ROUTE_RETRY_BLOCK_MSEC := 30_000
 const EMOJI_EVENT_TTL_MSEC := 8_000
@@ -160,6 +202,15 @@ const SUPPORT_PLACE_INVALID_TILE := Vector2i(2147483647, 2147483647)
 const SUPPORT_BLOCK_PRIORITY: PackedStringArray = [
 	"planks", "palm_planks", "pine_planks", "weeping_planks",
 	"stone_bricks", "cobblestone", "stone", "dirt",
+]
+## World modes /root/Achievements can credit. Anything outside this list
+## (duel, unknown metadata) is neither recorded nor treated as a supported
+## progression mode.
+const ACHIEVEMENT_WORLD_MODES: PackedStringArray = [
+	"skyblock", "floating_islands", "procedural", "one_block", "challenge_run",
+]
+const STONE_AGE_PROGRESS_MODES: PackedStringArray = [
+	"skyblock", "floating_islands", "procedural", "one_block",
 ]
 const BOT_SKIN := {
 	"skin": "#8b5a3c",
@@ -258,12 +309,17 @@ func join_session(record: Dictionary) -> void:
 	_emoji_reply_inflight = false
 	_last_player_snapshot_msec = -1
 	_last_player_input_msec = -1
+	_live_one_block_mined = 0
+	_live_challenge_best_distance = 0
 	_desired_input = {"left": false, "right": false, "jump": false}
 	_pending_action_targets.clear()
 	_blocked_action_targets.clear()
 	_protected_build_cells.clear()
 	_action_loop_blocked_until.clear()
 	_terrain_tiles.clear()
+	_terrain_observed_cells.clear()
+	_descent_snapshot_complete = false
+	_descent_last_plan.clear()
 	_support_preserving_mine_tiles.clear()
 	_physics_route.clear()
 	_physics_route_target = Vector2i(2147483647, 2147483647)
@@ -297,6 +353,22 @@ func join_session(record: Dictionary) -> void:
 	_pvp_chest_opened = false
 	_last_duel_ready_msec = -1
 	_session_world_mode = str(record.get("world_mode", record.get("mode", ""))).to_lower()
+	_descent_planner.reset_session()
+	_descent_planner.begin_session(
+		str(record.get("session_id", "")),
+		str(record.get("world_id", "")),
+		_session_world_mode,
+		_session_world_mode == "duel",
+		Vector2i(2147483647, 2147483647),
+	)
+	_stone_age_goal_state.clear()
+	_achievement_goal_states.clear()
+	_build_project_state.clear()
+	_build_project_route_cache_key = ""
+	_build_project_route_checked_msec = -1
+	_build_project_route_reachable = false
+	_stone_age_authoritative_inventory.clear()
+	_stone_age_authoritative_equipment = {"hand": "", "feet": ""}
 	_craft_pending_output = ""
 	_craft_retry_after_msec = -1
 	_craft_blocked_outputs.clear()
@@ -304,6 +376,7 @@ func join_session(record: Dictionary) -> void:
 	_inventory_host_revision = 0
 	_inventory_client_revision = 0
 	_population_logged = false
+	_achievements_recorded_crafts.clear()
 	_progression_gear_stripped = false
 	safety.reset_session()
 	_world_snapshot.clear()
@@ -371,6 +444,10 @@ func _connect_join_response(response: Dictionary, record: Dictionary) -> bool:
 		network_client.call("set_dedicated_server_session", dedicated_server)
 	if network_client.has_method("set_session_classification") and metadata.has("classification"):
 		network_client.call("set_session_classification", str(metadata.get("classification", "")))
+	# Mirror the host player's achievement scoping: managed community sessions
+	# keep progression out of the shared account, official/dedicated sessions
+	# keep it. Unknown dedicated metadata is treated as community.
+	_sync_achievements_community_lock()
 	var error: Variant = network_client.call(
 		"connect_with_ticket",
 		str(body.get("websocket_url", "")),
@@ -512,6 +589,8 @@ func _process(delta: float) -> void:
 			leave("host_kill_limit")
 		return
 	_expire_craft_pending(now_msec)
+	_expire_stone_age_pending(now_msec)
+	_expire_achievement_goal_pending(now_msec)
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	# Hazard contact must tick even while WAIT/idle, otherwise a bot standing in
 	# lava only takes damage when a movement action happens to run physics.
@@ -862,6 +941,7 @@ func _terrain_climbable_tile(tile: Vector2i) -> bool:
 
 func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 	_terrain_tiles.clear()
+	_terrain_observed_cells.clear()
 	_support_preserving_mine_tiles.clear()
 	if not raw_tiles is Array:
 		return
@@ -869,11 +949,12 @@ func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 		if not raw_tile is Dictionary:
 			continue
 		var tile := raw_tile as Dictionary
+		var key := "%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]
+		_terrain_observed_cells[key] = true
 		var name := _block_name_for_content_id(str(tile.get("content_id", "")))
 		if name.is_empty():
 			name = str(tile.get("block_name", ""))
 		if not name.is_empty():
-			var key := "%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]
 			_terrain_tiles[key] = name
 			if bool(tile.get("preserves_support_on_mine", false)):
 				_support_preserving_mine_tiles[key] = true
@@ -983,6 +1064,7 @@ func _apply_tile_batch(payload: Dictionary) -> void:
 		var tile_x := int(tile.get("x", 0))
 		var tile_y := int(tile.get("y", 0))
 		var key := "%d:%d" % [tile_x, tile_y]
+		_terrain_observed_cells[key] = true
 		var name := _block_name_for_content_id(str(tile.get("content_id", "")))
 		if name.is_empty():
 			name = str(tile.get("block_name", ""))
@@ -1007,6 +1089,7 @@ func _apply_tile_batch(payload: Dictionary) -> void:
 		if tile.has("container"):
 			_update_snapshot_container(key, tile.get("container", null))
 	_physics_route_replan_msec = 0
+	_sync_stone_age_goal(_achievement_observation(), Time.get_ticks_msec())
 
 
 func _terrain_name_at(tx: int, ty: int) -> String:
@@ -1779,6 +1862,11 @@ func _apply_snapshot_if_complete() -> void:
 
 
 func _apply_world_snapshot(snapshot: Dictionary) -> void:
+	var incoming_world_id := str(snapshot.get("world_id", world_id))
+	if not world_id.is_empty() and not incoming_world_id.is_empty() and incoming_world_id != world_id:
+		_stone_age_goal_state.clear()
+		_stone_age_authoritative_inventory.clear()
+		_stone_age_authoritative_equipment = {"hand": "", "feet": ""}
 	var selected_world_mode := _session_world_mode
 	_world_snapshot = snapshot.duplicate(true)
 	if _world_snapshot.has("active_projectiles"):
@@ -1789,18 +1877,26 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		snapshot_generation["mode"] = selected_world_mode
 		_world_snapshot["generation"] = snapshot_generation
 		snapshot_is_duel = selected_world_mode == "duel"
+	if str(snapshot_generation.get("mode", "")).to_lower() == "one_block":
+		var one_block_state: Dictionary = _world_snapshot.get("one_block", {}) if _world_snapshot.get("one_block", {}) is Dictionary else {}
+		_live_one_block_mined = maxi(_live_one_block_mined, maxi(0, int(one_block_state.get("mined", 0))))
+	elif str(snapshot_generation.get("mode", "")).to_lower() == "challenge_run":
+		var challenge_state: Dictionary = _world_snapshot.get("challenge", {}) if _world_snapshot.get("challenge", {}) is Dictionary else {}
+		_live_challenge_best_distance = maxi(_live_challenge_best_distance, maxi(0, int(challenge_state.get("best_distance", 0))))
 	_rebuild_terrain_index(_world_snapshot.get("tiles", []))
 	_rebuild_plant_index(_world_snapshot.get("plant_growth", _world_snapshot.get("plants", [])))
 	_seed_tree_growth_resources(_world_snapshot.get("tree_growth", []))
 	if str(snapshot_generation.get("mode", "")).to_lower() == "duel":
 		_seed_duel_fallback_terrain()
-	world_id = str(snapshot.get("world_id", world_id))
+	world_id = incoming_world_id
 	var multiplayer_state: Dictionary = snapshot.get("multiplayer", {}) if snapshot.get("multiplayer", {}) is Dictionary else {}
 	var player_states: Dictionary = multiplayer_state.get("player_states", {}) if multiplayer_state.get("player_states", {}) is Dictionary else {}
 	# `player` is the host's local avatar in a P2P snapshot. A guest bot must
 	# start from its own authoritative state in multiplayer.player_states or it
 	# inherits the host coordinates and immediately falls through the terrain.
-	var local_state: Dictionary = player_states.get(own_player_id, {}) if player_states.get(own_player_id, {}) is Dictionary else {}
+	var raw_authoritative_self: Variant = player_states.get(own_player_id, {})
+	var has_authoritative_self_state := raw_authoritative_self is Dictionary and not (raw_authoritative_self as Dictionary).is_empty()
+	var local_state: Dictionary = raw_authoritative_self as Dictionary if has_authoritative_self_state else {}
 	if local_state.is_empty():
 		local_state = snapshot.get("player", {}) if snapshot.get("player", {}) is Dictionary else {}
 	else:
@@ -1808,6 +1904,12 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		for field in ["w", "h", "max_health"]:
 			if not local_state.has(field) and template.has(field):
 				local_state[field] = template[field]
+	# Keep the host-provided self state separate from the local spawn recovery
+	# below. The planner may seed its return root only from an already-grounded
+	# authoritative position, never from our locally normalized pose. If this
+	# snapshot had no bot entry, the fallback `player` belongs to the host and is
+	# intentionally not used as the bot's descent root.
+	var descent_initial_self_state: Dictionary = local_state.duplicate(true) if has_authoritative_self_state else {}
 	_roster.clear()
 	for raw_id in player_states:
 		var player_id := str(raw_id)
@@ -1834,10 +1936,12 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	# Root-level inventory/equipment belong to the host avatar. A guest bot must
 	# start empty unless its own multiplayer.player_states entry already exists.
 	_world_snapshot["inventory_summary"] = _inventory_summary_from_player_state(local_state)
+	_stone_age_authoritative_inventory = (_world_snapshot["inventory_summary"] as Dictionary).duplicate(true)
 	_inventory_host_revision = maxi(0, int(local_state.get("inventory_host_revision", 0)))
 	_inventory_client_revision = maxi(_inventory_client_revision, int(local_state.get("inventory_client_revision", 0)))
 	_world_snapshot["recipes"] = _recipe_catalog(_world_snapshot)
 	_equipment_slots = _equipment_from_player_state(local_state)
+	_stone_age_authoritative_equipment = _equipment_slots.duplicate(true)
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	_world_snapshot["craft_pending_output"] = _craft_pending_output
 	_world_snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
@@ -1845,6 +1949,17 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_world_snapshot["visible_resources"] = _visible_resources_from_tiles(_world_snapshot.get("tiles", []), local_state)
 	_world_snapshot["visible_containers"] = _visible_containers_from_snapshot(_world_snapshot, local_state)
 	_world_snapshot["threats"] = _threats_from_creatures(_world_snapshot.get("creatures", []))
+	_session_world_mode = str(snapshot_generation.get("mode", _session_world_mode)).to_lower()
+	_descent_planner.begin_session(
+		session_id,
+		world_id,
+		_session_world_mode,
+		_session_world_mode == "duel",
+		_descent_one_block_source(),
+	)
+	_descent_snapshot_complete = true
+	_descent_planner.observe_initial_snapshot(descent_initial_self_state, _descent_terrain_map(), _descent_coverage())
+	_sync_stone_age_goal(_achievement_observation(), Time.get_ticks_msec())
 	var initial_support := _support_tile_for_position(Contract.target_position(local_state))
 	structured_log.emit({
 		"event": "snapshot_ready",
@@ -1870,6 +1985,10 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_welcome_emoji_due_msec = Time.get_ticks_msec() + 900 if _welcome_emoji_pending else -1
 	_send_duel_ready(Time.get_ticks_msec())
 	behavior.request_decision(Time.get_ticks_msec())
+	_sync_achievements_community_lock()
+	_record_world_state_achievements()
+	var initial_player_biomes: Dictionary = snapshot.get("player_biomes", {}) if snapshot.get("player_biomes", {}) is Dictionary else {}
+	_record_authoritative_location_achievements(str(initial_player_biomes.get(own_player_id, "")), local_state)
 	session_ready.emit(session_id, own_player_id)
 
 
@@ -2083,6 +2202,12 @@ func _station_available(snapshot: Dictionary, station: String) -> bool:
 
 func _apply_players_snapshot(payload: Dictionary) -> void:
 	var players: Dictionary = payload.get("players", {}) if payload.get("players", {}) is Dictionary else {}
+	var player_biomes: Dictionary = payload.get("player_biomes", {}) if payload.get("player_biomes", {}) is Dictionary else {}
+	if payload.has("world_underfoot_waypoints") and payload.get("world_underfoot_waypoints") is Dictionary:
+		# The host only advertises already-generated safe surface cells. Keep the
+		# authoritative map with the latest world state; the bot still validates
+		# local terrain and physics reachability before choosing a destination.
+		_world_snapshot["world_underfoot_waypoints"] = (payload["world_underfoot_waypoints"] as Dictionary).duplicate(true)
 	if payload.has("active_projectiles"):
 		_world_snapshot["active_projectiles"] = _validated_projectile_snapshot(payload.get("active_projectiles", []))
 	# The host sends the complete authoritative roster on every snapshot. Do not
@@ -2155,6 +2280,15 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 					continue
 				local_state[field] = entry[field]
 			_world_snapshot["self"] = local_state
+			if entry.has("x") and entry.has("y") and entry.has("on_ground"):
+				_descent_planner.set_world_context(
+					_session_world_mode,
+					_session_world_mode == "duel",
+					_descent_one_block_source(),
+				)
+				_descent_planner.observe_authoritative_position(entry, _descent_terrain_map(), _descent_coverage())
+			_record_live_challenge_distance(entry)
+			_record_authoritative_location_achievements(str(player_biomes.get(player_id, "")), entry)
 			continue
 		if dedicated_server and player_id == _host_player_id and not _is_pvp_world():
 			continue
@@ -2338,11 +2472,14 @@ func _apply_inventory_snapshot(payload: Dictionary) -> void:
 					_send_inventory_snapshot()
 			return
 	_world_snapshot["inventory_summary"] = normalized
+	_stone_age_authoritative_inventory = normalized.duplicate(true)
 	if payload.has("inventory_host_revision"):
 		_inventory_host_revision = maxi(0, int(payload.get("inventory_host_revision", 0)))
 	if payload.has("inventory_client_revision"):
 		_inventory_client_revision = maxi(_inventory_client_revision, int(payload.get("inventory_client_revision", 0)))
 	var incoming_equipment: Dictionary = payload.get("equipment_slots", _equipment_slots).duplicate(true) if payload.get("equipment_slots", _equipment_slots) is Dictionary else _equipment_slots.duplicate(true)
+	if payload.has("equipment_slots") and payload.get("equipment_slots") is Dictionary:
+		_stone_age_authoritative_equipment = _equipment_from_player_state({"equipment_slots": payload.get("equipment_slots", {})})
 	_equipment_slots = _merge_equipment_with_pending(incoming_equipment, normalized)
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	if payload.has("nourishment"):
@@ -2354,9 +2491,11 @@ func _apply_inventory_snapshot(payload: Dictionary) -> void:
 		self_state["nourishment"] = maxi(current, incoming)
 		_world_snapshot["self"] = self_state
 	if not _craft_pending_output.is_empty() and int(normalized.get(_craft_pending_output, 0)) > 0:
+		_record_craft_achievement(_craft_pending_output)
 		_craft_blocked_outputs.erase(_craft_pending_output)
 		_craft_pending_output = ""
 		_craft_retry_after_msec = Time.get_ticks_msec() + CRAFT_RETRY_DELAY_MSEC
+	_sync_stone_age_goal(_achievement_observation(), Time.get_ticks_msec())
 
 
 func _merge_equipment_with_pending(incoming_equipment: Dictionary, inventory: Dictionary) -> Dictionary:
@@ -2531,6 +2670,9 @@ func _update_human_count() -> void:
 
 func _build_observation(now_msec: int) -> Dictionary:
 	_expire_stale_action_targets(now_msec)
+	_expire_stone_age_pending(now_msec)
+	_expire_achievement_goal_pending(now_msec)
+	_sync_stone_age_goal(_achievement_observation(), now_msec)
 	var snapshot := _world_snapshot.duplicate(true)
 	snapshot["self"] = snapshot.get("self", {"health": 10, "x": 0.0, "y": 0.0})
 	snapshot["own_player_id"] = own_player_id
@@ -2579,6 +2721,23 @@ func _build_observation(now_msec: int) -> Dictionary:
 			snapshot["visible_containers"].append(_duel_fallback_container(snapshot["self"] as Dictionary))
 	var generation: Dictionary = snapshot.get("generation", {}) if snapshot.get("generation", {}) is Dictionary else {}
 	snapshot["world_mode"] = str(generation.get("mode", _session_world_mode)).to_lower()
+	_sync_build_project_scope(str(snapshot["world_mode"]), now_msec)
+	snapshot["build_project_state"] = _build_project_state.duplicate(true)
+	_descent_planner.set_world_context(
+		str(snapshot["world_mode"]),
+		str(snapshot["world_mode"]) == "duel",
+		_descent_one_block_source(),
+	)
+	_descent_last_plan = _descent_planner.plan_next(
+		snapshot["self"] as Dictionary,
+		_descent_terrain_map(),
+		_descent_coverage(),
+	)
+	snapshot["descent_plan"] = _descent_last_plan.duplicate(true)
+	snapshot["verified_safe_exit"] = bool(_descent_last_plan.get("eligible", false)) and bool(_descent_last_plan.get("verified_safe_exit", false))
+	snapshot["descent_protected_supports"] = (_descent_last_plan.get("protected_supports", []) as Array).duplicate(true)
+	snapshot["biome_waypoints"] = _reachable_world_underfoot_waypoints(snapshot)
+	var mode_progress := _mode_progress_from_snapshot()
 	var regenerating_block := _regenerating_block_observation()
 	if regenerating_block.is_empty():
 		snapshot.erase("regenerating_block")
@@ -2620,7 +2779,165 @@ func _build_observation(now_msec: int) -> Dictionary:
 	# social observation radius. The provider still filters to the single pinned
 	# enemy, so expanding only this read radius cannot authorize random PvP.
 	var perception_radius := maxf(observation_radius, 4096.0) if _is_pvp_world() else observation_radius
-	return Perception.build(snapshot, own_player_id, perception_radius, now_msec)
+	var observation := Perception.build(snapshot, own_player_id, perception_radius, now_msec)
+	# Perception.build whitelists its keys, so attach the mode-scoped maximums
+	# here for the decision provider: 0 outside their mode, world_mode disambiguates.
+	observation["one_block_mined"] = int(mode_progress.get("one_block_mined", 0))
+	observation["challenge_best_distance"] = int(mode_progress.get("challenge_best_distance", 0))
+	observation["stone_age_goal"] = _stone_age_goal_state.duplicate(true)
+	observation["achievement_goal_states"] = _achievement_goal_states.duplicate(true)
+	observation["build_project_state"] = _build_project_state.duplicate(true)
+	_annotate_active_build_project_route(observation, now_msec)
+	return observation
+
+
+func _annotate_active_build_project_route(observation: Dictionary, now_msec: int = -1) -> void:
+	var project: Dictionary = observation.get("build_project_state", {}) if observation.get("build_project_state", {}) is Dictionary else {}
+	if str(project.get("status", "")) != "active" or str(project.get("target_kind", "")) != "player":
+		_build_project_route_cache_key = ""
+		_build_project_route_checked_msec = -1
+		_build_project_route_reachable = false
+		return
+	var now := Time.get_ticks_msec() if now_msec < 0 else now_msec
+	var target_id := str(project.get("target_id", ""))
+	if target_id.is_empty():
+		return
+	var players: Array = observation.get("players", []) if observation.get("players", []) is Array else []
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var origin_tile := _support_tile_for_position(Contract.target_position(self_state))
+	var preferred_distance := float(observation.get("preferred_player_distance", 84.0))
+	for index in range(players.size()):
+		if not players[index] is Dictionary:
+			continue
+		var player: Dictionary = players[index]
+		if str(player.get("id", "")) != target_id:
+			continue
+		if float(player.get("distance", INF)) > preferred_distance:
+			_build_project_route_cache_key = ""
+			_build_project_route_checked_msec = -1
+			_build_project_route_reachable = false
+			player["route_reachable"] = false
+			players[index] = player
+			observation["players"] = players
+			return
+		var target_tile := _support_tile_for_position(Contract.target_position(player))
+		var cache_key := "%s|%s|%s|%s|%d:%d>%d:%d" % [world_id, session_id, str(project.get("id", "")), target_id, origin_tile.x, origin_tile.y, target_tile.x, target_tile.y]
+		if cache_key != _build_project_route_cache_key or _build_project_route_checked_msec < 0 or now - _build_project_route_checked_msec >= BUILD_PROJECT_ROUTE_REPLAN_MSEC:
+			var route := Navigator.physics_route(
+				origin_tile,
+				target_tile,
+				Callable(self, "_terrain_standable_tile"),
+				Callable(self, "_terrain_climbable_tile"),
+			)
+			_build_project_route_reachable = not route.is_empty() and Vector2i((route.back() as Dictionary).get("tile", origin_tile)) == target_tile
+			_build_project_route_cache_key = cache_key
+			_build_project_route_checked_msec = now
+		player["route_reachable"] = _build_project_route_reachable
+		players[index] = player
+		observation["players"] = players
+		return
+	_build_project_route_cache_key = ""
+	_build_project_route_checked_msec = -1
+	_build_project_route_reachable = false
+
+
+func _reachable_world_underfoot_waypoints(snapshot: Dictionary) -> Array[Dictionary]:
+	if str(snapshot.get("world_mode", "")).to_lower() != "procedural":
+		return []
+	var all_waypoints: Dictionary = snapshot.get("world_underfoot_waypoints", {}) if snapshot.get("world_underfoot_waypoints", {}) is Dictionary else {}
+	var own_waypoints: Variant = all_waypoints.get(own_player_id, [])
+	if not own_waypoints is Array:
+		return []
+	var self_state: Dictionary = snapshot.get("self", {}) if snapshot.get("self", {}) is Dictionary else {}
+	var origin_position := Contract.target_position(self_state)
+	var origin_tile := _support_tile_for_position(origin_position)
+	var reachable: Array[Dictionary] = []
+	for raw_waypoint in own_waypoints:
+		if not raw_waypoint is Dictionary:
+			continue
+		var waypoint := raw_waypoint as Dictionary
+		var biome_id := str(waypoint.get("biome_id", "")).strip_edges().to_lower()
+		if biome_id.is_empty() or not waypoint.has("x") or not waypoint.has("y"):
+			continue
+		# Host x/y are support-tile coordinates (the solid tile directly beneath
+		# a standing player), matching BotNavigator's physics-route contract.
+		var target_tile := Vector2i(int(waypoint.get("x", 0)), int(waypoint.get("y", 0)))
+		if not _terrain_standable_tile(target_tile):
+			continue
+		var route := Navigator.physics_route(
+			origin_tile,
+			target_tile,
+			Callable(self, "_terrain_standable_tile"),
+			Callable(self, "_terrain_climbable_tile"),
+		)
+		if route.is_empty() or Vector2i((route.back() as Dictionary).get("tile", origin_tile)) != target_tile:
+			continue
+		var target_position := _world_position_for_support_tile(target_tile)
+		var candidate := waypoint.duplicate(true)
+		candidate["biome_id"] = biome_id
+		candidate["tile_x"] = target_tile.x
+		candidate["tile_y"] = target_tile.y
+		candidate["position"] = [target_position.x, target_position.y]
+		candidate["distance"] = origin_position.distance_to(target_position)
+		candidate["route_steps"] = maxi(0, route.size() - 1)
+		candidate["reachable"] = true
+		reachable.append(candidate)
+	return reachable
+
+
+func _descent_one_block_source() -> Vector2i:
+	if _session_world_mode != "one_block":
+		return Vector2i(2147483647, 2147483647)
+	var source: Dictionary = _world_snapshot.get("one_block", {}) if _world_snapshot.get("one_block", {}) is Dictionary else {}
+	if not source.has("x") or not source.has("y"):
+		return Vector2i(2147483647, 2147483647)
+	return Vector2i(int(source.get("x", 0)), int(source.get("y", 0)))
+
+
+func _descent_terrain_map() -> Dictionary:
+	var result: Dictionary = {}
+	for raw_key in _terrain_tiles.keys():
+		var key := str(raw_key)
+		var block_name := str(_terrain_tiles[raw_key])
+		var block := _block_entry(block_name)
+		var definition: Dictionary = block.get("definition", {}) if block.get("definition", {}) is Dictionary else {}
+		result[key] = {
+			"block_name": block_name,
+			"solid": bool(block.get("solid", false)),
+			"fluid": bool(block.get("fluid", false)),
+			"temperature": float(block.get("temperature", 0.0)),
+			"falls_when_unsupported": bool(block.get("falls_when_unsupported", false)),
+			"hazard": bool(block.get("hazard", false)),
+			"hazardous": bool(block.get("hazardous", false)),
+			"damage": bool(block.get("damage", false)),
+			"contact_damage": bool(block.get("contact_damage", false)),
+			"damage_per_tick": bool(block.get("damage_per_tick", false)),
+			"definition": definition.duplicate(true),
+		}
+	return result
+
+
+func _descent_coverage() -> Dictionary:
+	var generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
+	var mode := str(generation.get("mode", _session_world_mode)).to_lower()
+	var generated_chunks: Dictionary = {}
+	var raw_chunks: Variant = generation.get("chunks", [])
+	if raw_chunks is Array:
+		for raw_chunk in raw_chunks:
+			if raw_chunk is Dictionary and (raw_chunk as Dictionary).has("x"):
+				generated_chunks[str(int((raw_chunk as Dictionary).get("x", 0)))] = true
+	elif raw_chunks is Dictionary:
+		for raw_chunk_x in raw_chunks:
+			generated_chunks[str(raw_chunk_x)] = true
+	var one_block_source := _descent_one_block_source()
+	return {
+		"mode": mode,
+		"complete": _descent_snapshot_complete,
+		"chunk_width": 16,
+		"generated_chunks": generated_chunks,
+		"observed_cells": _terrain_observed_cells,
+		"one_block_source": [one_block_source.x, one_block_source.y] if one_block_source.x != 2147483647 else [],
+	}
 
 
 func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
@@ -2649,6 +2966,8 @@ func _expire_stale_action_targets(now_msec: int) -> void:
 			continue
 		if str(pending.get("action", "")) in [Contract.ACTION_MINE, Contract.ACTION_PLACE] and key.contains(":"):
 			_blocked_action_targets["tile:%s" % key] = now_msec + ACTION_RETRY_BLOCK_MSEC
+		if str(pending.get("action", "")) == Contract.ACTION_PLACE:
+			_note_build_project_failure(pending, "place_ack_timeout", now_msec)
 		_pending_action_targets.erase(raw_key)
 
 
@@ -3107,20 +3426,35 @@ func _on_decision_proposed(decision: Dictionary) -> void:
 
 func _on_decision_rejected(decision: Dictionary, reason: String) -> void:
 	_record_action_history("rejected", decision, reason)
+	_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
+	_achievement_goal_note_failure(decision, reason, Time.get_ticks_msec())
 	decision_logged.emit({"event": "decision_rejected", "decision": decision.duplicate(true), "reason": reason, "at_msec": Time.get_ticks_msec()})
 
 
 func _on_decision_started(decision: Dictionary) -> void:
 	var now_msec := Time.get_ticks_msec()
 	_record_action_history("started", decision)
+	_stone_age_note_action_started(decision, now_msec)
+	_achievement_goal_note_action_started(decision, now_msec)
 	var action := str(decision.get("action", ""))
+	var decision_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+	if bool(decision_target.get("build_project_complete", false)):
+		_complete_build_project(str(decision_target.get("project_id", "")), now_msec)
+	if bool(decision.get("descent_transition", false)):
+		var armed: bool = _descent_planner.note_intended_transition(decision)
+		structured_log.emit({
+			"event": "descent_transition_armed" if armed else "descent_transition_not_armed",
+			"from_support": decision.get("descent_from_support", []),
+			"to_support": decision.get("descent_to_support", []),
+			"at_msec": now_msec,
+		})
 	if action == Contract.ACTION_EQUIP:
 		var item_name := str(decision.get("target_id", ""))
 		# Apply a local optimistic slot so the rule provider does not re-select
 		# EQUIP every 350 ms while the host ack is in flight. Host snapshots still
 		# overwrite these slots when they arrive.
 		if not item_name.is_empty():
-			_pending_action_targets["equip"] = {"action": action, "item": item_name, "sent_at_msec": now_msec}
+			_pending_action_targets["equip"] = {"action": action, "item": item_name, "stone_age_stage": str(decision.get("stone_age_stage", "")), "sent_at_msec": now_msec}
 			var slot_name := "feet" if item_name.ends_with("_boots") or item_name.ends_with("_sandals") else "hand"
 			_equipment_slots[slot_name] = item_name
 			_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
@@ -3131,8 +3465,24 @@ func _on_decision_started(decision: Dictionary) -> void:
 	elif action == Contract.ACTION_MINE or action == Contract.ACTION_PLACE:
 		var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
 		var key := "%d:%d" % [int(target.get("x", 0)), int(target.get("y", 0))]
-		_pending_action_targets[key] = {"action": action, "block": str(decision.get("block", "")), "content_id": str(target.get("content_id", "")), "sent_at_msec": now_msec}
+		var pending_target := {
+			"action": action,
+			"block": str(decision.get("block", "")),
+			"x": int(target.get("x", 0)),
+			"y": int(target.get("y", 0)),
+			"content_id": str(target.get("content_id", "")),
+			"stone_age_stage": str(decision.get("stone_age_stage", "")),
+			"build_project": target.get("build_project", {}).duplicate(true) if target.get("build_project", {}) is Dictionary else {},
+			"sent_at_msec": now_msec,
+		}
+		if action == Contract.ACTION_MINE and _is_one_block_source_target(target):
+			pending_target["one_block_source"] = true
+			pending_target["one_block_mined_before"] = int(_mode_progress_from_snapshot().get("one_block_mined", 0))
+		_pending_action_targets[key] = pending_target
 		if action == Contract.ACTION_PLACE:
+			var build_project: Dictionary = target.get("build_project", {}) if target.get("build_project", {}) is Dictionary else {}
+			if not build_project.is_empty():
+				_note_build_project_started(build_project, target, now_msec)
 			_protected_build_cells[key] = {
 				"block": str(decision.get("block", "")),
 				"reason": str(target.get("reason", decision.get("goal", ""))),
@@ -3140,7 +3490,7 @@ func _on_decision_started(decision: Dictionary) -> void:
 			}
 	elif action == Contract.ACTION_CRAFT:
 		var craft_output := str(decision.get("target_id", ""))
-		_pending_action_targets["craft"] = {"action": action, "output": craft_output}
+		_pending_action_targets["craft"] = {"action": action, "output": craft_output, "stone_age_stage": str(decision.get("stone_age_stage", ""))}
 		# Apply + inventory_snapshot only (executor skips craft_recipe). Clear the
 		# pending gate immediately on success so wooden_pickaxe can follow planks
 		# on the next decision tick instead of waiting for a craft_recipe ack.
@@ -3190,7 +3540,11 @@ func _on_decision_started(decision: Dictionary) -> void:
 	elif action == Contract.ACTION_OPEN_CONTAINER:
 		var container_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
 		var container_key := "%d:%d" % [int(container_target.get("x", 0)), int(container_target.get("y", 0))]
-		_pending_action_targets[container_key] = {"action": action}
+		_pending_action_targets[container_key] = {
+			"action": action,
+			"death_cache": bool(container_target.get("death_cache", false)) or str(container_target.get("kind", "")) == "death_cache",
+			"owner_player_id": str(container_target.get("owner_player_id", "")),
+		}
 		# Duel chest commands are authoritative and may acknowledge after the
 		# next behaviour tick. Mark the one-shot loadout request as in flight so a
 		# delayed response cannot make the bot spam OPEN_CONTAINER every 900 ms.
@@ -3220,15 +3574,110 @@ func _clear_social_emoji_queue() -> void:
 	_emoji_reply_inflight = false
 
 
+func _sync_build_project_scope(mode: String, now_msec: int) -> void:
+	if _build_project_state.is_empty():
+		return
+	if str(_build_project_state.get("world_id", "")) != world_id or str(_build_project_state.get("world_mode", "")) != mode:
+		structured_log.emit({"event": "build_project_abandoned", "project_id": str(_build_project_state.get("id", "")), "reason": "world_scope_changed", "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
+		_build_project_state.clear()
+		return
+	var status := str(_build_project_state.get("status", ""))
+	if status not in ["cooldown", "abandoned"] or now_msec < int(_build_project_state.get("retry_after_msec", 0)):
+		return
+	if status == "abandoned":
+		var old_id := str(_build_project_state.get("id", ""))
+		_build_project_state.clear()
+		structured_log.emit({"event": "build_project_reconsidered", "project_id": old_id, "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
+		return
+	_build_project_state["status"] = "active"
+	_build_project_state["retry_after_msec"] = 0
+	_build_project_state["pending_placement"] = {}
+	structured_log.emit({"event": "build_project_resumed", "project_id": str(_build_project_state.get("id", "")), "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
+
+
+func _note_build_project_started(project: Dictionary, target: Dictionary, now_msec: int) -> void:
+	var project_id := str(project.get("id", ""))
+	if project_id.is_empty():
+		return
+	if str(_build_project_state.get("id", "")) != project_id:
+		_build_project_state = project.duplicate(true)
+		_build_project_state["world_id"] = world_id
+		_build_project_state["world_mode"] = str((_world_snapshot.get("generation", {}) as Dictionary).get("mode", _session_world_mode)).to_lower() if _world_snapshot.get("generation", {}) is Dictionary else _session_world_mode
+		_build_project_state["started_at_msec"] = now_msec
+		_build_project_state["confirmed_placements"] = 0
+		_build_project_state["failures"] = 0
+		_build_project_state["retry_after_msec"] = 0
+		_build_project_state["status"] = "active"
+		structured_log.emit({"event": "build_project_started", "project_id": project_id, "target_id": str(project.get("target_id", "")), "target_kind": str(project.get("target_kind", "")), "world_id": world_id, "world_mode": str(_build_project_state["world_mode"]), "at_msec": now_msec})
+	else:
+		for key in ["target_id", "target_kind", "goal_tile", "target_position"]:
+			if project.has(key):
+				_build_project_state[key] = project[key]
+	_build_project_state["pending_placement"] = {"x": int(target.get("x", 0)), "y": int(target.get("y", 0)), "at_msec": now_msec}
+
+
+func _note_build_project_placement(pending_target: Dictionary, cell_key: String, now_msec: int) -> void:
+	var project: Dictionary = pending_target.get("build_project", {}) if pending_target.get("build_project", {}) is Dictionary else {}
+	var project_id := str(project.get("id", ""))
+	if project_id.is_empty() or str(_build_project_state.get("id", "")) != project_id:
+		return
+	_build_project_state["confirmed_placements"] = int(_build_project_state.get("confirmed_placements", 0)) + 1
+	var pending_placement: Dictionary = _build_project_state.get("pending_placement", {}) if _build_project_state.get("pending_placement", {}) is Dictionary else {}
+	if int(pending_placement.get("x", 2147483647)) == int(pending_target.get("x", -1)) and int(pending_placement.get("y", 2147483647)) == int(pending_target.get("y", -1)):
+		_build_project_state["pending_placement"] = {}
+	_build_project_state["failures"] = 0
+	_build_project_state["status"] = "active"
+	_build_project_state["retry_after_msec"] = 0
+	structured_log.emit({"event": "build_project_step_confirmed", "project_id": project_id, "cell": cell_key, "confirmed_placements": int(_build_project_state["confirmed_placements"]), "world_id": world_id, "at_msec": now_msec})
+
+
+func _note_build_project_failure(pending_target: Dictionary, reason: String, now_msec: int) -> void:
+	var project: Dictionary = pending_target.get("build_project", {}) if pending_target.get("build_project", {}) is Dictionary else {}
+	var project_id := str(project.get("id", ""))
+	if project_id.is_empty() or str(_build_project_state.get("id", "")) != project_id:
+		return
+	var pending_placement: Dictionary = _build_project_state.get("pending_placement", {}) if _build_project_state.get("pending_placement", {}) is Dictionary else {}
+	if pending_placement.is_empty() or int(pending_placement.get("x", -1)) != int(pending_target.get("x", -2)) or int(pending_placement.get("y", -1)) != int(pending_target.get("y", -2)):
+		return
+	var failures := int(_build_project_state.get("failures", 0)) + 1
+	var abandoned := failures >= BUILD_PROJECT_MAX_FAILURES
+	var retry_delay := ACTION_RETRY_BLOCK_MSEC if reason == "place_ack_timeout" else BUILD_PROJECT_RETRY_MSEC
+	_build_project_state["failures"] = failures
+	_build_project_state["pending_placement"] = {}
+	_build_project_state["status"] = "abandoned" if abandoned else "cooldown"
+	_build_project_state["retry_after_msec"] = now_msec + (60_000 if abandoned else retry_delay)
+	structured_log.emit({"event": "build_project_abandoned" if abandoned else "build_project_step_failed", "project_id": project_id, "reason": reason, "failures": failures, "retry_after_msec": int(_build_project_state["retry_after_msec"]), "world_id": world_id, "world_mode": str(_build_project_state.get("world_mode", "")), "at_msec": now_msec})
+
+
+func _complete_build_project(project_id: String, now_msec: int) -> void:
+	if project_id.is_empty() or str(_build_project_state.get("id", "")) != project_id:
+		return
+	var pending_placement: Dictionary = _build_project_state.get("pending_placement", {}) if _build_project_state.get("pending_placement", {}) is Dictionary else {}
+	if not pending_placement.is_empty():
+		return
+	var completed := _build_project_state.duplicate(true)
+	_build_project_state.clear()
+	structured_log.emit({"event": "build_project_completed", "project_id": project_id, "target_id": str(completed.get("target_id", "")), "confirmed_placements": int(completed.get("confirmed_placements", 0)), "world_id": world_id, "world_mode": str(completed.get("world_mode", "")), "at_msec": now_msec})
+
+
 func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
+	if bool(decision.get("descent_transition", false)) and reason not in ["movement_step"]:
+		_descent_planner.cancel_intended_transition()
 	var target_id := str(decision.get("target_id", ""))
 	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "timeout"] and target_id.begins_with("tile:"):
 		var retry_delay := UNSAFE_ROUTE_RETRY_BLOCK_MSEC if reason in ["unsafe_jump_route", "route_unreachable"] else ACTION_RETRY_BLOCK_MSEC
 		_blocked_action_targets[target_id] = Time.get_ticks_msec() + retry_delay
+	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "timeout", "mine_ack_timeout"]:
+		_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
+		_achievement_goal_note_failure(decision, reason, Time.get_ticks_msec())
 	_record_action_history("finished", decision, reason)
 
 
 func _on_executor_action_failed(decision: Dictionary, reason: String) -> void:
+	if bool(decision.get("descent_transition", false)):
+		_descent_planner.cancel_intended_transition()
+	_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
+	_achievement_goal_note_failure(decision, reason, Time.get_ticks_msec())
 	_record_action_history("failed", decision, reason)
 
 
@@ -3303,7 +3752,17 @@ func _handle_action_result(payload: Dictionary) -> void:
 		_pending_action_targets.erase("equip")
 		if bool(payload.get("accepted", false)) and payload.get("equipment_slots", null) is Dictionary:
 			_equipment_slots = (payload.get("equipment_slots") as Dictionary).duplicate(true)
+			_stone_age_authoritative_equipment = _equipment_from_player_state({"equipment_slots": payload.get("equipment_slots", {})})
 			_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+		elif bool(payload.get("accepted", false)):
+			# The host's positive equip acknowledgement is authoritative even on
+			# older peers that omit the full slots object from action_result.
+			var accepted_item := str(pending_equip.get("item", ""))
+			if not accepted_item.is_empty():
+				var accepted_slot := "feet" if accepted_item.ends_with("_boots") or accepted_item.ends_with("_sandals") else "hand"
+				_stone_age_authoritative_equipment[accepted_slot] = accepted_item
+				_equipment_slots[accepted_slot] = accepted_item
+				_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 		elif not bool(payload.get("accepted", false)):
 			# Roll back the optimistic hand/feet slot so a rejected equip does not
 			# permanently look equipped and starve later tool swaps.
@@ -3312,11 +3771,19 @@ func _handle_action_result(payload: Dictionary) -> void:
 				if str(_equipment_slots.get(slot_name, "")) == rejected_item:
 					_equipment_slots[slot_name] = ""
 			_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+			_stone_age_fail_pending(str(pending_equip.get("stone_age_stage", "")), "equip_rejected", Time.get_ticks_msec())
+		_sync_stone_age_goal(_achievement_observation(), Time.get_ticks_msec())
 		return
 	if action == "open_container":
 		var container_key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
+		var pending_container: Dictionary = _pending_action_targets.get(container_key, {}) if _pending_action_targets.get(container_key, {}) is Dictionary else {}
 		_pending_action_targets.erase(container_key)
-		if bool(payload.get("accepted", false)) and _is_pvp_world():
+		var accepted := bool(payload.get("accepted", false))
+		if _should_award_death_cache_recovery(accepted, str(pending_container.get("owner_player_id", ""))) and bool(pending_container.get("death_cache", false)):
+			var achievements := get_node_or_null("/root/Achievements")
+			if achievements != null and achievements.has_method("record_death_cache_recovered"):
+				achievements.call("record_death_cache_recovered")
+		if accepted and _is_pvp_world():
 			_pvp_chest_opened = true
 			# The authoritative inventory snapshot follows this acknowledgement. Do
 			# not let a stale chest payload trigger another open before it arrives.
@@ -3336,6 +3803,7 @@ func _handle_action_result(payload: Dictionary) -> void:
 			var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
 			if int(inventory.get(output, 0)) <= 0:
 				_block_craft_output(output)
+			_stone_age_fail_pending(str(craft.get("stone_age_stage", "")), "craft_rejected", Time.get_ticks_msec())
 		elif accepted:
 			_craft_blocked_outputs.erase(output)
 		_craft_retry_after_msec = Time.get_ticks_msec() + (CRAFT_RETRY_DELAY_MSEC if not accepted else 2_000)
@@ -3346,16 +3814,19 @@ func _handle_action_result(payload: Dictionary) -> void:
 			"accepted": accepted,
 			"at_msec": Time.get_ticks_msec(),
 		})
-		var achievements := get_node_or_null("/root/Achievements")
-		if accepted and achievements != null and achievements.has_method("record_craft"):
-			achievements.call("record_craft", output)
+		if accepted:
+			_record_craft_achievement(output)
+		_sync_stone_age_goal(_achievement_observation(), Time.get_ticks_msec())
 		return
 	if not bool(payload.get("accepted", false)):
 		var rejected_key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
 		_blocked_action_targets["tile:%s" % rejected_key] = Time.get_ticks_msec() + ACTION_RETRY_BLOCK_MSEC
+		var rejected_target: Dictionary = _pending_action_targets.get(rejected_key, {}) if _pending_action_targets.get(rejected_key, {}) is Dictionary else {}
+		_stone_age_fail_pending(str(rejected_target.get("stone_age_stage", "")), "action_rejected", Time.get_ticks_msec())
 		_pending_action_targets.erase(rejected_key)
 		if action == "place_block":
 			_protected_build_cells.erase(rejected_key)
+			_note_build_project_failure(rejected_target, "place_rejected", Time.get_ticks_msec())
 		if action == "mine_block" and behavior != null and behavior.executor != null and behavior.executor.current_action() == Contract.ACTION_MINE:
 			behavior.executor.cancel("mine_rejected")
 		return
@@ -3363,8 +3834,13 @@ func _handle_action_result(payload: Dictionary) -> void:
 	var target: Dictionary = _pending_action_targets.get(key, {}) if _pending_action_targets.get(key, {}) is Dictionary else {}
 	_pending_action_targets.erase(key)
 	_blocked_action_targets.erase("tile:%s" % key)
+	if action == "place_block":
+		_note_build_project_placement(target, key, Time.get_ticks_msec())
 	if action == "mine_block" and behavior != null and behavior.executor != null and behavior.executor.current_action() == Contract.ACTION_MINE:
 		behavior.executor.cancel("mine_acknowledged")
+	if action == "mine_block" and bool(target.get("one_block_source", false)):
+		_record_accepted_one_block_mine(int(target.get("one_block_mined_before", 0)))
+	_sync_stone_age_goal(_achievement_observation(), Time.get_ticks_msec())
 	var achievements := get_node_or_null("/root/Achievements")
 	if achievements == null:
 		return
@@ -3372,6 +3848,10 @@ func _handle_action_result(payload: Dictionary) -> void:
 		achievements.call("record_block_mined", _block_name_for_content_id(str(target.get("content_id", ""))))
 	elif action == "place_block" and achievements.has_method("record_block_placed"):
 		achievements.call("record_block_placed", str(target.get("block", "")))
+
+
+func _should_award_death_cache_recovery(accepted: bool, owner_player_id: String) -> bool:
+	return accepted and not own_player_id.is_empty() and not owner_player_id.is_empty() and owner_player_id == own_player_id
 
 
 func _update_snapshot_container(key: String, raw_container: Variant) -> void:
@@ -3408,6 +3888,7 @@ func _emit_left(reason: String) -> void:
 		return
 	_left_emitted = true
 	_set_state(STATE_LEAVING)
+	_clear_achievements_community_lock()
 	structured_log.emit({"event": "session_left", "session_id": session_id, "reason": reason, "at_msec": Time.get_ticks_msec()})
 	session_left.emit(reason)
 
@@ -3452,13 +3933,676 @@ func _active_craft_blocked_outputs(now_msec: int) -> Array:
 
 func _achievement_observation() -> Dictionary:
 	var achievements := get_node_or_null("/root/Achievements")
+	var observation: Dictionary = {"unlocked": [], "open": []}
 	if achievements != null and achievements.has_method("observation_for_bot"):
 		var payload: Variant = achievements.call("observation_for_bot")
 		if payload is Dictionary:
-			return (payload as Dictionary).duplicate(true)
-	if achievements != null and achievements.has_method("unlocked_ids"):
-		return {"unlocked": achievements.call("unlocked_ids"), "open": []}
-	return {"unlocked": [], "open": []}
+			observation = (payload as Dictionary).duplicate(true)
+	elif achievements != null and achievements.has_method("unlocked_ids"):
+		observation["unlocked"] = achievements.call("unlocked_ids")
+	if achievements != null:
+		if achievements.has_method("is_community_locked"):
+			observation["community_locked"] = bool(achievements.call("is_community_locked"))
+		else:
+			observation["community_locked"] = bool(achievements.get("community_locked"))
+	return observation
+
+
+func _sync_stone_age_goal(achievements: Dictionary, now_msec: int = -1) -> void:
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	var mode := str((_world_snapshot.get("generation", {}) as Dictionary).get("mode", _session_world_mode)).to_lower() if _world_snapshot.get("generation", {}) is Dictionary else _session_world_mode
+	_sync_achievement_goal_states(achievements, mode, now_msec)
+	var state_world_id := str(_stone_age_goal_state.get("world_id", ""))
+	if not state_world_id.is_empty() and (state_world_id != world_id or str(_stone_age_goal_state.get("world_mode", "")) != mode):
+		_stone_age_goal_state.clear()
+	var unlocked: Array = achievements.get("unlocked", []) if achievements.get("unlocked", []) is Array else []
+	var open_goals: Array = achievements.get("open", []) if achievements.get("open", []) is Array else []
+	var stone_age_open := false
+	for raw_goal in open_goals:
+		if raw_goal is Dictionary and str((raw_goal as Dictionary).get("id", "")) == "stone_age" and not bool((raw_goal as Dictionary).get("locked", false)):
+			stone_age_open = true
+			break
+	var community_locked := bool(achievements.get("community_locked", false))
+	if _stone_age_goal_state.is_empty():
+		if mode not in STONE_AGE_PROGRESS_MODES or community_locked or not stone_age_open or "stone_age" in unlocked or world_id.is_empty():
+			return
+		_stone_age_goal_state = {
+			"world_id": world_id,
+			"world_mode": mode,
+			"achievement_id": "stone_age",
+			"stage": "gather_wood",
+			"status": "active",
+			"stage_failures": 0,
+			"stage_attempts": 0,
+			"retry_after_msec": 0,
+			"pending": {},
+		}
+		structured_log.emit({"event": "goal_selected", "goal": "stone_age", "stage": "gather_wood", "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
+	if mode not in STONE_AGE_PROGRESS_MODES:
+		_stone_age_goal_state["status"] = "paused"
+		return
+	if community_locked:
+		_stone_age_goal_state["status"] = "paused"
+		return
+	if str(_stone_age_goal_state.get("status", "")) == "completed":
+		return
+	if str(_stone_age_goal_state.get("status", "")) in ["cooldown", "abandoned"]:
+		if now_msec < int(_stone_age_goal_state.get("retry_after_msec", 0)):
+			return
+		_stone_age_goal_state["status"] = "active"
+		_stone_age_goal_state["stage_failures"] = 0
+		_stone_age_goal_state["retry_after_msec"] = 0
+		structured_log.emit({"event": "goal_resumed", "goal": "stone_age", "stage": str(_stone_age_goal_state.get("stage", "")), "world_id": world_id, "at_msec": now_msec})
+	elif str(_stone_age_goal_state.get("status", "")) == "paused":
+		_stone_age_goal_state["status"] = "active"
+	_stone_age_confirm_pending_if_observed(now_msec)
+	var next_stage := _stone_age_authoritative_stage()
+	var previous_stage := str(_stone_age_goal_state.get("stage", ""))
+	if next_stage == "complete":
+		_stone_age_goal_state["stage"] = "complete"
+		_stone_age_goal_state["status"] = "completed"
+		_stone_age_goal_state["pending"] = {}
+		structured_log.emit({"event": "goal_completed", "goal": "stone_age", "world_id": world_id, "at_msec": now_msec})
+		return
+	if next_stage != previous_stage:
+		_stone_age_goal_state["stage"] = next_stage
+		_stone_age_goal_state["stage_failures"] = 0
+		_stone_age_goal_state["stage_attempts"] = 0
+		_stone_age_goal_state["retry_after_msec"] = 0
+		_stone_age_goal_state["pending"] = {}
+		structured_log.emit({"event": "step_confirmed", "goal": "stone_age", "previous_stage": previous_stage, "stage": next_stage, "world_id": world_id, "at_msec": now_msec})
+	var details := _stone_age_stage_details(next_stage)
+	_stone_age_goal_state["required_planks"] = int(details.get("required_planks", 0))
+	_stone_age_goal_state["target_output"] = str(details.get("target_output", ""))
+
+
+func _sync_achievement_goal_states(achievements: Dictionary, mode: String, now_msec: int) -> void:
+	mode = mode.strip_edges().to_lower()
+	var state_world_id := str(_achievement_goal_states.get("_world_id", ""))
+	var state_world_mode := str(_achievement_goal_states.get("_world_mode", ""))
+	if not state_world_id.is_empty() and (state_world_id != world_id or state_world_mode != mode):
+		_achievement_goal_states.clear()
+	if world_id.is_empty():
+		_achievement_goal_states.clear()
+		return
+	_achievement_goal_states["_world_id"] = world_id
+	_achievement_goal_states["_world_mode"] = mode
+	var unlocked: Array = achievements.get("unlocked", []) if achievements.get("unlocked", []) is Array else []
+	var open_by_id: Dictionary = {}
+	for raw_goal in achievements.get("open", []) if achievements.get("open", []) is Array else []:
+		if not raw_goal is Dictionary:
+			continue
+		var goal := raw_goal as Dictionary
+		var goal_id := str(goal.get("id", ""))
+		if not goal_id.is_empty() and not bool(goal.get("locked", false)):
+			open_by_id[goal_id] = goal
+	var community_locked := bool(achievements.get("community_locked", false))
+	for goal_id in [
+		"first_block", "first_craft", "here_will_be_home", "miner", "architect",
+		"jeweler", "world_underfoot", "below_surface", "resonance_master",
+		"one_block_world", "dont_look_back", "five_lives", "not_alone", "back_for_it",
+	]:
+		var entry: Dictionary = _achievement_goal_states.get(goal_id, {}) if _achievement_goal_states.get(goal_id, {}) is Dictionary else {}
+		if goal_id in unlocked:
+			var was_completed := str(entry.get("status", "")) == "completed"
+			if entry.is_empty():
+				entry = {"achievement_id": goal_id, "failures": 0, "attempts": 0, "pending": {}}
+			entry["status"] = "completed"
+			entry["pending"] = {}
+			entry["world_id"] = world_id
+			entry["world_mode"] = mode
+			_achievement_goal_states[goal_id] = entry
+			if not was_completed:
+				structured_log.emit({"event": "goal_completed", "goal": goal_id, "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
+			continue
+		if not _achievement_goal_mode_allowed(goal_id, mode):
+			if not entry.is_empty():
+				entry["status"] = "paused"
+				_achievement_goal_states[goal_id] = entry
+			continue
+		if community_locked:
+			if not entry.is_empty():
+				entry["status"] = "paused"
+				_achievement_goal_states[goal_id] = entry
+			continue
+		if not open_by_id.has(goal_id):
+			if not entry.is_empty() and str(entry.get("status", "")) not in ["completed", "cooldown", "abandoned"]:
+				entry["status"] = "inactive"
+				entry["pending"] = {}
+				_achievement_goal_states[goal_id] = entry
+			continue
+		var open_goal: Dictionary = open_by_id[goal_id]
+		if entry.is_empty():
+			entry = {
+				"achievement_id": goal_id,
+				"world_id": world_id,
+				"world_mode": mode,
+				"status": "active",
+				"progress": maxi(0, int(open_goal.get("progress", 0))),
+				"failures": 0,
+				"attempts": 0,
+				"retry_after_msec": 0,
+				"pending": {},
+			}
+			_achievement_goal_states[goal_id] = entry
+			structured_log.emit({"event": "goal_selected", "goal": goal_id, "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
+		var progress := maxi(0, int(open_goal.get("progress", 0)))
+		var previous_progress := int(entry.get("progress", progress))
+		if progress > previous_progress:
+			var pending: Dictionary = entry.get("pending", {}) if entry.get("pending", {}) is Dictionary else {}
+			structured_log.emit({"event": "step_confirmed", "goal": goal_id, "step": str(pending.get("step", "achievement_progress")), "source": "achievement_progress", "progress": progress, "world_id": world_id, "at_msec": now_msec})
+			entry["pending"] = {}
+			entry["failures"] = 0
+			entry["retry_after_msec"] = 0
+			entry["status"] = "active"
+		entry["progress"] = progress
+		entry["world_id"] = world_id
+		entry["world_mode"] = mode
+		_achievement_goal_confirm_pending_if_observed(goal_id, entry, now_msec)
+		var status := str(entry.get("status", "active"))
+		if status in ["cooldown", "abandoned"] and now_msec >= int(entry.get("retry_after_msec", 0)):
+			if status == "abandoned":
+				entry["failures"] = 0
+			entry["status"] = "active"
+			entry["retry_after_msec"] = 0
+			structured_log.emit({"event": "goal_resumed", "goal": goal_id, "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
+		elif status in ["paused", "inactive"]:
+			entry["status"] = "active"
+			entry["pending"] = {}
+			structured_log.emit({"event": "goal_resumed", "goal": goal_id, "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
+		_achievement_goal_states[goal_id] = entry
+
+
+func _achievement_goal_mode_allowed(goal_id: String, mode: String) -> bool:
+	match goal_id:
+		"one_block_world":
+			return mode == "one_block"
+		"dont_look_back":
+			return mode == "challenge_run"
+		"jeweler", "world_underfoot", "resonance_master", "below_surface":
+			return mode == "procedural"
+		"five_lives":
+			return mode in ["skyblock", "floating_islands", "procedural", "one_block", "challenge_run"]
+		"first_block", "first_craft", "here_will_be_home", "miner", "architect", "not_alone", "back_for_it":
+			return mode in ["skyblock", "floating_islands", "procedural", "one_block", "challenge_run", "duel", "pvp"]
+	return false
+
+
+func _achievement_goal_step_id(decision: Dictionary) -> String:
+	var action := str(decision.get("action", ""))
+	var target_id := str(decision.get("target_id", ""))
+	if target_id.is_empty():
+		var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+		if target.has("x") or target.has("y"):
+			target_id = "%s:%s" % [str(target.get("x", "")), str(target.get("y", ""))]
+	return "%s:%s" % [action, target_id]
+
+
+func _achievement_goal_note_action_started(decision: Dictionary, now_msec: int) -> void:
+	var goal_id := str(decision.get("achievement_goal_id", ""))
+	if goal_id.is_empty():
+		return
+	var entry: Dictionary = _achievement_goal_states.get(goal_id, {}) if _achievement_goal_states.get(goal_id, {}) is Dictionary else {}
+	if entry.is_empty() or str(entry.get("status", "")) != "active":
+		return
+	var step_id := _achievement_goal_step_id(decision)
+	var pending: Dictionary = entry.get("pending", {}) if entry.get("pending", {}) is Dictionary else {}
+	if str(pending.get("step", "")) == step_id:
+		return
+	var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+	var expected_item := ""
+	var action := str(decision.get("action", ""))
+	if action == Contract.ACTION_CRAFT:
+		expected_item = str(decision.get("target_id", ""))
+	var expected_slot := ""
+	if action == Contract.ACTION_EQUIP:
+		var equipped_item := str(decision.get("target_id", ""))
+		expected_slot = "feet" if equipped_item.ends_with("_boots") or equipped_item.ends_with("_sandals") else "hand"
+	pending = {
+		"step": step_id,
+		"action": action,
+		"target_id": str(decision.get("target_id", "")),
+		"started_at_msec": now_msec,
+		"expected_item": expected_item,
+		"baseline_inventory": int(_stone_age_authoritative_inventory.get(expected_item, 0)) if not expected_item.is_empty() else 0,
+		"expected_equipment": str(decision.get("target_id", "")) if action == Contract.ACTION_EQUIP else "",
+		"expected_equipment_slot": expected_slot,
+		"target_position": target.get("position", []),
+		"target_x": int(target.get("x", 2147483647)),
+		"target_y": int(target.get("y", 2147483647)),
+		"expected_block": str(target.get("block_name", "")) if action == Contract.ACTION_MINE else str(decision.get("block", "")) if action == Contract.ACTION_PLACE else "",
+	}
+	entry["pending"] = pending
+	entry["attempts"] = int(entry.get("attempts", 0)) + 1
+	_achievement_goal_states[goal_id] = entry
+	structured_log.emit({"event": "step_started", "goal": goal_id, "step": step_id, "world_id": world_id, "world_mode": _session_world_mode, "at_msec": now_msec})
+
+
+func _achievement_goal_confirm_pending_if_observed(goal_id: String, entry: Dictionary, now_msec: int) -> void:
+	var pending: Dictionary = entry.get("pending", {}) if entry.get("pending", {}) is Dictionary else {}
+	if pending.is_empty():
+		return
+	var confirmed := false
+	var expected_item := str(pending.get("expected_item", ""))
+	if not expected_item.is_empty() and int(_stone_age_authoritative_inventory.get(expected_item, 0)) > int(pending.get("baseline_inventory", 0)):
+		confirmed = true
+	var expected_equipment := str(pending.get("expected_equipment", ""))
+	var expected_slot := str(pending.get("expected_equipment_slot", "hand"))
+	if not expected_equipment.is_empty() and str(_stone_age_authoritative_equipment.get(expected_slot, "")) == expected_equipment:
+		confirmed = true
+	var expected_block := str(pending.get("expected_block", ""))
+	var target_x := int(pending.get("target_x", 2147483647))
+	var target_y := int(pending.get("target_y", 2147483647))
+	if not confirmed and not expected_block.is_empty() and target_x != 2147483647 and target_y != 2147483647:
+		var observed_block := str(_terrain_tiles.get("%d:%d" % [target_x, target_y], ""))
+		confirmed = observed_block.is_empty() if str(pending.get("action", "")) == Contract.ACTION_MINE else observed_block == expected_block
+	var target_position: Variant = pending.get("target_position", [])
+	if not confirmed and target_position is Array and (target_position as Array).size() >= 2:
+		var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+		var current_position := Vector2(float(self_state.get("x", 0.0)), float(self_state.get("y", 0.0)))
+		var expected_position := Contract.target_position(target_position)
+		confirmed = current_position.distance_to(expected_position) <= BlockDefs.TILE * 1.5
+	if not confirmed:
+		return
+	structured_log.emit({"event": "step_confirmed", "goal": goal_id, "step": str(pending.get("step", "")), "source": "world_state", "world_id": world_id, "at_msec": now_msec})
+	entry["pending"] = {}
+	entry["failures"] = 0
+	entry["retry_after_msec"] = 0
+	entry["status"] = "active"
+
+
+func _achievement_goal_note_failure(decision: Dictionary, reason: String, now_msec: int) -> void:
+	var goal_id := str(decision.get("achievement_goal_id", ""))
+	if goal_id.is_empty():
+		return
+	var entry: Dictionary = _achievement_goal_states.get(goal_id, {}) if _achievement_goal_states.get(goal_id, {}) is Dictionary else {}
+	var pending: Dictionary = entry.get("pending", {}) if entry.get("pending", {}) is Dictionary else {}
+	if entry.is_empty() or pending.is_empty() or str(pending.get("step", "")) != _achievement_goal_step_id(decision):
+		return
+	_achievement_goal_fail(goal_id, entry, reason, now_msec)
+
+
+func _achievement_goal_fail(goal_id: String, entry: Dictionary, reason: String, now_msec: int) -> void:
+	var pending: Dictionary = entry.get("pending", {}) if entry.get("pending", {}) is Dictionary else {}
+	var failures := int(entry.get("failures", 0)) + 1
+	var abandoned := failures >= ACHIEVEMENT_GOAL_MAX_FAILURES
+	var delay := ACHIEVEMENT_GOAL_ABANDON_MSEC if abandoned else ACHIEVEMENT_GOAL_RETRY_MSEC
+	entry["pending"] = {}
+	entry["failures"] = failures
+	entry["status"] = "abandoned" if abandoned else "cooldown"
+	entry["retry_after_msec"] = now_msec + delay
+	_achievement_goal_states[goal_id] = entry
+	structured_log.emit({"event": "goal_abandoned" if abandoned else "step_failed", "goal": goal_id, "step": str(pending.get("step", "")), "reason": reason, "failures": failures, "retry_after_msec": entry["retry_after_msec"], "world_id": world_id, "world_mode": _session_world_mode, "at_msec": now_msec})
+
+
+func _expire_achievement_goal_pending(now_msec: int) -> void:
+	for raw_goal_id in _achievement_goal_states.keys():
+		var goal_id := str(raw_goal_id)
+		if goal_id.begins_with("_"):
+			continue
+		var entry: Dictionary = _achievement_goal_states.get(goal_id, {}) if _achievement_goal_states.get(goal_id, {}) is Dictionary else {}
+		var pending: Dictionary = entry.get("pending", {}) if entry.get("pending", {}) is Dictionary else {}
+		if pending.is_empty():
+			continue
+		var timeout := ACHIEVEMENT_GOAL_MOVE_TIMEOUT_MSEC if str(pending.get("action", "")) in [Contract.ACTION_MOVE_TO, Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW] else ACHIEVEMENT_GOAL_CONFIRM_TIMEOUT_MSEC
+		if now_msec - int(pending.get("started_at_msec", now_msec)) < timeout:
+			continue
+		_achievement_goal_fail(goal_id, entry, "authoritative_confirmation_timeout", now_msec)
+
+
+func _stone_age_authoritative_stage() -> String:
+	var inventory := _stone_age_authoritative_inventory
+	if int(inventory.get("stone_pickaxe", 0)) > 0 and str(_stone_age_authoritative_equipment.get("hand", "")) == "stone_pickaxe":
+		return "complete"
+	if int(inventory.get("stone_pickaxe", 0)) > 0:
+		return "equip_stone_pickaxe"
+	if not _stone_age_has_tool_tier(inventory, 1):
+		if _stone_age_has_plank_stack(inventory, 3):
+			return "craft_wooden_pickaxe"
+		if _stone_age_has_raw_wood(inventory):
+			return "craft_planks"
+		return "gather_wood"
+	var has_workbench := _station_available(_world_snapshot, "workbench")
+	if not has_workbench:
+		if int(inventory.get("workbench", 0)) > 0:
+			return "place_workbench"
+		if _stone_age_has_plank_stack(inventory, 4):
+			return "craft_workbench"
+		if _stone_age_has_raw_wood(inventory):
+			return "craft_planks"
+		return "gather_wood"
+	if not _stone_age_hand_has_tier(1):
+		return "equip_cobblestone_tool"
+	if int(inventory.get("cobblestone", 0)) < 2:
+		return "mine_cobblestone"
+	if _stone_age_has_plank_stack(inventory, 2):
+		return "craft_stone_pickaxe"
+	if _stone_age_has_raw_wood(inventory):
+		return "craft_planks"
+	return "gather_wood"
+
+
+func _stone_age_stage_details(stage: String) -> Dictionary:
+	match stage:
+		"craft_wooden_pickaxe":
+			return {"target_output": "wooden_pickaxe"}
+		"craft_workbench":
+			return {"target_output": "workbench"}
+		"craft_stone_pickaxe":
+			return {"target_output": "stone_pickaxe"}
+		"craft_planks":
+			var inventory := _stone_age_authoritative_inventory
+			var needed := 3 if not _stone_age_has_tool_tier(inventory, 1) else (4 if not _station_available(_world_snapshot, "workbench") and int(inventory.get("workbench", 0)) <= 0 else 2)
+			return {"required_planks": needed}
+	return {}
+
+
+func _stone_age_has_raw_wood(inventory: Dictionary) -> bool:
+	for name in ["wood", "palm_wood", "pine_wood", "weeping_wood"]:
+		if int(inventory.get(name, 0)) > 0:
+			return true
+	return false
+
+
+func _stone_age_has_plank_stack(inventory: Dictionary, count: int) -> bool:
+	for name in ["planks", "palm_planks", "pine_planks", "weeping_planks"]:
+		if int(inventory.get(name, 0)) >= count:
+			return true
+	return false
+
+
+func _stone_age_has_tool_tier(inventory: Dictionary, required_tier: int) -> bool:
+	for raw_name in inventory:
+		if int(inventory[raw_name]) <= 0:
+			continue
+		if _stone_age_tool_tier(str(raw_name)) >= required_tier:
+			return true
+	return false
+
+
+func _stone_age_hand_has_tier(required_tier: int) -> bool:
+	return _stone_age_tool_tier(str(_stone_age_authoritative_equipment.get("hand", ""))) >= required_tier
+
+
+func _stone_age_tool_tier(item_name: String) -> int:
+	var definition: Dictionary = _block_entry(item_name).get("definition", {}) if _block_entry(item_name).get("definition", {}) is Dictionary else {}
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	var tier := int(effects.get("harvest_tier", 0))
+	if tier <= 0 and item_name in ["wooden_pickaxe", "stone_pickaxe", "copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "resonance_pickaxe"]:
+		tier = ["wooden_pickaxe", "stone_pickaxe", "copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "resonance_pickaxe"].find(item_name) + 1
+	return tier
+
+
+func _stone_age_note_action_started(decision: Dictionary, now_msec: int) -> void:
+	var stage := str(decision.get("stone_age_stage", ""))
+	if stage.is_empty() or _stone_age_goal_state.is_empty() or str(_stone_age_goal_state.get("stage", "")) != stage or str(_stone_age_goal_state.get("status", "")) != "active":
+		return
+	var action := str(decision.get("action", ""))
+	if action not in [Contract.ACTION_CRAFT, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_EQUIP]:
+		return
+	var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+	var target_id := str(decision.get("target_id", ""))
+	var previous: Dictionary = _stone_age_goal_state.get("pending", {}) if _stone_age_goal_state.get("pending", {}) is Dictionary else {}
+	if str(previous.get("stage", "")) == stage and str(previous.get("target_id", "")) == target_id and not previous.is_empty():
+		return
+	var pending := {
+		"stage": stage,
+		"action": action,
+		"target_id": target_id,
+		"started_at_msec": now_msec,
+		"baseline_inventory": int(_stone_age_authoritative_inventory.get(target_id, 0)),
+		"target_x": int(target.get("x", -2147483648)),
+		"target_y": int(target.get("y", -2147483648)),
+		"block": str(decision.get("block", target.get("block_name", ""))),
+	}
+	if action == Contract.ACTION_MINE:
+		pending["target_id"] = target_id
+		pending["expected_item"] = str(target.get("block_name", ""))
+		if stage == "mine_cobblestone":
+			pending["expected_item"] = "cobblestone"
+	elif action == Contract.ACTION_CRAFT:
+		pending["expected_item"] = target_id
+	elif action == Contract.ACTION_EQUIP:
+		pending["expected_equipment"] = target_id
+	elif action == Contract.ACTION_PLACE and str(decision.get("block", "")) == "workbench":
+		pending["expected_station"] = "workbench"
+	_stone_age_goal_state["pending"] = pending
+	_stone_age_goal_state["stage_attempts"] = int(_stone_age_goal_state.get("stage_attempts", 0)) + 1
+	structured_log.emit({"event": "step_started", "goal": "stone_age", "stage": stage, "action": action, "target_id": target_id, "world_id": world_id, "at_msec": now_msec})
+
+
+func _stone_age_confirm_pending_if_observed(now_msec: int) -> void:
+	if _stone_age_goal_state.is_empty():
+		return
+	var pending: Dictionary = _stone_age_goal_state.get("pending", {}) if _stone_age_goal_state.get("pending", {}) is Dictionary else {}
+	if pending.is_empty():
+		return
+	var confirmed := false
+	var expected_item := str(pending.get("expected_item", ""))
+	if not expected_item.is_empty() and int(_stone_age_authoritative_inventory.get(expected_item, 0)) > int(pending.get("baseline_inventory", 0)):
+		confirmed = true
+	var expected_equipment := str(pending.get("expected_equipment", ""))
+	if not expected_equipment.is_empty() and str(_stone_age_authoritative_equipment.get("hand", "")) == expected_equipment:
+		confirmed = true
+	var expected_station := str(pending.get("expected_station", ""))
+	if not expected_station.is_empty() and _station_available(_world_snapshot, expected_station):
+		confirmed = true
+	if not confirmed:
+		return
+	structured_log.emit({"event": "step_confirmed", "goal": "stone_age", "stage": str(pending.get("stage", "")), "action": str(pending.get("action", "")), "target_id": str(pending.get("target_id", "")), "world_id": world_id, "at_msec": now_msec})
+	_stone_age_goal_state["pending"] = {}
+	_stone_age_goal_state["stage_failures"] = 0
+	_stone_age_goal_state["stage_attempts"] = 0
+	_stone_age_goal_state["retry_after_msec"] = 0
+	if str(_stone_age_goal_state.get("status", "")) in ["cooldown", "abandoned"]:
+		_stone_age_goal_state["status"] = "active"
+
+
+func _expire_stone_age_pending(now_msec: int) -> void:
+	if _stone_age_goal_state.is_empty():
+		return
+	var pending: Dictionary = _stone_age_goal_state.get("pending", {}) if _stone_age_goal_state.get("pending", {}) is Dictionary else {}
+	if pending.is_empty() or now_msec - int(pending.get("started_at_msec", now_msec)) < STONE_AGE_CONFIRM_TIMEOUT_MSEC:
+		return
+	if str(pending.get("action", "")) == Contract.ACTION_MINE:
+		var target_id := str(pending.get("target_id", ""))
+		if target_id.begins_with("tile:"):
+			_blocked_action_targets[target_id] = now_msec + UNSAFE_ROUTE_RETRY_BLOCK_MSEC
+	if str(pending.get("action", "")) == Contract.ACTION_CRAFT:
+		_block_craft_output(str(pending.get("target_id", "")), now_msec)
+	_stone_age_fail_pending(str(pending.get("stage", "")), "authoritative_confirmation_timeout", now_msec)
+
+
+func _stone_age_note_failure(decision: Dictionary, reason: String, now_msec: int) -> void:
+	_stone_age_fail_pending(str(decision.get("stone_age_stage", "")), reason, now_msec)
+
+
+func _stone_age_fail_pending(stage: String, reason: String, now_msec: int) -> void:
+	if stage.is_empty() or _stone_age_goal_state.is_empty() or str(_stone_age_goal_state.get("stage", "")) != stage:
+		return
+	var pending: Dictionary = _stone_age_goal_state.get("pending", {}) if _stone_age_goal_state.get("pending", {}) is Dictionary else {}
+	if pending.is_empty() or str(pending.get("stage", "")) != stage:
+		return
+	_stone_age_goal_state["pending"] = {}
+	var failures := int(_stone_age_goal_state.get("stage_failures", 0)) + 1
+	_stone_age_goal_state["stage_failures"] = failures
+	var abandoned := failures >= STONE_AGE_MAX_STAGE_FAILURES
+	_stone_age_goal_state["status"] = "abandoned" if abandoned else "cooldown"
+	_stone_age_goal_state["retry_after_msec"] = now_msec + (STONE_AGE_ABANDON_COOLDOWN_MSEC if abandoned else STONE_AGE_RETRY_COOLDOWN_MSEC)
+	structured_log.emit({
+		"event": "goal_abandoned" if abandoned else "step_failed",
+		"goal": "stone_age",
+		"stage": stage,
+		"reason": reason,
+		"failures": failures,
+		"retry_after_msec": _stone_age_goal_state["retry_after_msec"],
+		"world_id": world_id,
+		"at_msec": now_msec,
+	})
+
+
+## Current world mode plus the two mode-scoped maximums the achievement catalog
+## tracks. Values stay 0 outside their mode so a decision provider can read them
+## unconditionally and still disambiguate with `world_mode`.
+func _mode_progress_from_snapshot() -> Dictionary:
+	var generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
+	var mode := str(generation.get("mode", _session_world_mode)).to_lower()
+	var progress := {"world_mode": mode, "one_block_mined": 0, "challenge_best_distance": 0}
+	if mode == "one_block":
+		var source: Dictionary = _world_snapshot.get("one_block", {}) if _world_snapshot.get("one_block", {}) is Dictionary else {}
+		progress["one_block_mined"] = maxi(_live_one_block_mined, maxi(0, int(source.get("mined", 0))))
+	elif mode == "challenge_run":
+		var challenge: Dictionary = _world_snapshot.get("challenge", {}) if _world_snapshot.get("challenge", {}) is Dictionary else {}
+		progress["challenge_best_distance"] = maxi(_live_challenge_best_distance, maxi(0, int(challenge.get("best_distance", 0))))
+	return progress
+
+
+## Session-sync side effects for /root/Achievements. Only supported world modes
+## are credited, and only when the snapshot actually carries the mode state, so
+## duel/unknown sessions cannot pollute the mode set or the maximums.
+func _record_world_state_achievements() -> void:
+	var achievements := get_node_or_null("/root/Achievements")
+	if achievements == null:
+		return
+	var progress := _mode_progress_from_snapshot()
+	var mode := str(progress.get("world_mode", "")).to_lower()
+	if mode not in ACHIEVEMENT_WORLD_MODES:
+		return
+	if achievements.has_method("record_world_mode"):
+		achievements.call("record_world_mode", mode)
+	if mode == "one_block":
+		var source: Dictionary = _world_snapshot.get("one_block", {}) if _world_snapshot.get("one_block", {}) is Dictionary else {}
+		if source.has("mined") and achievements.has_method("record_one_block_progress"):
+			achievements.call("record_one_block_progress", int(progress.get("one_block_mined", 0)))
+	elif mode == "challenge_run":
+		var challenge: Dictionary = _world_snapshot.get("challenge", {}) if _world_snapshot.get("challenge", {}) is Dictionary else {}
+		if challenge.has("best_distance") and achievements.has_method("record_challenge_distance"):
+			achievements.call("record_challenge_distance", int(progress.get("challenge_best_distance", 0)))
+
+
+## Only the host-provided biome identity can count as a visit. Player coordinates
+## are likewise taken from the authoritative state; procedural depth is not
+## inferred in other modes such as Skyblock or One Block.
+func _record_authoritative_location_achievements(biome_id: String, player_state: Dictionary) -> void:
+	var achievements := get_node_or_null("/root/Achievements")
+	if achievements == null:
+		return
+	var updates := _authoritative_location_achievement_updates(
+		biome_id,
+		player_state,
+		str(_mode_progress_from_snapshot().get("world_mode", "")),
+	)
+	if updates.has("biome_id") and achievements.has_method("record_biome"):
+		achievements.call("record_biome", str(updates["biome_id"]))
+	if updates.has("depth") and achievements.has_method("record_depth"):
+		achievements.call("record_depth", int(updates["depth"]))
+
+
+func _authoritative_location_achievement_updates(biome_id: String, player_state: Dictionary, world_mode: String) -> Dictionary:
+	var updates: Dictionary = {}
+	biome_id = biome_id.strip_edges()
+	if not biome_id.is_empty():
+		updates["biome_id"] = biome_id
+	if world_mode.to_lower() == "procedural" and player_state.has("y"):
+		updates["depth"] = floori(float(player_state.get("y", 0.0)) / float(BlockDefs.TILE))
+	return updates
+
+
+func _record_live_challenge_distance(player_state: Dictionary) -> void:
+	if str(_mode_progress_from_snapshot().get("world_mode", "")).to_lower() != "challenge_run":
+		return
+	if not player_state.has("x") or not player_state.has("y"):
+		return
+	var tile_x := floori((float(player_state.get("x", 0.0)) + float(player_state.get("w", 20.0)) * 0.5) / float(BlockDefs.TILE))
+	var distance := maxi(0, tile_x - 1)
+	var challenge: Dictionary = _world_snapshot.get("challenge", {}) if _world_snapshot.get("challenge", {}) is Dictionary else {}
+	var previous_best := maxi(_live_challenge_best_distance, maxi(0, int(challenge.get("best_distance", 0))))
+	if distance <= previous_best:
+		return
+	_live_challenge_best_distance = maxi(_live_challenge_best_distance, distance)
+	challenge["best_distance"] = distance
+	_world_snapshot["challenge"] = challenge
+	var achievements := get_node_or_null("/root/Achievements")
+	if achievements != null and achievements.has_method("record_challenge_distance"):
+		achievements.call("record_challenge_distance", distance)
+
+
+func _is_one_block_source_target(target: Dictionary) -> bool:
+	if str(_mode_progress_from_snapshot().get("world_mode", "")).to_lower() != "one_block":
+		return false
+	if not target.has("x") or not target.has("y"):
+		return false
+	var source: Dictionary = _world_snapshot.get("one_block", {}) if _world_snapshot.get("one_block", {}) is Dictionary else {}
+	return int(target.get("x", -1)) == int(source.get("x", -2)) and int(target.get("y", -1)) == int(source.get("y", -2))
+
+
+func _record_accepted_one_block_mine(mined_before: int) -> void:
+	if str(_mode_progress_from_snapshot().get("world_mode", "")).to_lower() != "one_block":
+		return
+	var progress := maxi(int(_mode_progress_from_snapshot().get("one_block_mined", 0)), mined_before + 1)
+	_live_one_block_mined = maxi(_live_one_block_mined, progress)
+	var source: Dictionary = _world_snapshot.get("one_block", {}) if _world_snapshot.get("one_block", {}) is Dictionary else {}
+	source["mined"] = maxi(maxi(0, int(source.get("mined", 0))), _live_one_block_mined)
+	_world_snapshot["one_block"] = source
+	var achievements := get_node_or_null("/root/Achievements")
+	if achievements != null and achievements.has_method("record_one_block_progress"):
+		achievements.call("record_one_block_progress", _live_one_block_mined)
+
+
+## Credit a craft exactly once per session. Local optimistic crafts never get a
+## craft_recipe action_result, and the host-ack path can still arrive later, so
+## both call sites share this dedupe instead of double-recording.
+func _record_craft_achievement(output_name: String) -> void:
+	output_name = output_name.strip_edges()
+	if output_name.is_empty() or _achievements_recorded_crafts.has(output_name):
+		return
+	var achievements := get_node_or_null("/root/Achievements")
+	if achievements == null or not achievements.has_method("record_craft"):
+		return
+	_achievements_recorded_crafts[output_name] = true
+	achievements.call("record_craft", output_name)
+
+
+## Mirror MultiplayerClient.is_community() so a headless bot locks the shared
+## account's achievements on managed community servers. When only the dedicated
+## flag is known, unknown classification locks conservatively; non-dedicated
+## (P2P / local) sessions stay unlocked. The lock is only ever released by the
+## session that took it.
+func _sync_achievements_community_lock() -> void:
+	if network_client == null:
+		return
+	var locked := false
+	var resolved := false
+	if network_client.has_method("is_community"):
+		locked = bool(network_client.call("is_community"))
+		resolved = true
+	elif network_client.has_method("is_official_dedicated"):
+		locked = not bool(network_client.call("is_official_dedicated"))
+		resolved = true
+	elif dedicated_server:
+		locked = true
+		resolved = true
+	if not resolved:
+		return
+	var achievements := get_node_or_null("/root/Achievements")
+	if achievements == null or not achievements.has_method("set_community_locked"):
+		return
+	if locked:
+		achievements.call("set_community_locked", true)
+		_achievements_lock_owned = true
+	elif _achievements_lock_owned:
+		achievements.call("set_community_locked", false)
+		_achievements_lock_owned = false
+
+
+func _clear_achievements_community_lock() -> void:
+	if not _achievements_lock_owned:
+		return
+	_achievements_lock_owned = false
+	var achievements := get_node_or_null("/root/Achievements")
+	if achievements != null and achievements.has_method("set_community_locked"):
+		achievements.call("set_community_locked", false)
 
 
 func _set_state(next_state: String) -> void:

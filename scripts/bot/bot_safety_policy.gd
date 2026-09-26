@@ -135,6 +135,10 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 			var mine_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
 			if _player_combat_focus_active(observation) and not bool(mine_target.get("combat_route", false)):
 				return _rejected(decision, "combat_target_has_priority")
+			if _descent_support_is_protected(observation, mine_target):
+				return _rejected(decision, "descent_return_support_protected")
+			if bool(decision.get("descent_clear", false)) and not _valid_descent_clear(decision, observation):
+				return _rejected(decision, "descent_clear_target_mismatch")
 			if not Perception.mine_target_is_safe(observation, mine_target):
 				return _rejected(decision, "mine_target_unsafe_support")
 			if bool(mine_target.get("dig_route", false)):
@@ -162,7 +166,10 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 		Contract.ACTION_PLACE:
 			if str(decision.get("block", "")).is_empty() or not decision.has("target"):
 				return _rejected(decision, "place_target_missing")
-		Contract.ACTION_WAIT, Contract.ACTION_MOVE_TO:
+		Contract.ACTION_MOVE_TO:
+			if bool(decision.get("descent_transition", false)) and not _valid_descent_transition(decision, observation):
+				return _rejected(decision, "descent_transition_unverified")
+		Contract.ACTION_WAIT:
 			pass
 
 	return {"allowed": true, "decision": decision, "reason": ""}
@@ -319,6 +326,59 @@ func _valid_dig_route_target(decision: Dictionary, observation: Dictionary) -> b
 			return false
 		return true
 	return false
+
+
+func _descent_support_is_protected(observation: Dictionary, target: Dictionary) -> bool:
+	if not target.has("x") or not target.has("y"):
+		return false
+	var target_x := int(target.get("x", 2147483647))
+	var target_y := int(target.get("y", 2147483647))
+	for raw_support in _as_array(observation.get("descent_protected_supports", [])):
+		var support := _tile_pair(raw_support)
+		if support != Vector2i(2147483647, 2147483647) and support == Vector2i(target_x, target_y):
+			return true
+	var plan: Dictionary = observation.get("descent_plan", {}) if observation.get("descent_plan", {}) is Dictionary else {}
+	for raw_support in _as_array(plan.get("protected_supports", [])):
+		var support := _tile_pair(raw_support)
+		if support != Vector2i(2147483647, 2147483647) and support == Vector2i(target_x, target_y):
+			return true
+	return false
+
+
+func _valid_descent_clear(decision: Dictionary, observation: Dictionary) -> bool:
+	var plan: Dictionary = observation.get("descent_plan", {}) if observation.get("descent_plan", {}) is Dictionary else {}
+	if not bool(plan.get("eligible", false)) or not bool(plan.get("verified_safe_exit", false)) or str(plan.get("phase", "")) != "clear":
+		return false
+	var expected := _tile_pair(plan.get("clear_tile", []))
+	var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+	return expected != Vector2i(2147483647, 2147483647) and target.has("x") and target.has("y") and expected == Vector2i(int(target.get("x", 0)), int(target.get("y", 0)))
+
+
+func _valid_descent_transition(decision: Dictionary, observation: Dictionary) -> bool:
+	var plan: Dictionary = observation.get("descent_plan", {}) if observation.get("descent_plan", {}) is Dictionary else {}
+	if not bool(plan.get("eligible", false)) or not bool(plan.get("verified_safe_exit", false)) or str(plan.get("phase", "")) != "move":
+		return false
+	var expected_from := _tile_pair(plan.get("current_support", []))
+	var expected_to := _tile_pair(plan.get("next_support", []))
+	if expected_from == Vector2i(2147483647, 2147483647) or expected_to == Vector2i(2147483647, 2147483647):
+		return false
+	if _tile_pair(decision.get("descent_from_support", [])) != expected_from or _tile_pair(decision.get("descent_to_support", [])) != expected_to:
+		return false
+	# The gameplay MOVE_TO target is the bot's top-left coordinate that stands
+	# directly above the nominated support tile, not the tile coordinate itself.
+	var target := Contract.target_position(decision.get("target", {}))
+	var expected_position := Vector2((float(expected_to.x) + 0.5) * 32.0 - 10.0, float(expected_to.y * 32) - 28.0)
+	return target.distance_to(expected_position) <= 1.0
+
+
+func _tile_pair(value: Variant) -> Vector2i:
+	if value is Vector2i:
+		return value
+	if value is Array and value.size() >= 2:
+		return Vector2i(int(value[0]), int(value[1]))
+	if value is Dictionary and (value as Dictionary).has("x") and (value as Dictionary).has("y"):
+		return Vector2i(int((value as Dictionary).get("x", 0)), int((value as Dictionary).get("y", 0)))
+	return Vector2i(2147483647, 2147483647)
 
 
 func _tool_harvest_tier(block_name: String) -> int:
