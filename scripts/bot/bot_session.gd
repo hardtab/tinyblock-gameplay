@@ -1147,6 +1147,7 @@ func _prepare_region_transfer(payload: Dictionary) -> void:
 	var total := int(payload.get("total", 0))
 	var chunk_x := int(payload.get("chunk_x", WorldSim.COORD_LIMIT))
 	if transfer_id.is_empty() or total <= 0 or total > 512 or absi(chunk_x) > WorldSim.COORD_LIMIT / WorldSim.CHUNK_WIDTH:
+		_record_region_transfer_failure("invalid_start", chunk_x, {"total": total})
 		return
 	if not _region_incoming_transfers.has(transfer_id) and _region_incoming_transfers.size() >= 8:
 		var oldest_id := ""
@@ -1172,6 +1173,10 @@ func _prepare_region_transfer(payload: Dictionary) -> void:
 func _store_region_transfer_chunk(payload: Dictionary) -> void:
 	var transfer_id := str(payload.get("transfer_id", ""))
 	if transfer_id.is_empty() or not _region_incoming_transfers.has(transfer_id):
+		_record_region_transfer_failure("chunk_without_start", int(payload.get("chunk_x", WorldSim.COORD_LIMIT)), {
+			"index": int(payload.get("index", -1)),
+			"total": int(payload.get("total", -1)),
+		})
 		return
 	var transfer: Dictionary = _region_incoming_transfers[transfer_id]
 	var chunks: Array[String] = transfer.get("chunks", [])
@@ -1183,16 +1188,30 @@ func _store_region_transfer_chunk(payload: Dictionary) -> void:
 		or index >= chunks.size()
 		or str(payload.get("data", "")).length() > 12_000
 	):
+		_record_region_transfer_failure("invalid_chunk", int(transfer.get("chunk_x", WorldSim.COORD_LIMIT)), {
+			"index": index,
+			"total": int(payload.get("total", -1)),
+			"expected_total": chunks.size(),
+		})
 		_region_incoming_transfers.erase(transfer_id)
 		return
 	chunks[index] = str(payload.get("data", ""))
 	transfer["chunks"] = chunks
 	_region_incoming_transfers[transfer_id] = transfer
+	_record_event("region_transfer_chunk_received", {
+		"chunk_x": int(transfer.get("chunk_x", WorldSim.COORD_LIMIT)),
+		"index": index,
+		"total": chunks.size(),
+		"data_chars": str(payload.get("data", "")).length(),
+	})
 
 
 func _apply_completed_region_transfer(payload: Dictionary) -> void:
 	var transfer_id := str(payload.get("transfer_id", ""))
 	if transfer_id.is_empty() or not _region_incoming_transfers.has(transfer_id):
+		_record_region_transfer_failure("complete_without_start", int(payload.get("chunk_x", WorldSim.COORD_LIMIT)), {
+			"total": int(payload.get("total", -1)),
+		})
 		return
 	var transfer: Dictionary = _region_incoming_transfers[transfer_id]
 	_region_incoming_transfers.erase(transfer_id)
@@ -1203,13 +1222,23 @@ func _apply_completed_region_transfer(payload: Dictionary) -> void:
 		or int(payload.get("total", -1)) != chunks.size()
 		or int(payload.get("chunk_x", WorldSim.COORD_LIMIT)) != int(transfer.get("chunk_x", WorldSim.COORD_LIMIT))
 	):
+		_record_region_transfer_failure("incomplete_transfer", int(transfer.get("chunk_x", WorldSim.COORD_LIMIT)), {
+			"received_chunks": chunks.size() - chunks.count(""),
+			"expected_chunks": chunks.size(),
+			"total": int(payload.get("total", -1)),
+		})
 		return
 	var compressed := Marshalls.base64_to_raw("".join(chunks))
 	var raw := compressed.decompress_dynamic(16 * 1024 * 1024, FileAccess.COMPRESSION_GZIP)
 	if raw.is_empty():
+		_record_region_transfer_failure("decompression_failed", int(transfer.get("chunk_x", WorldSim.COORD_LIMIT)), {"encoded_chars": "".join(chunks).length()})
 		return
 	var parsed: Variant = JSON.parse_string(raw.get_string_from_utf8())
 	if not parsed is Dictionary or int((parsed as Dictionary).get("chunk_x", WorldSim.COORD_LIMIT)) != int(transfer.get("chunk_x", WorldSim.COORD_LIMIT)):
+		_record_region_transfer_failure("invalid_payload", int(transfer.get("chunk_x", WorldSim.COORD_LIMIT)), {
+			"json_dictionary": parsed is Dictionary,
+			"payload_chunk_x": int((parsed as Dictionary).get("chunk_x", WorldSim.COORD_LIMIT)) if parsed is Dictionary else WorldSim.COORD_LIMIT,
+		})
 		return
 	var region_state := parsed as Dictionary
 	if _merge_streamed_chunk_terrain(region_state):
@@ -1222,6 +1251,19 @@ func _apply_completed_region_transfer(payload: Dictionary) -> void:
 			"terrain_tiles": region_tiles.size(),
 		})
 		behavior.request_decision(Time.get_ticks_msec())
+	else:
+		_record_region_transfer_failure("terrain_merge_rejected", int(transfer.get("chunk_x", WorldSim.COORD_LIMIT)), {
+			"has_chunk": region_state.get("chunk", null) is Dictionary,
+			"tiles_array": region_state.get("tiles", null) is Array,
+			"fluids_array": region_state.get("fluids", null) is Array,
+			"tile_count": (region_state.get("tiles", []) as Array).size() if region_state.get("tiles", []) is Array else -1,
+		})
+
+
+func _record_region_transfer_failure(reason: String, chunk_x: int, details: Dictionary = {}) -> void:
+	var event := {"reason": reason, "chunk_x": chunk_x}
+	event.merge(details, true)
+	_record_event("region_transfer_failed", event)
 
 
 func _request_missing_region_chunks(now_msec: int) -> void:
