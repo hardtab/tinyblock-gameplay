@@ -1283,6 +1283,12 @@ func _one_block_achievement_action(observation: Dictionary, legal: PackedStringA
 	var descent_action := _one_block_source_descent_action(observation, legal, source)
 	if not descent_action.is_empty():
 		return descent_action
+	# `reachable: false` means the host snapshot does not prove a physics route to
+	# this exact source. Retrying MOVE_TO at the source center bypasses the safe
+	# descent plan (and repeatedly ends in route_unreachable). Yield to ordinary
+	# progression until a proven descent clear/move step becomes actionable.
+	if source_resource.has("reachable") and not bool(source_resource.get("reachable", false)):
+		return {}
 	if Contract.ACTION_MOVE_TO in legal:
 		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, source_resource, 1800, 0.82)
 	return {}
