@@ -920,14 +920,42 @@ func _exploration_target(observation: Dictionary) -> Dictionary:
 		_last_explore_right_failure_msec = -1
 	if _explore_direction == 0:
 		_explore_direction = -1 if _rng.randf() < 0.5 else 1
+	var target_position := Vector2(INF, INF)
+	var target_progress := -1.0
+	var selected_direction := _explore_direction
+	for direction in [_explore_direction, -_explore_direction]:
+		for raw_waypoint in _as_array(observation.get("safe_exploration_waypoints", [])):
+			if not raw_waypoint is Dictionary:
+				continue
+			var waypoint := raw_waypoint as Dictionary
+			if not bool(waypoint.get("reachable", false)):
+				continue
+			var position := Contract.target_position(waypoint)
+			var delta_x := position.x - origin.x
+			var progress := delta_x * float(direction)
+			if progress < 24.0 or progress > EXPLORE_RADIUS:
+				continue
+			if progress > target_progress or (is_equal_approx(progress, target_progress) and absf(position.y - origin.y) < absf(target_position.y - origin.y)):
+				target_position = position
+				target_progress = progress
+				selected_direction = int(direction)
+		if target_progress >= 0.0:
+			break
+	if target_progress < 0.0:
+		# The long-range explore target must itself be on the proven support graph.
+		# The executor keeps its independent route/edge guards as a second check,
+		# but policy must not repeatedly aim into ungenerated air and never move.
+		_last_explore_target_id = ""
+		return {}
+	_explore_direction = selected_direction
 	var label := "left" if _explore_direction < 0 else "right"
 	var target_id := "explore:%s" % label
 	_last_explore_origin_x = origin.x
 	_last_explore_target_id = target_id
 	return {
 		"id": target_id,
-		"position": [origin.x + float(_explore_direction) * EXPLORE_RADIUS, origin.y],
-		"reason": "discover_terrain",
+		"position": [target_position.x, target_position.y],
+		"reason": "safe_surface_frontier",
 	}
 
 

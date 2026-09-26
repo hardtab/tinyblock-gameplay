@@ -105,6 +105,9 @@ var _pending_action_targets: Dictionary = {}
 var _blocked_action_targets: Dictionary = {}
 var _protected_build_cells: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
+var _safe_exploration_waypoint_cache: Array[Dictionary] = []
+var _safe_exploration_waypoint_cache_origin := Vector2i(2147483647, 2147483647)
+var _safe_exploration_waypoint_cache_checked_msec := -1
 ## Explicitly observed tile coordinates. Missing terrain is treated as air only
 ## when a complete static-world snapshot or generated chunk proves that cell.
 var _terrain_observed_cells: Dictionary = {}
@@ -994,6 +997,9 @@ func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 	_terrain_tiles.clear()
 	_terrain_observed_cells.clear()
 	_support_preserving_mine_tiles.clear()
+	_safe_exploration_waypoint_cache.clear()
+	_safe_exploration_waypoint_cache_origin = Vector2i(2147483647, 2147483647)
+	_safe_exploration_waypoint_cache_checked_msec = -1
 	if not raw_tiles is Array:
 		return
 	for raw_tile in raw_tiles:
@@ -1108,6 +1114,8 @@ func _seed_duel_fallback_terrain() -> void:
 
 func _apply_tile_batch(payload: Dictionary) -> void:
 	var tiles: Array = payload.get("tiles", []) if payload.get("tiles", []) is Array else []
+	if not tiles.is_empty():
+		_safe_exploration_waypoint_cache_checked_msec = -1
 	for raw_tile in tiles:
 		if not raw_tile is Dictionary:
 			continue
@@ -2791,6 +2799,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["craft_blocked_outputs"] = _active_craft_blocked_outputs(now_msec)
 	snapshot["food_eat_cooldown_until_msec"] = _food_eat_cooldown_until_msec
 	snapshot["terrain_tiles"] = _terrain_observation(snapshot["self"] as Dictionary)
+	snapshot["safe_exploration_waypoints"] = _safe_exploration_waypoints(snapshot["self"] as Dictionary)
 	# Station availability changes when the bot places a workbench/furnace or
 	# walks out of its radius, so recipes cannot remain frozen at join time.
 	snapshot["recipes"] = _recipe_catalog(snapshot)
@@ -2974,6 +2983,43 @@ func _reachable_world_underfoot_waypoints(snapshot: Dictionary) -> Array[Diction
 		candidate["reachable"] = true
 		reachable.append(candidate)
 	return reachable
+
+
+func _safe_exploration_waypoints(self_state: Dictionary) -> Array[Dictionary]:
+	if _terrain_tiles.is_empty():
+		return []
+	var origin := Contract.target_position(self_state)
+	var origin_tile := _support_tile_for_position(origin)
+	var now := Time.get_ticks_msec()
+	if (
+		origin_tile == _safe_exploration_waypoint_cache_origin
+		and _safe_exploration_waypoint_cache_checked_msec >= 0
+		and now - _safe_exploration_waypoint_cache_checked_msec < 450
+	):
+		return _safe_exploration_waypoint_cache.duplicate(true)
+	var reachable := Navigator.physics_reachable_tiles(
+		origin_tile,
+		Callable(self, "_terrain_standable_tile"),
+		Callable(self, "_terrain_climbable_tile"),
+	)
+	var result: Array[Dictionary] = []
+	var max_horizontal_tiles := ceili(STARTER_TOOLING_RESOURCE_SCAN_RADIUS / float(BlockDefs.TILE))
+	for raw_tile in reachable:
+		if typeof(raw_tile) != TYPE_VECTOR2I:
+			continue
+		var tile: Vector2i = raw_tile
+		if tile == origin_tile or abs(tile.x - origin_tile.x) > max_horizontal_tiles:
+			continue
+		var position := _world_position_for_support_tile(tile)
+		result.append({
+			"support_tile": [tile.x, tile.y],
+			"position": [position.x, position.y],
+			"reachable": true,
+		})
+	_safe_exploration_waypoint_cache = result
+	_safe_exploration_waypoint_cache_origin = origin_tile
+	_safe_exploration_waypoint_cache_checked_msec = now
+	return result.duplicate(true)
 
 
 func _descent_one_block_source() -> Vector2i:
