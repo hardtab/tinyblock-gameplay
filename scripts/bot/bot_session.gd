@@ -3634,6 +3634,22 @@ func _is_regenerating_block_tile(tile_x: int, tile_y: int) -> bool:
 	)
 
 
+## A host-confirmed source that both regenerates on mine and preserves its own
+## support stays a valid, safe target even while bootstrap perception is
+## narrowed to wood. This is capability-based: any tile the host confirms as
+## regenerating and support-preserving qualifies, independent of world mode or
+## block name, so ordinary filler is still filtered.
+func _is_host_authoritative_regenerating_source(tile_x: int, tile_y: int) -> bool:
+	var source := _regenerating_block_observation()
+	return (
+		not source.is_empty()
+		and int(source.get("x", 2147483647)) == tile_x
+		and int(source.get("y", 2147483647)) == tile_y
+		and bool(source.get("regenerates_on_mine", false))
+		and bool(source.get("preserves_support_on_mine", false))
+	)
+
+
 func _terrain_observation(self_state: Dictionary) -> Array:
 	var result: Array = []
 	var origin := Contract.target_position(self_state)
@@ -3729,7 +3745,8 @@ func _append_visible_resource(
 	if seen.has(key):
 		return
 	if _stone_age_gathering_wood() and not _is_starter_wood_log_name(block_name):
-		return
+		if not _is_host_authoritative_regenerating_source(tile_x, tile_y):
+			return
 	var block_definition: Dictionary = _block_entry(block_name)
 	var solid := bool(block_definition.get("solid", false)) and not bool(block_definition.get("fluid", false))
 	if block_name.is_empty() or block_name == "air" or not solid:
@@ -3790,7 +3807,8 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 		var content_id := str(tile.get("content_id", ""))
 		var block_name := _block_name_for_content_id(content_id)
 		if _stone_age_gathering_wood() and not _is_starter_wood_log_name(block_name):
-			continue
+			if not _is_host_authoritative_regenerating_source(tile_x, tile_y):
+				continue
 		var block_definition: Dictionary = _block_entry(block_name)
 		var solid := bool(block_definition.get("solid", false)) and not bool(block_definition.get("fluid", false))
 		if block_name.is_empty() or block_name == "air" or not solid:
