@@ -1198,12 +1198,16 @@ func _store_region_transfer_chunk(payload: Dictionary) -> void:
 	chunks[index] = str(payload.get("data", ""))
 	transfer["chunks"] = chunks
 	_region_incoming_transfers[transfer_id] = transfer
-	_record_event("region_transfer_chunk_received", {
+	var received_event := {
+		"event": "region_transfer_chunk_received",
 		"chunk_x": int(transfer.get("chunk_x", WorldSim.COORD_LIMIT)),
 		"index": index,
 		"total": chunks.size(),
 		"data_chars": str(payload.get("data", "")).length(),
-	})
+		"at_msec": Time.get_ticks_msec(),
+	}
+	structured_log.emit(received_event)
+	_record_event("region_transfer_chunk_received", received_event)
 
 
 func _apply_completed_region_transfer(payload: Dictionary) -> void:
@@ -1250,6 +1254,12 @@ func _apply_completed_region_transfer(payload: Dictionary) -> void:
 			"chunk_x": chunk_x,
 			"terrain_tiles": region_tiles.size(),
 		})
+		structured_log.emit({
+			"event": "region_transfer_applied",
+			"chunk_x": chunk_x,
+			"terrain_tiles": region_tiles.size(),
+			"at_msec": Time.get_ticks_msec(),
+		})
 		behavior.request_decision(Time.get_ticks_msec())
 	else:
 		_record_region_transfer_failure("terrain_merge_rejected", int(transfer.get("chunk_x", WorldSim.COORD_LIMIT)), {
@@ -1264,6 +1274,10 @@ func _record_region_transfer_failure(reason: String, chunk_x: int, details: Dict
 	var event := {"reason": reason, "chunk_x": chunk_x}
 	event.merge(details, true)
 	_record_event("region_transfer_failed", event)
+	var log_event := event.duplicate(true)
+	log_event["event"] = "region_transfer_failed"
+	log_event["at_msec"] = Time.get_ticks_msec()
+	structured_log.emit(log_event)
 
 
 func _request_missing_region_chunks(now_msec: int) -> void:
