@@ -769,7 +769,11 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 
 	var destination := target
 	if action in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW]:
-		destination = Navigator.preferred_follow_target(Vector2(target.x, origin.y), origin, float(observation.get("preferred_player_distance", 84.0)))
+		# Keep vertical separation when choosing the comfortable follow radius.
+		# Flattening the player's Y made a bot directly above/below them appear
+		# close enough horizontally, so MOVE_NEAR_PLAYER repeatedly completed at
+		# its current position instead of navigating down a tree or ledge.
+		destination = Navigator.preferred_follow_target(target, origin, float(observation.get("preferred_player_distance", 84.0)))
 	elif action == Contract.ACTION_FLEE_FROM:
 		destination = Navigator.step_away_from(origin, Vector2(target.x, origin.y), 120.0)
 	elif action == Contract.ACTION_MOVE_TO and _is_pvp_world():
