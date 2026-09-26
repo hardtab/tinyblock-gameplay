@@ -331,6 +331,12 @@ func _valid_dig_route_target(decision: Dictionary, observation: Dictionary) -> b
 func _descent_support_is_protected(observation: Dictionary, target: Dictionary) -> bool:
 	if not target.has("x") or not target.has("y"):
 		return false
+	# A host-confirmed regenerating source may be mined even when it is also
+	# the bot's recorded return support: the host replaces it atomically and
+	# explicitly guarantees that support remains. Do not trust capability flags
+	# copied only into a proposed decision; match the exact observed resource.
+	if _observed_mine_preserves_support(observation, target):
+		return false
 	var target_x := int(target.get("x", 2147483647))
 	var target_y := int(target.get("y", 2147483647))
 	for raw_support in _as_array(observation.get("descent_protected_supports", [])):
@@ -342,6 +348,26 @@ func _descent_support_is_protected(observation: Dictionary, target: Dictionary) 
 		var support := _tile_pair(raw_support)
 		if support != Vector2i(2147483647, 2147483647) and support == Vector2i(target_x, target_y):
 			return true
+	return false
+
+
+func _observed_mine_preserves_support(observation: Dictionary, target: Dictionary) -> bool:
+	if not target.has("x") or not target.has("y"):
+		return false
+	var target_id := str(target.get("id", ""))
+	if target_id.is_empty():
+		return false
+	var target_x := int(target.get("x", 2147483647))
+	var target_y := int(target.get("y", 2147483647))
+	for raw_resource in _as_array(observation.get("visible_resources", [])):
+		if not raw_resource is Dictionary:
+			continue
+		var resource := raw_resource as Dictionary
+		if str(resource.get("id", "")) != target_id:
+			continue
+		if int(resource.get("x", 2147483647)) != target_x or int(resource.get("y", 2147483647)) != target_y:
+			continue
+		return bool(resource.get("regenerates_on_mine", false)) and bool(resource.get("preserves_support_on_mine", false))
 	return false
 
 
