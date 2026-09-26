@@ -4313,7 +4313,25 @@ func _achievement_goal_fail(goal_id: String, entry: Dictionary, reason: String, 
 	entry["status"] = "abandoned" if abandoned else "cooldown"
 	entry["retry_after_msec"] = now_msec + delay
 	_achievement_goal_states[goal_id] = entry
-	structured_log.emit({"event": "goal_abandoned" if abandoned else "step_failed", "goal": goal_id, "step": str(pending.get("step", "")), "reason": reason, "failures": failures, "retry_after_msec": entry["retry_after_msec"], "world_id": world_id, "world_mode": _session_world_mode, "at_msec": now_msec})
+	var log_entry := {
+		"event": "goal_abandoned" if abandoned else "step_failed",
+		"goal": goal_id,
+		"step": str(pending.get("step", "")),
+		"reason": reason,
+		"failures": failures,
+		"retry_after_msec": entry["retry_after_msec"],
+		"world_id": world_id,
+		"world_mode": _session_world_mode,
+		"at_msec": now_msec,
+	}
+	if goal_id == "one_block_world" and reason == "route_unreachable":
+		# Explain why a renewable source could not be reached without logging any
+		# player identity or inventory data. The same snapshot feeds the safe
+		# descent fallback, so this distinguishes missing coverage/support from a
+		# valid step that simply did not approach the source.
+		log_entry["safe_descent_plan"] = _descent_last_plan.duplicate(true)
+		log_entry["safe_descent_verified"] = bool(_descent_last_plan.get("verified_safe_exit", false))
+	structured_log.emit(log_entry)
 
 
 func _expire_achievement_goal_pending(now_msec: int) -> void:
