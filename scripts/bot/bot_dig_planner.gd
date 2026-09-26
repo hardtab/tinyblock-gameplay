@@ -100,6 +100,11 @@ static func _target_tile(observation: Dictionary, origin: Vector2i) -> Vector2i:
 
 
 static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, observation: Dictionary) -> Dictionary:
+	if _is_descent_return_support(observation, x, y):
+		# The generic obstacle planner must honor the same return-route invariant
+		# as the descent planner. Otherwise safety rejects this identical MINE
+		# proposal on every tick, preventing all lower-priority activities.
+		return {}
 	return {
 		"action": Contract.ACTION_MINE,
 		"goal": Contract.GOAL_DIG_ROUTE,
@@ -119,6 +124,24 @@ static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, obser
 		"commit_for_ms": 1200,
 		"confidence": 0.74,
 	}
+
+
+static func _is_descent_return_support(observation: Dictionary, x: int, y: int) -> bool:
+	var protected_supports: Array = []
+	var raw_supports: Variant = observation.get("descent_protected_supports", [])
+	if raw_supports is Array:
+		protected_supports.append_array(raw_supports as Array)
+	var descent_plan: Dictionary = observation.get("descent_plan", {}) if observation.get("descent_plan", {}) is Dictionary else {}
+	raw_supports = descent_plan.get("protected_supports", [])
+	if raw_supports is Array:
+		protected_supports.append_array(raw_supports as Array)
+	for raw_support in protected_supports:
+		if not raw_support is Array or (raw_support as Array).size() < 2:
+			continue
+		var support := raw_support as Array
+		if int(support[0]) == x and int(support[1]) == y:
+			return true
+	return false
 
 
 static func _place_step(x: int, y: int, origin: Vector2i, target: Vector2i, observation: Dictionary) -> Dictionary:
