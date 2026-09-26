@@ -20,6 +20,14 @@ const STONE_AGE_MODES: Array[String] = [
 const TOOL_PROGRESSION_MODES: Array[String] = [
 	"skyblock", "floating_islands", "procedural", "one_block",
 ]
+## Purposeful construction (This Will Be Home) only elevates placements that
+## the existing safety-gated builders already produced: a route-backed
+## bridge/stair, a required crafting station, or the capped One Block apron.
+## Challenge Run must keep advancing along its course and PvP must stay on the
+## pinned opponent, so both are excluded from the home-build strategy.
+const HOME_BUILD_MODES: Array[String] = [
+	"skyblock", "floating_islands", "procedural", "one_block",
+]
 
 ## The generic lifecycle state machine tracks these IDs. Stone Age has its own
 ## richer staged lifecycle in BotSession and is intentionally separate.
@@ -37,7 +45,7 @@ const GOAL_METADATA: Array[Dictionary] = [
 	{"id": "first_craft", "modes": SHARED_PROGRESS_MODES, "actionable": false, "strategy_priority": -1},
 	{"id": "stone_age", "modes": STONE_AGE_MODES, "actionable": true, "strategy_priority": -1},
 	{"id": "first_discovery", "modes": [], "actionable": false, "strategy_priority": -1},
-	{"id": "here_will_be_home", "modes": SHARED_PROGRESS_MODES, "actionable": false, "strategy_priority": -1},
+	{"id": "here_will_be_home", "modes": HOME_BUILD_MODES, "actionable": true, "strategy_priority": 50},
 	{"id": "miner", "modes": SHARED_PROGRESS_MODES, "actionable": false, "strategy_priority": -1},
 	{"id": "architect", "modes": SHARED_PROGRESS_MODES, "actionable": false, "strategy_priority": -1},
 	{"id": "ideas_collector", "modes": [], "actionable": false, "strategy_priority": -1},
@@ -92,6 +100,10 @@ static func stone_age_progression_modes() -> PackedStringArray:
 
 static func tool_progression_modes() -> PackedStringArray:
 	return PackedStringArray(TOOL_PROGRESSION_MODES)
+
+
+static func home_build_modes() -> PackedStringArray:
+	return PackedStringArray(HOME_BUILD_MODES)
 
 
 static func recordable_world_modes() -> PackedStringArray:

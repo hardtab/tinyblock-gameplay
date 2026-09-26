@@ -1383,6 +1383,10 @@ func _mode_achievement_action(observation: Dictionary, legal: PackedStringArray)
 				var depth_action := _procedural_depth_action(observation, legal, goal)
 				if not depth_action.is_empty():
 					return _tag_achievement_goal(depth_action, goal_id)
+			"here_will_be_home":
+				var home_action := _home_build_achievement_action(observation, legal, goal)
+				if not home_action.is_empty():
+					return home_action
 	return {}
 
 
@@ -1414,6 +1418,27 @@ func _tag_useful_home_placement(decision: Dictionary, observation: Dictionary) -
 	if not useful_placement or _open_achievement(observation, "here_will_be_home").is_empty():
 		return decision
 	return _tag_achievement_goal(decision, "here_will_be_home")
+
+
+func _home_build_achievement_action(observation: Dictionary, legal: PackedStringArray, goal: Dictionary) -> Dictionary:
+	if goal.is_empty() or Contract.ACTION_PLACE not in legal:
+		return {}
+	var mode := str(observation.get("world_mode", "")).strip_edges().to_lower()
+	if (
+		mode not in AchievementRegistry.home_build_modes()
+		or bool(observation.get("pvp_world", false))
+		or not str(observation.get("aggressive_player_id", "")).is_empty()
+	):
+		return {}
+	# Reuse the terrain-aware planner and its resource reserves. This strategy
+	# may prioritize a safe, useful placement already selected by the planner,
+	# but it must never invent a decorative or unsupported build for the counter.
+	var target := _build_target(observation)
+	if target.is_empty() or bool(target.get("project_complete", false)):
+		return {}
+	var candidate := _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, target, 700, 0.7)
+	var attributed := _tag_useful_home_placement(candidate, observation)
+	return attributed if str(attributed.get("achievement_goal_id", "")) == "here_will_be_home" else {}
 
 
 func _world_underfoot_action(observation: Dictionary, legal: PackedStringArray, goal: Dictionary) -> Dictionary:
