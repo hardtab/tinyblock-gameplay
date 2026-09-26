@@ -2221,8 +2221,29 @@ func _on_network_message(message: Dictionary) -> void:
 func _connected_peers_supported(raw_players: Variant) -> bool:
 	if not raw_players is Array:
 		return true
+	var peer_checks: Array[Dictionary] = []
 	for raw_player in raw_players:
-		if raw_player is Dictionary and not _peer_client_version_supported(raw_player as Dictionary):
+		if not raw_player is Dictionary:
+			continue
+		var entry := raw_player as Dictionary
+		var player_id := str(entry.get("player_id", entry.get("id", "")))
+		var role := str(entry.get("role", "")).to_lower()
+		var is_host := player_id == _host_player_id or role == "host"
+		var supported := _peer_client_version_supported(entry)
+		peer_checks.append({
+			"role": role,
+			"is_host": is_host,
+			"has_client_version": not str(entry.get("client_version", "")).is_empty(),
+			"client_version": str(entry.get("client_version", "")),
+			"supported": supported,
+		})
+		if not supported:
+			structured_log.emit({
+				"event": "unsupported_connected_peer_version",
+				"host_id_known": not _host_player_id.is_empty(),
+				"peers": peer_checks,
+				"at_msec": Time.get_ticks_msec(),
+			})
 			return false
 	return true
 
