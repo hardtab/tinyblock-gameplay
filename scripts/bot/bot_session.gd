@@ -120,6 +120,10 @@ var _physics_route: Array[Dictionary] = []
 var _physics_route_target := Vector2i(2147483647, 2147483647)
 var _physics_route_target_id := ""
 var _physics_route_replan_msec := -1
+var _host_rejected_transitions: Dictionary = {}
+var _active_air_transition: Dictionary = {}
+var _host_rejected_transition_from := Vector2i(2147483647, 2147483647)
+var _host_rejected_transition_until_msec := -1
 var _physics_advanced_this_frame := false
 var _jump_active := false
 var _jump_velocity := 0.0
@@ -179,6 +183,7 @@ const DUEL_PROTOCOL_VERSION := 3
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const LOCAL_MAX_FALL_SPEED := 12.0
 const MAX_AUTHORITATIVE_MOTION_DIVERGENCE := BlockDefs.TILE * 3.0
+const HOST_REJECTED_TRANSITION_COOLDOWN_MSEC := 8_000
 const TREE_CLIMB_SPEED := -3.2
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
@@ -321,6 +326,10 @@ func join_session(record: Dictionary) -> void:
 	_physics_route_target = Vector2i(2147483647, 2147483647)
 	_physics_route_target_id = ""
 	_physics_route_replan_msec = -1
+	_host_rejected_transitions.clear()
+	_active_air_transition.clear()
+	_host_rejected_transition_from = Vector2i(2147483647, 2147483647)
+	_host_rejected_transition_until_msec = -1
 	_jump_active = false
 	_jump_velocity = 0.0
 	_jump_ground_y = 0.0
@@ -749,6 +758,11 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# makes the guest oscillate above the bridge instead of requesting its next
 	# support block.  The arena lane is flat, so keep this transition grounded.
 	var route_step := {} if _is_pvp_world() else _physics_route_step(origin, destination, target_id)
+	if bool(route_step.get("unreachable", false)) and _host_rejected_transition_blocks_origin(_support_tile_for_position(origin)):
+		_set_desired_input(false, false, false)
+		_advance_local_physics(self_state, delta, false)
+		_world_snapshot["self"] = self_state
+		return {"done": true, "reason": "edge_guard"}
 	# Exploration targets deliberately point into newly revealed/unknown space;
 	# refuse them unless the cached terrain proves a route. For ordinary movement,
 	# keep the collision/edge guards below in charge so a failed route search around
@@ -790,9 +804,18 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	else:
 		hint = route_kind if route_kind in ["jump", "climb"] else _movement_hint(origin, destination)
 	if _climb_active or hint == "climb":
+		if not _climb_active:
+			_active_air_transition = {
+				"from": _support_tile_for_position(origin),
+				"to": _support_tile_for_position(destination),
+			}
 		_set_desired_input(signf(destination.x - origin.x) < 0.0, signf(destination.x - origin.x) > 0.0, true)
 		return _climb_step(self_state, destination, delta)
 	if hint == "jump" and not _jump_active:
+		_active_air_transition = {
+			"from": _support_tile_for_position(origin),
+			"to": _support_tile_for_position(destination),
+		}
 		_jump_active = true
 		_jump_start_x = float(self_state.get("x", origin.x))
 	if _jump_active:
@@ -906,6 +929,8 @@ func _physics_route_step(origin: Vector2, destination: Vector2, target_id: Strin
 			target_tile,
 			Callable(self, "_terrain_standable_tile"),
 			Callable(self, "_terrain_climbable_tile"),
+			Navigator.MAX_PHYSICS_ROUTE_NODES,
+			Callable(self, "_physics_transition_allowed"),
 		)
 		_physics_route_target = target_tile
 		_physics_route_target_id = target_id
@@ -924,6 +949,30 @@ func _physics_route_step(origin: Vector2, destination: Vector2, target_id: Strin
 			}
 		_physics_route.pop_front()
 	return {}
+
+
+func _host_rejected_transition_blocks_origin(origin_tile: Vector2i) -> bool:
+	if origin_tile != _host_rejected_transition_from:
+		return false
+	if Time.get_ticks_msec() >= _host_rejected_transition_until_msec:
+		_host_rejected_transition_from = Vector2i(2147483647, 2147483647)
+		_host_rejected_transition_until_msec = -1
+		return false
+	return true
+
+
+func _physics_transition_key(from_tile: Vector2i, to_tile: Vector2i) -> String:
+	return "%d:%d>%d:%d" % [from_tile.x, from_tile.y, to_tile.x, to_tile.y]
+
+
+func _physics_transition_allowed(from_tile: Vector2i, to_tile: Vector2i, _kind: String = "") -> bool:
+	var key := _physics_transition_key(from_tile, to_tile)
+	if not _host_rejected_transitions.has(key):
+		return true
+	if Time.get_ticks_msec() >= int(_host_rejected_transitions.get(key, 0)):
+		_host_rejected_transitions.erase(key)
+		return true
+	return false
 
 
 func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) -> Dictionary:
@@ -951,6 +1000,8 @@ func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) ->
 			candidate,
 			Callable(self, "_terrain_standable_tile"),
 			Callable(self, "_terrain_climbable_tile"),
+			Navigator.MAX_PHYSICS_ROUTE_NODES,
+			Callable(self, "_physics_transition_allowed"),
 		)
 		if route.is_empty() or Vector2i((route.back() as Dictionary).get("tile", origin_support)) != candidate:
 			continue
@@ -2340,6 +2391,23 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 				# airborne. Even a small drift matters here: continuing the private
 				# arc makes later plans target terrain the authoritative avatar never
 				# reached, eventually causing snap-backs and apparent floating.
+				if host_rejected_air_motion and not _active_air_transition.is_empty():
+					var transition_from: Vector2i = _active_air_transition.get("from", Vector2i(2147483647, 2147483647))
+					var transition_to: Vector2i = _active_air_transition.get("to", Vector2i(2147483647, 2147483647))
+					if transition_from != transition_to and transition_from.x != 2147483647:
+						var transition_key := _physics_transition_key(transition_from, transition_to)
+						var retry_after_msec := Time.get_ticks_msec() + HOST_REJECTED_TRANSITION_COOLDOWN_MSEC
+						_host_rejected_transitions[transition_key] = retry_after_msec
+						_host_rejected_transition_from = transition_from
+						_host_rejected_transition_until_msec = retry_after_msec
+						structured_log.emit({
+							"event": "host_rejected_air_transition",
+							"from": [transition_from.x, transition_from.y],
+							"to": [transition_to.x, transition_to.y],
+							"retry_after_msec": retry_after_msec,
+							"at_msec": Time.get_ticks_msec(),
+						})
+				_active_air_transition.clear()
 				_jump_active = false
 				_climb_active = false
 				_physics_route.clear()
@@ -2939,6 +3007,8 @@ func _annotate_active_build_project_route(observation: Dictionary, now_msec: int
 				target_tile,
 				Callable(self, "_terrain_standable_tile"),
 				Callable(self, "_terrain_climbable_tile"),
+				Navigator.MAX_PHYSICS_ROUTE_NODES,
+				Callable(self, "_physics_transition_allowed"),
 			)
 			_build_project_route_reachable = not route.is_empty() and Vector2i((route.back() as Dictionary).get("tile", origin_tile)) == target_tile
 			_build_project_route_cache_key = cache_key
@@ -2980,6 +3050,8 @@ func _reachable_world_underfoot_waypoints(snapshot: Dictionary) -> Array[Diction
 			target_tile,
 			Callable(self, "_terrain_standable_tile"),
 			Callable(self, "_terrain_climbable_tile"),
+			Navigator.MAX_PHYSICS_ROUTE_NODES,
+			Callable(self, "_physics_transition_allowed"),
 		)
 		if route.is_empty() or Vector2i((route.back() as Dictionary).get("tile", origin_tile)) != target_tile:
 			continue
