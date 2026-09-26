@@ -4390,7 +4390,17 @@ func _achievement_goal_note_failure(decision: Dictionary, reason: String, now_ms
 		return
 	var entry: Dictionary = _achievement_goal_states.get(goal_id, {}) if _achievement_goal_states.get(goal_id, {}) is Dictionary else {}
 	var pending: Dictionary = entry.get("pending", {}) if entry.get("pending", {}) is Dictionary else {}
-	if entry.is_empty() or pending.is_empty() or str(pending.get("step", "")) != _achievement_goal_step_id(decision):
+	if entry.is_empty() or str(entry.get("status", "")) != "active":
+		return
+	var step_id := _achievement_goal_step_id(decision)
+	if pending.is_empty():
+		# A policy/safety rejection happens before action_started, so it has no
+		# pending step to fail. Record this rejected proposal as the failed step;
+		# otherwise the provider can select the same unsafe achievement action
+		# on every planning tick without entering the normal retry cooldown.
+		pending = {"step": step_id}
+		entry["pending"] = pending
+	elif str(pending.get("step", "")) != step_id:
 		return
 	_achievement_goal_fail(goal_id, entry, reason, now_msec)
 
