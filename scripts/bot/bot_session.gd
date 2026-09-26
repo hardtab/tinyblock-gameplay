@@ -164,6 +164,7 @@ var _craft_blocked_outputs: Dictionary = {}
 var _food_eat_cooldown_until_msec := -1
 var _inventory_host_revision := 0
 var _inventory_client_revision := 0
+var _initial_loadout_source := ""
 var _population_logged := false
 ## True only while this session owns the /root/Achievements community lock, so
 ## a leave never unlocks a lock another system (e.g. the local host player) set.
@@ -393,6 +394,7 @@ func join_session(record: Dictionary) -> void:
 	_population_logged = false
 	_achievements_recorded_crafts.clear()
 	_progression_gear_stripped = false
+	_initial_loadout_source = ""
 	safety.reset_session()
 	_world_snapshot.clear()
 	_equipment_slots = {"hand": "", "feet": ""}
@@ -2307,6 +2309,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		_stone_age_goal_state.clear()
 		_stone_age_authoritative_inventory.clear()
 		_stone_age_authoritative_equipment = {"hand": "", "feet": ""}
+		_initial_loadout_source = ""
 	var selected_world_mode := _session_world_mode
 	_world_snapshot = snapshot.duplicate(true)
 	if _world_snapshot.has("active_projectiles"):
@@ -2392,6 +2395,18 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_world_snapshot["visible_containers"] = _visible_containers_from_snapshot(_world_snapshot, local_state)
 	_world_snapshot["threats"] = _threats_from_creatures(_world_snapshot.get("creatures", []))
 	_session_world_mode = str(snapshot_generation.get("mode", _session_world_mode)).to_lower()
+	var loadout_source := "own_player_state" if has_authoritative_self_state else "empty_fallback_no_own_state"
+	if _initial_loadout_source != "own_player_state" and (_initial_loadout_source.is_empty() or has_authoritative_self_state):
+		structured_log.emit({
+			"event": "bot_initial_loadout",
+			"world_id": world_id,
+			"world_mode": _session_world_mode,
+			"source": loadout_source,
+			"inventory": (_world_snapshot.get("inventory_summary", {}) as Dictionary).duplicate(true),
+			"equipment": _equipment_slots.duplicate(true),
+			"at_msec": Time.get_ticks_msec(),
+		})
+		_initial_loadout_source = loadout_source
 	_descent_planner.begin_session(
 		session_id,
 		world_id,
