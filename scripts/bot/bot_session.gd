@@ -35,6 +35,7 @@ const STATE_LEAVING := "LEAVING"
 const DEFAULT_SYNC_TIMEOUT_MSEC := 45_000
 const DEFAULT_EMPTY_GRACE_MSEC := 30_000
 const DEFAULT_OBSERVATION_RADIUS := 256.0
+const STARTER_TOOLING_RESOURCE_SCAN_RADIUS := 1536.0
 
 var backend: Object
 var network_client: Object
@@ -2868,7 +2869,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	# Duel arenas may place the pinned opponent farther away than the ordinary
 	# social observation radius. The provider still filters to the single pinned
 	# enemy, so expanding only this read radius cannot authorize random PvP.
-	var perception_radius := maxf(observation_radius, 4096.0) if _is_pvp_world() else observation_radius
+	var perception_radius := maxf(observation_radius, 4096.0) if _is_pvp_world() else _decision_observation_radius()
 	var observation := Perception.build(snapshot, own_player_id, perception_radius, now_msec)
 	# Perception.build whitelists its keys, so attach the mode-scoped maximums
 	# here for the decision provider: 0 outside their mode, world_mode disambiguates.
@@ -3215,7 +3216,8 @@ func _visible_resources_from_terrain(self_state: Dictionary) -> Array:
 	var origin := Contract.target_position(self_state)
 	# Starter trees sit above the ice/dirt pad. Keep a wide read so the bot can
 	# still lock onto wood after it digs a few blocks downward.
-	var max_distance := maxf(observation_radius, 420.0) + float(BlockDefs.TILE)
+	var scan_radius := maxf(observation_radius, STARTER_TOOLING_RESOURCE_SCAN_RADIUS) if _starter_tooling_gathering_wood() else maxf(observation_radius, 420.0)
+	var max_distance := scan_radius + float(BlockDefs.TILE)
 	var seen: Dictionary = {}
 	for key in _terrain_tiles:
 		var parts := str(key).split(":")
@@ -3270,6 +3272,8 @@ func _append_visible_resource(
 	var key := "%d:%d" % [tile_x, tile_y]
 	if seen.has(key):
 		return
+	if _starter_tooling_gathering_wood() and not _is_starter_wood_log_name(block_name):
+		return
 	var block_definition: Dictionary = _block_entry(block_name)
 	var solid := bool(block_definition.get("solid", false)) and not bool(block_definition.get("fluid", false))
 	if block_name.is_empty() or block_name == "air" or not solid:
@@ -3295,12 +3299,32 @@ func _append_visible_resource(
 	})
 
 
+func _starter_tooling_gathering_wood() -> bool:
+	return (
+		str(_stone_age_goal_state.get("goal_id", "")) == "starter_tooling"
+		and str(_stone_age_goal_state.get("status", "")) == "active"
+		and str(_stone_age_goal_state.get("stage", "")) == "gather_wood"
+	)
+
+
+func _is_starter_wood_log_name(block_name: String) -> bool:
+	var normalized := block_name.strip_edges().to_lower()
+	return normalized in ["wood", "palm_wood", "pine_wood", "weeping_wood"] or normalized.ends_with("_wood")
+
+
+func _decision_observation_radius() -> float:
+	if _starter_tooling_gathering_wood():
+		return maxf(observation_radius, STARTER_TOOLING_RESOURCE_SCAN_RADIUS)
+	return observation_radius
+
+
 func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -> Array:
 	var resources: Array = []
 	if not raw_tiles is Array:
 		return resources
 	var origin := Contract.target_position(self_state)
-	var max_distance := observation_radius + float(BlockDefs.TILE)
+	var scan_radius := maxf(observation_radius, STARTER_TOOLING_RESOURCE_SCAN_RADIUS) if _starter_tooling_gathering_wood() else observation_radius
+	var max_distance := scan_radius + float(BlockDefs.TILE)
 	for raw_tile in raw_tiles:
 		if not raw_tile is Dictionary:
 			continue
@@ -3309,6 +3333,8 @@ func _visible_resources_from_tiles(raw_tiles: Variant, self_state: Dictionary) -
 		var tile_y := int(tile.get("y", 0))
 		var content_id := str(tile.get("content_id", ""))
 		var block_name := _block_name_for_content_id(content_id)
+		if _starter_tooling_gathering_wood() and not _is_starter_wood_log_name(block_name):
+			continue
 		var block_definition: Dictionary = _block_entry(block_name)
 		var solid := bool(block_definition.get("solid", false)) and not bool(block_definition.get("fluid", false))
 		if block_name.is_empty() or block_name == "air" or not solid:
