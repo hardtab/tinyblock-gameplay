@@ -578,12 +578,24 @@ func handle_message(message: Dictionary) -> void:
 		_record_event(message_type, payload)
 		return
 	if message_type == "region_start":
+		structured_log.emit({
+			"event": "region_transfer_started",
+			"chunk_x": int(payload.get("chunk_x", WorldSim.COORD_LIMIT)),
+			"total_chunks": int(payload.get("total", 0)),
+			"at_msec": Time.get_ticks_msec(),
+		})
 		_prepare_region_transfer(payload)
 		return
 	if message_type == "region_chunk":
 		_store_region_transfer_chunk(payload)
 		return
 	if message_type == "region_complete":
+		structured_log.emit({
+			"event": "region_transfer_complete_received",
+			"chunk_x": int(payload.get("chunk_x", WorldSim.COORD_LIMIT)),
+			"total_chunks": int(payload.get("total", 0)),
+			"at_msec": Time.get_ticks_msec(),
+		})
 		_apply_completed_region_transfer(payload)
 		return
 	if message_type == "emoji_reaction":
