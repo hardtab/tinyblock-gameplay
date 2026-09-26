@@ -2006,13 +2006,15 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	var spawn_support_recovered := _stabilize_initial_supported_pose(local_state)
 	_world_snapshot["self"] = local_state.duplicate(true)
 	# Root-level inventory/equipment belong to the host avatar. A guest bot must
-	# start empty unless its own multiplayer.player_states entry already exists.
-	_world_snapshot["inventory_summary"] = _inventory_summary_from_player_state(local_state)
+	# start empty unless its own multiplayer.player_states entry already exists:
+	# never seed them from the fallback root `player` object.
+	var inventory_self_state := own_authoritative_state(local_state, has_authoritative_self_state)
+	_world_snapshot["inventory_summary"] = _inventory_summary_from_player_state(inventory_self_state)
 	_stone_age_authoritative_inventory = (_world_snapshot["inventory_summary"] as Dictionary).duplicate(true)
 	_inventory_host_revision = maxi(0, int(local_state.get("inventory_host_revision", 0)))
 	_inventory_client_revision = maxi(_inventory_client_revision, int(local_state.get("inventory_client_revision", 0)))
 	_world_snapshot["recipes"] = _recipe_catalog(_world_snapshot)
-	_equipment_slots = _equipment_from_player_state(local_state)
+	_equipment_slots = _equipment_from_player_state(inventory_self_state)
 	_stone_age_authoritative_equipment = _equipment_slots.duplicate(true)
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
 	_world_snapshot["craft_pending_output"] = _craft_pending_output
@@ -2145,6 +2147,14 @@ func _inventory_by_name(raw_inventory: Variant) -> Dictionary:
 		if not name.is_empty():
 			result[name] = int((raw_inventory as Dictionary)[raw_id])
 	return result
+
+
+## The root `player` object of a world snapshot is the host avatar. A guest bot
+## may adopt inventory/equipment only from an authoritative
+## `multiplayer.player_states` row for its own player id; the fallback host
+## avatar must never seed them.
+static func own_authoritative_state(local_state: Dictionary, has_authoritative_self_state: bool) -> Dictionary:
+	return local_state if has_authoritative_self_state else {}
 
 
 func _inventory_summary_from_player_state(player_state: Dictionary) -> Dictionary:

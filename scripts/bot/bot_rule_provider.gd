@@ -15,6 +15,11 @@ var _last_plant_msec := -1
 var _explore_direction := 0
 var _last_explore_origin_x := INF
 var _last_explore_target_id := ""
+## Identity of the finished/failed explore outcome already applied to the
+## heading. The action history keeps terminal entries for the whole bounded
+## window, so without this the same stale outcome was re-evaluated on every
+## decide() and could flip the heading again long after it was accounted for.
+var _last_explore_outcome_key := ""
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 ## Only chase a player once they are clearly farther than the preferred gap.
@@ -85,6 +90,7 @@ func reset() -> void:
 	_explore_direction = 0
 	_last_explore_origin_x = INF
 	_last_explore_target_id = ""
+	_last_explore_outcome_key = ""
 
 
 func decide(observation: Dictionary) -> Dictionary:
@@ -858,23 +864,30 @@ func _exploration_target(observation: Dictionary) -> Dictionary:
 			continue
 		var phase := str(entry.get("phase", ""))
 		var target_id := str(entry.get("target_id", ""))
-		if (
-			phase in ["finished", "failed"]
-			and not _last_explore_target_id.is_empty()
-			and target_id == _last_explore_target_id
-			and _explore_direction != 0
-		):
-			var reason := str(entry.get("reason", ""))
-			var progress := absf(origin.x - _last_explore_origin_x)
-			var route_failed := reason in [
-				"blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "lava_guard",
-			]
-			# A timeout can mean either a slow but useful traversal or a movement
-			# controller that made no progress. Preserve the heading when the bot
-			# moved; rotate only when a bounded movement window stalled. Explicit
-			# route/obstacle failures always make the opposite side worth probing.
-			if route_failed or progress < MIN_EXPLORE_PROGRESS_PX:
-				_explore_direction *= -1
+		if phase in ["finished", "failed"]:
+			# Consume each terminal outcome at most once. History keeps old
+			# entries around, and re-reading one of them later would measure a
+			# different movement window and flip an already-settled heading.
+			var outcome_key := _explore_outcome_key(entry)
+			if outcome_key != _last_explore_outcome_key:
+				_last_explore_outcome_key = outcome_key
+				if (
+					not _last_explore_target_id.is_empty()
+					and target_id == _last_explore_target_id
+					and _explore_direction != 0
+				):
+					var reason := str(entry.get("reason", ""))
+					var progress := absf(origin.x - _last_explore_origin_x)
+					var route_failed := reason in [
+						"blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "lava_guard",
+					]
+					# A timeout can mean either a slow but useful traversal or a
+					# movement controller that made no progress. Preserve the
+					# heading when the bot moved; rotate only when a bounded
+					# movement window stalled. Explicit route/obstacle failures
+					# always make the opposite side worth probing.
+					if route_failed or progress < MIN_EXPLORE_PROGRESS_PX:
+						_explore_direction *= -1
 		break
 	if _explore_direction == 0:
 		_explore_direction = -1 if _rng.randf() < 0.5 else 1
@@ -887,6 +900,18 @@ func _exploration_target(observation: Dictionary) -> Dictionary:
 		"position": [origin.x + float(_explore_direction) * EXPLORE_RADIUS, origin.y],
 		"reason": "discover_terrain",
 	}
+
+
+## Stable identity of a recorded explore outcome. Real history entries always
+## carry the host clock stamp, so at_msec + phase + target + reason separates two
+## distinct events while staying stable across repeated observations.
+func _explore_outcome_key(entry: Dictionary) -> String:
+	return "%d:%s:%s:%s" % [
+		int(entry.get("at_msec", -1)),
+		str(entry.get("phase", "")),
+		str(entry.get("target_id", "")),
+		str(entry.get("reason", "")),
+	]
 
 
 func _inventory(observation: Dictionary) -> Dictionary:
