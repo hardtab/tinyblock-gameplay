@@ -692,11 +692,21 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	var origin := Contract.target_position(self_state)
 	var target := Contract.target_position(decision.get("target", {}))
 	var target_id := str(decision.get("target_id", ""))
+	var player_target := false
 	if target_id != "":
 		for raw_player in observation.get("players", []):
 			if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == target_id:
 				target = Contract.target_position(raw_player)
+				player_target = true
 				break
+	if action == Contract.ACTION_MOVE_TO and target_id.begins_with("tile:"):
+		var stand_position := _reachable_stand_position_for_block(origin, decision.get("target", {}) as Dictionary)
+		if stand_position.is_empty():
+			_set_desired_input(false, false, false)
+			_advance_local_physics(self_state, delta, false)
+			_world_snapshot["self"] = self_state
+			return {"done": true, "reason": "route_unreachable"}
+		target = Contract.target_position(stand_position)
 
 	if action == Contract.ACTION_LOOK_AT:
 		_set_desired_input(false, false, false)
@@ -743,6 +753,15 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# makes the guest oscillate above the bridge instead of requesting its next
 	# support block.  The arena lane is flat, so keep this transition grounded.
 	var route_step := {} if _is_pvp_world() else _physics_route_step(origin, destination, target_id)
+	# Exploration targets deliberately point into newly revealed/unknown space;
+	# refuse them unless the cached terrain proves a route. For ordinary movement,
+	# keep the collision/edge guards below in charge so a failed route search around
+	# a wall still reports blocked_obstacle/edge_guard instead of masking it.
+	if bool(route_step.get("unreachable", false)) and not player_target and target_id.begins_with("explore:"):
+		_set_desired_input(false, false, false)
+		_advance_local_physics(self_state, delta, false)
+		_world_snapshot["self"] = self_state
+		return {"done": true, "reason": "route_unreachable"}
 	var route_kind := str(route_step.get("kind", ""))
 	if not route_step.is_empty():
 		destination = route_step.get("position", destination)
@@ -895,6 +914,8 @@ func _physics_route_step(origin: Vector2, destination: Vector2, target_id: Strin
 		_physics_route_target = target_tile
 		_physics_route_target_id = target_id
 		_physics_route_replan_msec = now + 450
+	if _physics_route.is_empty() and origin_tile != target_tile:
+		return {"unreachable": true}
 	if _physics_route.size() <= 1:
 		return {}
 	while _physics_route.size() > 1:
@@ -907,6 +928,43 @@ func _physics_route_step(origin: Vector2, destination: Vector2, target_id: Strin
 			}
 		_physics_route.pop_front()
 	return {}
+
+
+func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) -> Dictionary:
+	if not target.has("x") or not target.has("y") or _terrain_tiles.is_empty():
+		return {}
+	var tile := Vector2i(int(target.get("x", 0)), int(target.get("y", 0)))
+	var origin_support := _support_tile_for_position(origin)
+	var candidates: Array[Vector2i] = [
+		tile + Vector2i.LEFT,
+		tile + Vector2i.RIGHT,
+		tile + Vector2i.LEFT * 2,
+		tile + Vector2i.RIGHT * 2,
+		tile + Vector2i.LEFT + Vector2i.DOWN,
+		tile + Vector2i.RIGHT + Vector2i.DOWN,
+		tile + Vector2i.LEFT * 2 + Vector2i.DOWN,
+		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN,
+	]
+	var best_position := {}
+	var best_cost := INF
+	for candidate in candidates:
+		if not _terrain_standable_tile(candidate):
+			continue
+		var route := Navigator.physics_route(
+			origin_support,
+			candidate,
+			Callable(self, "_terrain_standable_tile"),
+			Callable(self, "_terrain_climbable_tile"),
+		)
+		if route.is_empty() or Vector2i((route.back() as Dictionary).get("tile", origin_support)) != candidate:
+			continue
+		var position := _world_position_for_support_tile(candidate)
+		var cost := float(route.size()) * float(BlockDefs.TILE) + origin.distance_to(position)
+		if cost >= best_cost:
+			continue
+		best_cost = cost
+		best_position = {"position": [position.x, position.y]}
+	return best_position
 
 
 func _support_tile_for_position(position: Vector2) -> Vector2i:
