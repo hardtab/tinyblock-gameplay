@@ -1264,6 +1264,8 @@ func _one_block_achievement_action(observation: Dictionary, legal: PackedStringA
 		var descent_action := _one_block_source_descent_action(observation, legal, source)
 		if not descent_action.is_empty():
 			return descent_action
+		if _one_block_source_descent_approaches_source(observation, source):
+			return {}
 		# Never invent a MINE target from the mode marker alone. Move to the
 		# authoritative source coordinate and wait for a fresh resource snapshot.
 		if Contract.ACTION_MOVE_TO in legal:
@@ -1593,6 +1595,26 @@ func _one_block_source_descent_action(observation: Dictionary, legal: PackedStri
 	if next_support.distance_squared_to(source_tile) >= current_support.distance_squared_to(source_tile):
 		return {}
 	return _safe_descent_plan_action(observation, legal, descent_plan)
+
+
+func _one_block_source_descent_approaches_source(observation: Dictionary, source: Dictionary) -> bool:
+	var descent_plan: Dictionary = observation.get("descent_plan", {}) if observation.get("descent_plan", {}) is Dictionary else {}
+	var from_support: Array = descent_plan.get("current_support", []) if descent_plan.get("current_support", []) is Array else []
+	var to_support: Array = descent_plan.get("next_support", []) if descent_plan.get("next_support", []) is Array else []
+	if (
+		not bool(observation.get("verified_safe_exit", false))
+		or not bool(descent_plan.get("eligible", false))
+		or not bool(descent_plan.get("verified_safe_exit", false))
+		or from_support.size() < 2
+		or to_support.size() < 2
+		or not source.has("x")
+		or not source.has("y")
+	):
+		return false
+	var source_tile := Vector2i(int(source.get("x", 0)), int(source.get("y", 0)))
+	var current_support := Vector2i(int(from_support[0]), int(from_support[1]))
+	var next_support := Vector2i(int(to_support[0]), int(to_support[1]))
+	return next_support.distance_squared_to(source_tile) < current_support.distance_squared_to(source_tile)
 
 
 func _safe_descent_plan_action(observation: Dictionary, legal: PackedStringArray, descent_plan: Dictionary) -> Dictionary:
