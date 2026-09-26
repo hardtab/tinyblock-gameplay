@@ -1157,7 +1157,7 @@ func _stone_age_progression_action(observation: Dictionary, legal: PackedStringA
 	# inventory/equipment/terrain evidence, or applies a bounded timeout.
 	if not pending.is_empty() and str(pending.get("action", "")) in [Contract.ACTION_CRAFT, Contract.ACTION_EQUIP, Contract.ACTION_PLACE]:
 		if Contract.ACTION_WAIT in legal:
-			return _stone_age_decision(stage, Contract.ACTION_WAIT, {}, 700, 0.75)
+			return _stone_age_decision(stage, Contract.ACTION_WAIT, {}, 700, 0.75, observation)
 		return {}
 	var inventory := _inventory(observation)
 	var recipes: Array = _as_array(observation.get("recipes", []))
@@ -1169,7 +1169,7 @@ func _stone_age_progression_action(observation: Dictionary, legal: PackedStringA
 			var required := maxi(1, int(goal.get("required_planks", 3)))
 			var plank_output := _craftable_plank_output(recipes, inventory, blocked, required)
 			if not plank_output.is_empty() and Contract.ACTION_CRAFT in legal:
-				return _stone_age_decision(stage, Contract.ACTION_CRAFT, {"id": plank_output}, 700, 0.94)
+				return _stone_age_decision(stage, Contract.ACTION_CRAFT, {"id": plank_output}, 700, 0.94, observation)
 			if not _stone_age_gather_wood_action(observation, legal, stage).is_empty():
 				return _stone_age_gather_wood_action(observation, legal, stage)
 		"craft_wooden_pickaxe":
@@ -1180,29 +1180,29 @@ func _stone_age_progression_action(observation: Dictionary, legal: PackedStringA
 			if int(inventory.get("workbench", 0)) > 0 and Contract.ACTION_PLACE in legal:
 				var station_target := _station_place_target(observation, "workbench")
 				if not station_target.is_empty():
-					return _stone_age_decision(stage, Contract.ACTION_PLACE, station_target, 900, 0.96)
+					return _stone_age_decision(stage, Contract.ACTION_PLACE, station_target, 900, 0.96, observation)
 		"equip_cobblestone_tool":
 			var resource_tool := _mining_tool_for_target(observation, {"harvest_tier": 1})
 			if not resource_tool.is_empty() and Contract.ACTION_EQUIP in legal:
-				return _stone_age_decision(stage, Contract.ACTION_EQUIP, {"id": resource_tool}, 350, 0.96)
+				return _stone_age_decision(stage, Contract.ACTION_EQUIP, {"id": resource_tool}, 350, 0.96, observation)
 		"mine_cobblestone":
 			var hand := str((observation.get("equipment_slots", {}) as Dictionary).get("hand", "")) if observation.get("equipment_slots", {}) is Dictionary else ""
 			if _tool_harvest_tier(hand) < 1:
 				var available_tool := _mining_tool_for_target(observation, {"harvest_tier": 1})
 				if not available_tool.is_empty() and Contract.ACTION_EQUIP in legal:
-					return _stone_age_decision(stage, Contract.ACTION_EQUIP, {"id": available_tool}, 350, 0.96)
+					return _stone_age_decision(stage, Contract.ACTION_EQUIP, {"id": available_tool}, 350, 0.96, observation)
 				return {}
 			var cobble := _stone_age_cobblestone_target(observation)
 			if not cobble.is_empty():
 				if bool(cobble.get("reachable", false)) and Contract.ACTION_MINE in legal and _has_required_mining_tier(observation, cobble) and Perception.mine_target_is_safe(observation, cobble):
-					return _stone_age_decision(stage, Contract.ACTION_MINE, cobble, 2200, 0.92)
+					return _stone_age_decision(stage, Contract.ACTION_MINE, cobble, 2200, 0.92, observation)
 				if Contract.ACTION_MOVE_TO in legal and Perception.mine_target_is_safe(observation, cobble):
-					return _stone_age_decision(stage, Contract.ACTION_MOVE_TO, cobble, 2200, 0.8)
+					return _stone_age_decision(stage, Contract.ACTION_MOVE_TO, cobble, 2200, 0.8, observation)
 		"craft_stone_pickaxe":
 			return _stone_age_craft_or_gather(observation, legal, stage, "stone_pickaxe", 2)
 		"equip_stone_pickaxe":
 			if int(inventory.get("stone_pickaxe", 0)) > 0 and str((observation.get("equipment_slots", {}) as Dictionary).get("hand", "")) != "stone_pickaxe" and Contract.ACTION_EQUIP in legal:
-				return _stone_age_decision(stage, Contract.ACTION_EQUIP, {"id": "stone_pickaxe"}, 350, 0.98)
+				return _stone_age_decision(stage, Contract.ACTION_EQUIP, {"id": "stone_pickaxe"}, 350, 0.98, observation)
 	return {}
 
 
@@ -1216,7 +1216,7 @@ func _stone_age_craft_or_gather(observation: Dictionary, legal: PackedStringArra
 	# snapshots whose recipe catalog omits a normalized output alias.
 	var plank_output := _craftable_plank_output(_as_array(observation.get("recipes", [])), _inventory(observation), _as_array(observation.get("craft_blocked_outputs", [])), plank_requirement)
 	if Contract.ACTION_CRAFT in legal and not plank_output.is_empty():
-		return _stone_age_decision(stage, Contract.ACTION_CRAFT, {"id": plank_output}, 700, 0.94)
+		return _stone_age_decision(stage, Contract.ACTION_CRAFT, {"id": plank_output}, 700, 0.94, observation)
 	if output in ["wooden_pickaxe", "workbench"]:
 		return _stone_age_gather_wood_action(observation, legal, stage)
 	return {}
@@ -1235,7 +1235,7 @@ func _stone_age_recipe_step_action(plan: Dictionary, observation: Dictionary, le
 				and str(observation.get("craft_pending_output", "")).is_empty()
 				and int(observation.get("craft_retry_after_msec", -1)) <= now_msec
 			):
-				return _stone_age_decision(stage, Contract.ACTION_CRAFT, {"id": output}, 700, 0.95)
+				return _stone_age_decision(stage, Contract.ACTION_CRAFT, {"id": output}, 700, 0.95, observation)
 		"gather":
 			var item := str(plan.get("item", ""))
 			if item.is_empty():
@@ -1243,6 +1243,7 @@ func _stone_age_recipe_step_action(plan: Dictionary, observation: Dictionary, le
 			var gather_action := _achievement_resource_action(observation, legal, {}, [item])
 			if not gather_action.is_empty():
 				gather_action["stone_age_stage"] = stage
+				gather_action["stone_age_goal_id"] = _stone_age_goal_id(observation)
 				return Contract.normalize_decision(gather_action)
 		"need_station":
 			# Station placement/routing is handled by the shared station planner.
@@ -1270,9 +1271,9 @@ func _stone_age_gather_wood_action(observation: Dictionary, legal: PackedStringA
 	if best.is_empty():
 		return {}
 	if bool(best.get("reachable", false)) and Contract.ACTION_MINE in legal and _has_required_mining_tier(observation, best):
-		return _stone_age_decision(stage, Contract.ACTION_MINE, best, 1800, 0.91)
+		return _stone_age_decision(stage, Contract.ACTION_MINE, best, 1800, 0.91, observation)
 	if Contract.ACTION_MOVE_TO in legal:
-		return _stone_age_decision(stage, Contract.ACTION_MOVE_TO, best, 2200, 0.79)
+		return _stone_age_decision(stage, Contract.ACTION_MOVE_TO, best, 2200, 0.79, observation)
 	return {}
 
 
@@ -1296,10 +1297,17 @@ func _stone_age_cobblestone_target(observation: Dictionary) -> Dictionary:
 	return best
 
 
-func _stone_age_decision(stage: String, action: String, target: Dictionary, commit_for_ms: int, confidence: float) -> Dictionary:
+func _stone_age_decision(stage: String, action: String, target: Dictionary, commit_for_ms: int, confidence: float, observation: Dictionary = {}) -> Dictionary:
 	var decision := _decision(Contract.GOAL_ACHIEVEMENT, action, target, commit_for_ms, confidence)
 	decision["stone_age_stage"] = stage
+	decision["stone_age_goal_id"] = _stone_age_goal_id(observation)
 	return Contract.normalize_decision(decision)
+
+
+func _stone_age_goal_id(observation: Dictionary) -> String:
+	var goal: Dictionary = observation.get("stone_age_goal", {}) if observation.get("stone_age_goal", {}) is Dictionary else {}
+	var goal_id := str(goal.get("goal_id", "stone_age"))
+	return goal_id if goal_id in ["stone_age", "starter_tooling"] else "stone_age"
 
 
 func _open_achievement(observation: Dictionary, achievement_id: String) -> Dictionary:

@@ -4092,12 +4092,20 @@ func _sync_stone_age_goal(achievements: Dictionary, now_msec: int = -1) -> void:
 			break
 	var community_locked := bool(achievements.get("community_locked", false))
 	if _stone_age_goal_state.is_empty():
-		if mode not in AchievementRegistryClass.stone_age_progression_modes() or community_locked or not stone_age_open or "stone_age" in unlocked or world_id.is_empty():
+		if not _stone_age_progression_allowed(mode) or world_id.is_empty():
+			return
+		var goal_id := ""
+		if not community_locked and stone_age_open and "stone_age" not in unlocked:
+			goal_id = "stone_age"
+		elif _starter_tooling_needed():
+			goal_id = "starter_tooling"
+		if goal_id.is_empty():
 			return
 		_stone_age_goal_state = {
 			"world_id": world_id,
 			"world_mode": mode,
-			"achievement_id": "stone_age",
+			"goal_id": goal_id,
+			"achievement_id": "stone_age" if goal_id == "stone_age" else "",
 			"stage": "gather_wood",
 			"status": "active",
 			"stage_failures": 0,
@@ -4105,11 +4113,11 @@ func _sync_stone_age_goal(achievements: Dictionary, now_msec: int = -1) -> void:
 			"retry_after_msec": 0,
 			"pending": {},
 		}
-		structured_log.emit({"event": "goal_selected", "goal": "stone_age", "stage": "gather_wood", "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
-	if mode not in AchievementRegistryClass.stone_age_progression_modes():
+		structured_log.emit({"event": "goal_selected", "goal": goal_id, "stage": "gather_wood", "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
+	if not _stone_age_progression_allowed(mode):
 		_stone_age_goal_state["status"] = "paused"
 		return
-	if community_locked:
+	if community_locked and _stone_age_goal_name() == "stone_age":
 		_stone_age_goal_state["status"] = "paused"
 		return
 	if str(_stone_age_goal_state.get("status", "")) == "completed":
@@ -4120,7 +4128,7 @@ func _sync_stone_age_goal(achievements: Dictionary, now_msec: int = -1) -> void:
 		_stone_age_goal_state["status"] = "active"
 		_stone_age_goal_state["stage_failures"] = 0
 		_stone_age_goal_state["retry_after_msec"] = 0
-		structured_log.emit({"event": "goal_resumed", "goal": "stone_age", "stage": str(_stone_age_goal_state.get("stage", "")), "world_id": world_id, "at_msec": now_msec})
+		structured_log.emit({"event": "goal_resumed", "goal": _stone_age_goal_name(), "stage": str(_stone_age_goal_state.get("stage", "")), "world_id": world_id, "at_msec": now_msec})
 	elif str(_stone_age_goal_state.get("status", "")) == "paused":
 		_stone_age_goal_state["status"] = "active"
 	_stone_age_confirm_pending_if_observed(now_msec)
@@ -4130,7 +4138,7 @@ func _sync_stone_age_goal(achievements: Dictionary, now_msec: int = -1) -> void:
 		_stone_age_goal_state["stage"] = "complete"
 		_stone_age_goal_state["status"] = "completed"
 		_stone_age_goal_state["pending"] = {}
-		structured_log.emit({"event": "goal_completed", "goal": "stone_age", "world_id": world_id, "at_msec": now_msec})
+		structured_log.emit({"event": "goal_completed", "goal": _stone_age_goal_name(), "world_id": world_id, "at_msec": now_msec})
 		return
 	if next_stage != previous_stage:
 		_stone_age_goal_state["stage"] = next_stage
@@ -4138,10 +4146,36 @@ func _sync_stone_age_goal(achievements: Dictionary, now_msec: int = -1) -> void:
 		_stone_age_goal_state["stage_attempts"] = 0
 		_stone_age_goal_state["retry_after_msec"] = 0
 		_stone_age_goal_state["pending"] = {}
-		structured_log.emit({"event": "step_confirmed", "goal": "stone_age", "previous_stage": previous_stage, "stage": next_stage, "world_id": world_id, "at_msec": now_msec})
+		structured_log.emit({"event": "step_confirmed", "goal": _stone_age_goal_name(), "previous_stage": previous_stage, "stage": next_stage, "world_id": world_id, "at_msec": now_msec})
 	var details := _stone_age_stage_details(next_stage)
 	_stone_age_goal_state["required_planks"] = int(details.get("required_planks", 0))
 	_stone_age_goal_state["target_output"] = str(details.get("target_output", ""))
+
+
+func _stone_age_progression_allowed(mode: String) -> bool:
+	mode = mode.strip_edges().to_lower()
+	return (
+		mode in AchievementRegistryClass.stone_age_progression_modes()
+		and mode not in ["challenge_run", "duel", "pvp"]
+		and not _is_pvp_world()
+	)
+
+
+func _stone_age_goal_name() -> String:
+	var goal_id := str(_stone_age_goal_state.get("goal_id", "stone_age"))
+	return goal_id if goal_id in ["stone_age", "starter_tooling"] else "stone_age"
+
+
+func _starter_tooling_needed() -> bool:
+	# A fresh world should bootstrap the bot to a stone-tier pickaxe when a
+	# persisted achievement profile would otherwise suppress the Stone Age
+	# strategy. Existing stone-tier or better pickaxes make the fallback moot.
+	for raw_name in _stone_age_authoritative_inventory:
+		var item_name := str(raw_name).to_lower()
+		if item_name.ends_with("_pickaxe") and _stone_age_tool_tier(item_name) >= 2 and int(_stone_age_authoritative_inventory[raw_name]) > 0:
+			return false
+	var equipped_hand := str(_stone_age_authoritative_equipment.get("hand", "")).to_lower()
+	return not (equipped_hand.ends_with("_pickaxe") and _stone_age_tool_tier(equipped_hand) >= 2)
 
 
 func _sync_achievement_goal_states(achievements: Dictionary, mode: String, now_msec: int) -> void:
@@ -4466,7 +4500,8 @@ func _stone_age_tool_tier(item_name: String) -> int:
 
 func _stone_age_note_action_started(decision: Dictionary, now_msec: int) -> void:
 	var stage := str(decision.get("stone_age_stage", ""))
-	if stage.is_empty() or _stone_age_goal_state.is_empty() or str(_stone_age_goal_state.get("stage", "")) != stage or str(_stone_age_goal_state.get("status", "")) != "active":
+	var decision_goal := str(decision.get("stone_age_goal_id", _stone_age_goal_name()))
+	if stage.is_empty() or _stone_age_goal_state.is_empty() or decision_goal != _stone_age_goal_name() or str(_stone_age_goal_state.get("stage", "")) != stage or str(_stone_age_goal_state.get("status", "")) != "active":
 		return
 	var action := str(decision.get("action", ""))
 	if action not in [Contract.ACTION_CRAFT, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_EQUIP]:
@@ -4499,7 +4534,7 @@ func _stone_age_note_action_started(decision: Dictionary, now_msec: int) -> void
 		pending["expected_station"] = "workbench"
 	_stone_age_goal_state["pending"] = pending
 	_stone_age_goal_state["stage_attempts"] = int(_stone_age_goal_state.get("stage_attempts", 0)) + 1
-	structured_log.emit({"event": "step_started", "goal": "stone_age", "stage": stage, "action": action, "target_id": target_id, "world_id": world_id, "at_msec": now_msec})
+	structured_log.emit({"event": "step_started", "goal": decision_goal, "stage": stage, "action": action, "target_id": target_id, "world_id": world_id, "at_msec": now_msec})
 
 
 func _stone_age_confirm_pending_if_observed(now_msec: int) -> void:
@@ -4520,7 +4555,7 @@ func _stone_age_confirm_pending_if_observed(now_msec: int) -> void:
 		confirmed = true
 	if not confirmed:
 		return
-	structured_log.emit({"event": "step_confirmed", "goal": "stone_age", "stage": str(pending.get("stage", "")), "action": str(pending.get("action", "")), "target_id": str(pending.get("target_id", "")), "world_id": world_id, "at_msec": now_msec})
+	structured_log.emit({"event": "step_confirmed", "goal": _stone_age_goal_name(), "stage": str(pending.get("stage", "")), "action": str(pending.get("action", "")), "target_id": str(pending.get("target_id", "")), "world_id": world_id, "at_msec": now_msec})
 	_stone_age_goal_state["pending"] = {}
 	_stone_age_goal_state["stage_failures"] = 0
 	_stone_age_goal_state["stage_attempts"] = 0
@@ -4545,6 +4580,9 @@ func _expire_stone_age_pending(now_msec: int) -> void:
 
 
 func _stone_age_note_failure(decision: Dictionary, reason: String, now_msec: int) -> void:
+	var decision_goal := str(decision.get("stone_age_goal_id", _stone_age_goal_name()))
+	if decision_goal != _stone_age_goal_name():
+		return
 	_stone_age_fail_pending(str(decision.get("stone_age_stage", "")), reason, now_msec)
 
 
@@ -4562,7 +4600,7 @@ func _stone_age_fail_pending(stage: String, reason: String, now_msec: int) -> vo
 	_stone_age_goal_state["retry_after_msec"] = now_msec + (STONE_AGE_ABANDON_COOLDOWN_MSEC if abandoned else STONE_AGE_RETRY_COOLDOWN_MSEC)
 	structured_log.emit({
 		"event": "goal_abandoned" if abandoned else "step_failed",
-		"goal": "stone_age",
+		"goal": _stone_age_goal_name(),
 		"stage": stage,
 		"reason": reason,
 		"failures": failures,
