@@ -782,7 +782,7 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			score -= 160.0
 		elif needs_leaves and _is_leaf_name(block_name):
 			score -= 200.0
-		elif needs_cobblestone and block_name == "cobblestone":
+		elif needs_cobblestone and _is_cobblestone_source(block_name):
 			score -= 190.0
 		elif has_tree_target and block_name in FILLER_BLOCK_NAMES:
 			score += 180.0
@@ -1285,7 +1285,7 @@ func _stone_age_cobblestone_target(observation: Dictionary) -> Dictionary:
 		var resource := raw_resource as Dictionary
 		if not _resource_has_proven_approach(resource):
 			continue
-		if str(resource.get("block_name", "")).to_lower() != "cobblestone":
+		if not _is_cobblestone_source(str(resource.get("block_name", ""))):
 			continue
 		if int(resource.get("harvest_tier", 1)) > 1 or not Perception.mine_target_is_safe(observation, resource):
 			continue
@@ -2000,6 +2000,11 @@ func _is_wood_log_name(block_name: String) -> bool:
 
 func _is_leaf_name(block_name: String) -> bool:
 	return block_name in LEAF_BLOCK_NAMES or block_name.ends_with("_leaves") or block_name.ends_with("_needles")
+
+
+func _is_cobblestone_source(block_name: String) -> bool:
+	# Natural stone is the world block the game drops as cobblestone.
+	return block_name.to_lower() in ["stone", "cobblestone"]
 
 
 func _recipe_available(recipes: Array, inventory: Dictionary, output_name: String) -> bool:
