@@ -1164,7 +1164,13 @@ func _stone_age_progression_action(observation: Dictionary, legal: PackedStringA
 	var blocked: Array = _as_array(observation.get("craft_blocked_outputs", []))
 	match stage:
 		"gather_wood":
-			return _stone_age_gather_wood_action(observation, legal, stage)
+			var gather_action := _stone_age_gather_wood_action(observation, legal, stage)
+			if not gather_action.is_empty():
+				return gather_action
+			if str(goal.get("goal_id", "stone_age")) == "starter_tooling":
+				var search_action := _starter_tooling_player_search_action(observation, legal, stage)
+				if not search_action.is_empty():
+					return search_action
 		"craft_planks":
 			var required := maxi(1, int(goal.get("required_planks", 3)))
 			var plank_output := _craftable_plank_output(recipes, inventory, blocked, required)
@@ -1220,6 +1226,33 @@ func _stone_age_craft_or_gather(observation: Dictionary, legal: PackedStringArra
 	if output in ["wooden_pickaxe", "workbench"]:
 		return _stone_age_gather_wood_action(observation, legal, stage)
 	return {}
+
+
+func _starter_tooling_player_search_action(observation: Dictionary, legal: PackedStringArray, stage: String) -> Dictionary:
+	# A fresh-world starter objective may spawn away from trees (for example, on
+	# a stone shelf across water). If no safe wood target is currently visible,
+	# approach a live player so their already-loaded surroundings can reveal one.
+	# Once a log enters perception, the normal gather/craft chain above takes over.
+	if Contract.ACTION_MOVE_NEAR_PLAYER not in legal and Contract.ACTION_MOVE_TO not in legal:
+		return {}
+	var preferred_distance := float(observation.get("preferred_player_distance", PREFERRED_PLAYER_DISTANCE))
+	var best_player := {}
+	var best_distance := INF
+	for raw_player in _as_array(observation.get("players", [])):
+		if not raw_player is Dictionary:
+			continue
+		var player := raw_player as Dictionary
+		if str(player.get("id", "")).is_empty() or not bool(player.get("alive", true)) or bool(player.get("stale", player.get("last_known", false))):
+			continue
+		var distance := float(player.get("distance", INF))
+		if distance <= preferred_distance + SOCIAL_FOLLOW_START_SLACK or distance >= best_distance:
+			continue
+		best_player = player
+		best_distance = distance
+	if best_player.is_empty():
+		return {}
+	var action := Contract.ACTION_MOVE_NEAR_PLAYER if Contract.ACTION_MOVE_NEAR_PLAYER in legal else Contract.ACTION_MOVE_TO
+	return _stone_age_decision(stage, action, best_player, 2400, 0.64, observation)
 
 
 func _stone_age_recipe_step_action(plan: Dictionary, observation: Dictionary, legal: PackedStringArray, stage: String) -> Dictionary:
