@@ -62,12 +62,6 @@ func start(raw_decision: Variant, observation: Dictionary, now_msec: int) -> boo
 			action_failed.emit(decision, "emoji_not_allowed")
 			return false
 		decision["emoji"] = emoji
-	if action == Contract.ACTION_DISCOVER:
-		var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
-		var inputs: Array = target.get("inputs", []) if target.get("inputs", []) is Array else []
-		if inputs.is_empty():
-			action_failed.emit(decision, "discover_inputs_missing")
-			return false
 	if action == Contract.ACTION_EAT:
 		var food_name := str(decision.get("target_id", ""))
 		if food_name.is_empty():
@@ -187,7 +181,9 @@ func _send_network_action(action: String, decision: Dictionary) -> bool:
 			command = "equip_item"
 			payload = {"item": str(decision.get("target_id", ""))}
 		_:
-			return true
+			# An action with no network mapping must reject, otherwise the bot
+			# would report success for a suggestion it never actually executed.
+			return false
 	var sent := _send_command(command, payload)
 	if sent:
 		command_sent.emit(command, payload.duplicate(true))
