@@ -1292,10 +1292,13 @@ func _stone_age_gather_wood_action(observation: Dictionary, legal: PackedStringA
 		if not raw_resource is Dictionary:
 			continue
 		var resource := raw_resource as Dictionary
-		if not _resource_has_proven_approach(resource):
-			continue
 		var block_name := str(resource.get("block_name", "")).to_lower()
-		if not _is_wood_log_name(block_name) or not Perception.mine_target_is_safe(observation, resource):
+		# A visible, host-replicated trunk may be safe to mine but still outside
+		# immediate interaction reach. If it has a world position, navigate toward
+		# it first; requiring `reachable` here made starter progression ignore
+		# nearby trees and fall back to aimless exploration.
+		var has_world_position := resource.get("position", []) is Array and (resource.get("position", []) as Array).size() >= 2
+		if not _is_wood_log_name(block_name) or (not _resource_has_proven_approach(resource) and not has_world_position) or not Perception.mine_target_is_safe(observation, resource):
 			continue
 		var distance := float(resource.get("distance", 9999.0))
 		if distance < best_distance:
