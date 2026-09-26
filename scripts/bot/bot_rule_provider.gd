@@ -1261,6 +1261,9 @@ func _one_block_achievement_action(observation: Dictionary, legal: PackedStringA
 		return {}
 	var source_resource := _visible_resource_at(source, _as_array(observation.get("visible_resources", [])))
 	if source_resource.is_empty():
+		var descent_action := _one_block_source_descent_action(observation, legal, source)
+		if not descent_action.is_empty():
+			return descent_action
 		# Never invent a MINE target from the mode marker alone. Move to the
 		# authoritative source coordinate and wait for a fresh resource snapshot.
 		if Contract.ACTION_MOVE_TO in legal:
@@ -1277,6 +1280,9 @@ func _one_block_achievement_action(observation: Dictionary, legal: PackedStringA
 		return {}
 	if bool(source_resource.get("reachable", false)) and _has_required_mining_tier(observation, source_resource) and Contract.ACTION_MINE in legal:
 		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MINE, source_resource, 2200, 0.91)
+	var descent_action := _one_block_source_descent_action(observation, legal, source)
+	if not descent_action.is_empty():
+		return descent_action
 	if Contract.ACTION_MOVE_TO in legal:
 		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, source_resource, 1800, 0.82)
 	return {}
@@ -1561,6 +1567,36 @@ func _procedural_depth_action(observation: Dictionary, legal: PackedStringArray,
 	var current_depth := floori(float(self_state.get("y", 0.0)) / 32.0)
 	if current_depth >= RESONANT_DEPTH_TILE or int(goal.get("progress", 0)) >= int(goal.get("target", RESONANT_DEPTH_TILE)):
 		return {}
+	return _safe_descent_plan_action(observation, legal, descent_plan)
+
+
+func _one_block_source_descent_action(observation: Dictionary, legal: PackedStringArray, source: Dictionary) -> Dictionary:
+	if str(observation.get("world_mode", "")).to_lower() != "one_block" or bool(observation.get("pvp_world", false)):
+		return {}
+	var descent_plan: Dictionary = observation.get("descent_plan", {}) if observation.get("descent_plan", {}) is Dictionary else {}
+	var from_support: Array = descent_plan.get("current_support", []) if descent_plan.get("current_support", []) is Array else []
+	var to_support: Array = descent_plan.get("next_support", []) if descent_plan.get("next_support", []) is Array else []
+	if from_support.size() < 2 or to_support.size() < 2 or not source.has("x") or not source.has("y"):
+		return {}
+	var source_tile := Vector2i(int(source.get("x", 0)), int(source.get("y", 0)))
+	var current_support := Vector2i(int(from_support[0]), int(from_support[1]))
+	var next_support := Vector2i(int(to_support[0]), int(to_support[1]))
+	# Reuse the generic descent planner only when its next verified landing is
+	# actually closer to the renewable source. Its return-route checks, support
+	# preservation and source-tile exclusion remain authoritative.
+	if next_support.distance_squared_to(source_tile) >= current_support.distance_squared_to(source_tile):
+		return {}
+	return _safe_descent_plan_action(observation, legal, descent_plan)
+
+
+func _safe_descent_plan_action(observation: Dictionary, legal: PackedStringArray, descent_plan: Dictionary) -> Dictionary:
+	if (
+		not bool(observation.get("verified_safe_exit", false))
+		or not bool(descent_plan.get("eligible", false))
+		or not bool(descent_plan.get("verified_safe_exit", false))
+	):
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	match str(descent_plan.get("phase", "stop")):
 		"clear":
 			var clear_target := _descent_clear_target(observation, descent_plan)
