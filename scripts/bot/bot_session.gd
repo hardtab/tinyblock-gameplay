@@ -3392,13 +3392,7 @@ func _safe_exploration_waypoints(self_state: Dictionary) -> Array[Dictionary]:
 		and now - _safe_exploration_waypoint_cache_checked_msec < 450
 	):
 		return _safe_exploration_waypoint_cache.duplicate(true)
-	var reachable := Navigator.physics_reachable_tiles(
-		origin_tile,
-		Callable(self, "_terrain_standable_tile"),
-		Callable(self, "_terrain_climbable_tile"),
-		Navigator.MAX_PHYSICS_ROUTE_NODES,
-		Callable(self, "_physics_transition_allowed"),
-	)
+	var reachable := _physics_reachable_support_tiles(origin_tile)
 	var result: Array[Dictionary] = []
 	var max_horizontal_tiles := ceili(STARTER_TOOLING_RESOURCE_SCAN_RADIUS / float(BlockDefs.TILE))
 	for raw_tile in reachable:
@@ -3486,11 +3480,9 @@ func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
 	if needs_approach_proof and not _terrain_tiles.is_empty():
 		var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 		var origin := Contract.target_position(self_state)
-		reachable_support_tiles = Navigator.physics_reachable_tiles(
-			_support_tile_for_position(origin),
-			Callable(self, "_terrain_standable_tile"),
-			Callable(self, "_terrain_climbable_tile"),
-		)
+		for raw_tile in _physics_reachable_support_tiles(_support_tile_for_position(origin)):
+			if typeof(raw_tile) == TYPE_VECTOR2I:
+				reachable_support_tiles[raw_tile] = true
 	for raw_resource in resources:
 		if not raw_resource is Dictionary:
 			continue
@@ -3500,12 +3492,33 @@ func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
 		if blocked_until > 0 and now_msec >= blocked_until:
 			_blocked_action_targets.erase(key)
 			blocked_until = 0
-		if blocked_until <= now_msec:
-			var observed_resource := resource.duplicate(true)
-			if not bool(observed_resource.get("reachable", false)):
-				observed_resource["approachable"] = _resource_has_reachable_stand_tile(observed_resource, reachable_support_tiles)
-			filtered.append(observed_resource)
+		var observed_resource := resource.duplicate(true)
+		if not bool(observed_resource.get("reachable", false)):
+			observed_resource["approachable"] = blocked_until <= now_msec and _resource_has_reachable_stand_tile(observed_resource, reachable_support_tiles)
+		if blocked_until > now_msec:
+			# Keep a failed target in the observation, but make it unselectable until
+			# its bounded retry window expires. Dropping it entirely made progression
+			# forget that nearby wood existed and sometimes explore in the opposite
+			# direction while the target was cooling down.
+			observed_resource["reachable"] = false
+			observed_resource["approachable"] = false
+			observed_resource["blocked_until_msec"] = blocked_until
+		filtered.append(observed_resource)
 	return filtered
+
+
+func _physics_reachable_support_tiles(origin_tile: Vector2i) -> Dictionary:
+	# Resource approachability, exploration, and movement execution must share the
+	# same graph, including temporary transitions rejected by the authoritative
+	# host. Otherwise policy advertises a target that the executor immediately
+	# refuses to route toward.
+	return Navigator.physics_reachable_tiles(
+		origin_tile,
+		Callable(self, "_terrain_standable_tile"),
+		Callable(self, "_terrain_climbable_tile"),
+		Navigator.MAX_PHYSICS_ROUTE_NODES,
+		Callable(self, "_physics_transition_allowed"),
+	)
 
 
 func _resource_has_reachable_stand_tile(resource: Dictionary, reachable_support_tiles: Dictionary) -> bool:
