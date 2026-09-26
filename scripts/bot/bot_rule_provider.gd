@@ -12,6 +12,8 @@ var _last_build_msec := -1
 var _plant_step := 0
 var _last_plant_msec := -1
 var _explore_direction := 0
+var _last_explore_origin_x := INF
+var _last_explore_target_id := ""
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 ## Only chase a player once they are clearly farther than the preferred gap.
@@ -22,6 +24,7 @@ const WANDER_RADIUS := 96.0
 const WANDER_COMMIT_MSEC := 1800
 const EXPLORE_RADIUS := 384.0
 const EXPLORE_COMMIT_MSEC := 4200
+const MIN_EXPLORE_PROGRESS_PX := 24.0
 const BOW_ARROW_MIN_SPEED := 250.0
 const BOW_ARROW_MAX_SPEED := 560.0
 const BOW_ARROW_GRAVITY := 310.0
@@ -81,6 +84,8 @@ func reset() -> void:
 	_plant_step = 0
 	_last_plant_msec = -1
 	_explore_direction = 0
+	_last_explore_origin_x = INF
+	_last_explore_target_id = ""
 
 
 func decide(observation: Dictionary) -> Dictionary:
@@ -842,14 +847,34 @@ func _exploration_target(observation: Dictionary) -> Dictionary:
 		var entry := history[index] as Dictionary
 		if str(entry.get("goal", "")) != Contract.GOAL_EXPLORE:
 			continue
-		if str(entry.get("phase", "")) in ["finished", "failed"] and str(entry.get("reason", "")) in ["blocked_obstacle", "edge_guard", "route_unreachable"]:
-			_explore_direction = -1 if str(entry.get("target_id", "")).contains("right") else 1
+		var phase := str(entry.get("phase", ""))
+		var target_id := str(entry.get("target_id", ""))
+		if (
+			phase in ["finished", "failed"]
+			and not _last_explore_target_id.is_empty()
+			and target_id == _last_explore_target_id
+			and _explore_direction != 0
+		):
+			var reason := str(entry.get("reason", ""))
+			var progress := absf(origin.x - _last_explore_origin_x)
+			var route_failed := reason in [
+				"blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "lava_guard",
+			]
+			# A timeout can mean either a slow but useful traversal or a movement
+			# controller that made no progress. Preserve the heading when the bot
+			# moved; rotate only when a bounded movement window stalled. Explicit
+			# route/obstacle failures always make the opposite side worth probing.
+			if route_failed or progress < MIN_EXPLORE_PROGRESS_PX:
+				_explore_direction *= -1
 		break
 	if _explore_direction == 0:
 		_explore_direction = -1 if _rng.randf() < 0.5 else 1
 	var label := "left" if _explore_direction < 0 else "right"
+	var target_id := "explore:%s" % label
+	_last_explore_origin_x = origin.x
+	_last_explore_target_id = target_id
 	return {
-		"id": "explore:%s" % label,
+		"id": target_id,
 		"position": [origin.x + float(_explore_direction) * EXPLORE_RADIUS, origin.y],
 		"reason": "discover_terrain",
 	}
