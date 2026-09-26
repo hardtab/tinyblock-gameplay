@@ -131,6 +131,7 @@ static func physics_reachable_tiles(
 	passable: Callable,
 	climbable: Callable = Callable(),
 	max_nodes: int = MAX_PHYSICS_ROUTE_NODES,
+	transition_allowed: Callable = Callable(),
 ) -> Dictionary:
 	var reachable: Dictionary = {}
 	if not passable.is_valid() or max_nodes <= 0 or not bool(passable.call(origin)):
@@ -144,6 +145,8 @@ static func physics_reachable_tiles(
 		for candidate in _physics_candidates(current, climbable):
 			var next: Vector2i = candidate["tile"]
 			if reachable.has(next) or not bool(passable.call(next)):
+				continue
+			if transition_allowed.is_valid() and not bool(transition_allowed.call(current, next, str(candidate["kind"]))):
 				continue
 			reachable[next] = true
 			queue.append(next)

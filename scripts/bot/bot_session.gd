@@ -80,6 +80,10 @@ var _network_signals_connected := false
 var _snapshot_transfer_id := ""
 var _snapshot_expected_chunks := 0
 var _snapshot_chunks: Array[String] = []
+var _region_incoming_transfers: Dictionary = {}
+var _region_chunk_request_msec: Dictionary = {}
+var _region_received_chunks: Dictionary = {}
+var _last_region_chunk_request_msec := -1
 var _world_snapshot: Dictionary = {}
 var _roster: Dictionary = {}
 var _recent_events: Array[Dictionary] = []
@@ -302,6 +306,10 @@ func join_session(record: Dictionary) -> void:
 	_snapshot_transfer_id = ""
 	_snapshot_expected_chunks = 0
 	_snapshot_chunks.clear()
+	_region_incoming_transfers.clear()
+	_region_chunk_request_msec.clear()
+	_region_received_chunks.clear()
+	_last_region_chunk_request_msec = -1
 	_roster.clear()
 	_recent_events.clear()
 	_recent_emoji_events.clear()
@@ -569,6 +577,15 @@ func handle_message(message: Dictionary) -> void:
 		_apply_plant_batch(payload)
 		_record_event(message_type, payload)
 		return
+	if message_type == "region_start":
+		_prepare_region_transfer(payload)
+		return
+	if message_type == "region_chunk":
+		_store_region_transfer_chunk(payload)
+		return
+	if message_type == "region_complete":
+		_apply_completed_region_transfer(payload)
+		return
 	if message_type == "emoji_reaction":
 		_record_event(message_type, payload)
 		_record_emoji_event(message, payload)
@@ -580,12 +597,18 @@ func handle_message(message: Dictionary) -> void:
 
 func _process(delta: float) -> void:
 	var now_msec := Time.get_ticks_msec()
+	for raw_transfer_id in _region_incoming_transfers.keys():
+		var transfer_id := str(raw_transfer_id)
+		var transfer: Dictionary = _region_incoming_transfers[transfer_id]
+		if now_msec - int(transfer.get("started_at_msec", now_msec)) > 30_000:
+			_region_incoming_transfers.erase(transfer_id)
 	if state == STATE_SYNCING:
 		if _sync_started_msec >= 0 and now_msec - _sync_started_msec >= DEFAULT_SYNC_TIMEOUT_MSEC:
 			_emit_left("snapshot_timeout")
 		return
 	if state != STATE_PLAYING:
 		return
+	_request_missing_region_chunks(now_msec)
 	if _host_kill_leave_at_msec >= 0:
 		_set_desired_input(false, false, false)
 		_send_player_input_if_due(now_msec)
@@ -1105,6 +1128,192 @@ func _apply_plant_batch(payload: Dictionary) -> void:
 	for raw_plant in plants:
 		if raw_plant is Dictionary:
 			_ingest_plant_entry(raw_plant as Dictionary)
+
+
+func _prepare_region_transfer(payload: Dictionary) -> void:
+	var transfer_id := str(payload.get("transfer_id", ""))
+	var total := int(payload.get("total", 0))
+	var chunk_x := int(payload.get("chunk_x", WorldSim.COORD_LIMIT))
+	if transfer_id.is_empty() or total <= 0 or total > 512 or absi(chunk_x) > WorldSim.COORD_LIMIT / WorldSim.CHUNK_WIDTH:
+		return
+	if not _region_incoming_transfers.has(transfer_id) and _region_incoming_transfers.size() >= 8:
+		var oldest_id := ""
+		var oldest_at := 2147483647
+		for raw_existing_id in _region_incoming_transfers:
+			var existing_id := str(raw_existing_id)
+			var existing: Dictionary = _region_incoming_transfers[existing_id]
+			var started_at := int(existing.get("started_at_msec", 0))
+			if started_at < oldest_at:
+				oldest_at = started_at
+				oldest_id = existing_id
+		if not oldest_id.is_empty():
+			_region_incoming_transfers.erase(oldest_id)
+	var chunks: Array[String] = []
+	chunks.resize(total)
+	_region_incoming_transfers[transfer_id] = {
+		"chunk_x": chunk_x,
+		"chunks": chunks,
+		"started_at_msec": Time.get_ticks_msec(),
+	}
+
+
+func _store_region_transfer_chunk(payload: Dictionary) -> void:
+	var transfer_id := str(payload.get("transfer_id", ""))
+	if transfer_id.is_empty() or not _region_incoming_transfers.has(transfer_id):
+		return
+	var transfer: Dictionary = _region_incoming_transfers[transfer_id]
+	var chunks: Array[String] = transfer.get("chunks", [])
+	var index := int(payload.get("index", -1))
+	if (
+		int(payload.get("total", -1)) != chunks.size()
+		or int(payload.get("chunk_x", WorldSim.COORD_LIMIT)) != int(transfer.get("chunk_x", WorldSim.COORD_LIMIT))
+		or index < 0
+		or index >= chunks.size()
+		or str(payload.get("data", "")).length() > 12_000
+	):
+		_region_incoming_transfers.erase(transfer_id)
+		return
+	chunks[index] = str(payload.get("data", ""))
+	transfer["chunks"] = chunks
+	_region_incoming_transfers[transfer_id] = transfer
+
+
+func _apply_completed_region_transfer(payload: Dictionary) -> void:
+	var transfer_id := str(payload.get("transfer_id", ""))
+	if transfer_id.is_empty() or not _region_incoming_transfers.has(transfer_id):
+		return
+	var transfer: Dictionary = _region_incoming_transfers[transfer_id]
+	_region_incoming_transfers.erase(transfer_id)
+	var chunks: Array[String] = transfer.get("chunks", [])
+	if (
+		chunks.is_empty()
+		or chunks.any(func(part: String): return part.is_empty())
+		or int(payload.get("total", -1)) != chunks.size()
+		or int(payload.get("chunk_x", WorldSim.COORD_LIMIT)) != int(transfer.get("chunk_x", WorldSim.COORD_LIMIT))
+	):
+		return
+	var compressed := Marshalls.base64_to_raw("".join(chunks))
+	var raw := compressed.decompress_dynamic(16 * 1024 * 1024, FileAccess.COMPRESSION_GZIP)
+	if raw.is_empty():
+		return
+	var parsed: Variant = JSON.parse_string(raw.get_string_from_utf8())
+	if not parsed is Dictionary or int((parsed as Dictionary).get("chunk_x", WorldSim.COORD_LIMIT)) != int(transfer.get("chunk_x", WorldSim.COORD_LIMIT)):
+		return
+	var region_state := parsed as Dictionary
+	if _merge_streamed_chunk_terrain(region_state):
+		var chunk_x := int(transfer.get("chunk_x", 0))
+		_region_received_chunks[chunk_x] = Time.get_ticks_msec()
+		_region_chunk_request_msec.erase(chunk_x)
+		var region_tiles: Array = region_state.get("tiles", []) if region_state.get("tiles", []) is Array else []
+		_record_event("region_complete", {
+			"chunk_x": chunk_x,
+			"terrain_tiles": region_tiles.size(),
+		})
+		behavior.request_decision(Time.get_ticks_msec())
+
+
+func _request_missing_region_chunks(now_msec: int) -> void:
+	if network_client == null or not network_client.has_method("send_command"):
+		return
+	if _last_region_chunk_request_msec >= 0 and now_msec - _last_region_chunk_request_msec < 500:
+		return
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	if self_state.is_empty():
+		return
+	var tile_x := floori(float(self_state.get("x", 0.0)) / float(BlockDefs.TILE))
+	var center_chunk := floori(float(tile_x) / float(WorldSim.CHUNK_WIDTH))
+	var direction := 0
+	if bool(_desired_input.get("right", false)) and not bool(_desired_input.get("left", false)):
+		direction = 1
+	elif bool(_desired_input.get("left", false)) and not bool(_desired_input.get("right", false)):
+		direction = -1
+	if direction == 0:
+		direction = 1 if float(self_state.get("facing", 1.0)) >= 0.0 else -1
+	for chunk_x in [center_chunk, center_chunk + direction, center_chunk - direction]:
+		if _region_received_chunks.has(chunk_x):
+			continue
+		var last_requested := int(_region_chunk_request_msec.get(chunk_x, -1))
+		if last_requested >= 0 and now_msec - last_requested < 5_000:
+			continue
+		_region_chunk_request_msec[chunk_x] = now_msec
+		_last_region_chunk_request_msec = now_msec
+		var sent := bool(network_client.call("send_command", "chunk_request", {"chunk_x": chunk_x}))
+		if sent:
+			structured_log.emit({"event": "region_chunk_requested", "chunk_x": chunk_x, "at_msec": now_msec})
+		return
+
+
+func _merge_streamed_chunk_terrain(state: Dictionary) -> bool:
+	var chunk_x := int(state.get("chunk_x", WorldSim.COORD_LIMIT))
+	var raw_tiles: Variant = state.get("tiles", null)
+	var raw_fluids: Variant = state.get("fluids", null)
+	if (
+		absi(chunk_x) > WorldSim.COORD_LIMIT / WorldSim.CHUNK_WIDTH
+		or not state.get("chunk", null) is Dictionary
+		or not raw_tiles is Array
+		or not raw_fluids is Array
+	):
+		return false
+	var defs := get_node_or_null("/root/BlockDefs")
+	var generated_definitions: Array = state.get("generated_definitions", []) if state.get("generated_definitions", []) is Array else []
+	if defs != null and defs.has_method("register_generated_block"):
+		for raw_definition in generated_definitions:
+			if raw_definition is Dictionary:
+				defs.call("register_generated_block", raw_definition)
+	var resolved_tiles: Array[Dictionary] = []
+	for raw_tile in raw_tiles:
+		if not raw_tile is Dictionary:
+			return false
+		var tile := raw_tile as Dictionary
+		var tile_x := int(tile.get("x", WorldSim.COORD_LIMIT + 1))
+		var tile_y := int(tile.get("y", WorldSim.COORD_LIMIT + 1))
+		var block_name := _block_name_for_content_id(str(tile.get("content_id", "")))
+		if (
+			absi(tile_x) > WorldSim.COORD_LIMIT
+			or absi(tile_y) > WorldSim.COORD_LIMIT
+			or floori(float(tile_x) / float(WorldSim.CHUNK_WIDTH)) != chunk_x
+			or block_name.is_empty()
+			or block_name == "air"
+		):
+			return false
+		resolved_tiles.append({"x": tile_x, "y": tile_y, "block_name": block_name, "content_id": str(tile.get("content_id", ""))})
+	# The chunk transfer is a complete authoritative view of this generated
+	# region, unlike sparse tile_batch deltas. Replace cached cells within its
+	# horizontal bounds so old/absent cells cannot survive a procedural update.
+	_erase_chunk_index_keys(_terrain_tiles, chunk_x)
+	_erase_chunk_index_keys(_terrain_observed_cells, chunk_x)
+	_erase_chunk_index_keys(_support_preserving_mine_tiles, chunk_x)
+	_erase_chunk_index_keys(_plant_tiles, chunk_x)
+	for tile in resolved_tiles:
+		var key := "%d:%d" % [int(tile["x"]), int(tile["y"])]
+		_terrain_tiles[key] = str(tile["block_name"])
+		_terrain_observed_cells[key] = true
+	var plant_entries: Array = state.get("plant_growth", []) if state.get("plant_growth", []) is Array else []
+	for raw_plant in plant_entries:
+		if raw_plant is Dictionary:
+			_ingest_plant_entry(raw_plant as Dictionary)
+	var snapshot_tiles: Array = _world_snapshot.get("tiles", []) if _world_snapshot.get("tiles", []) is Array else []
+	snapshot_tiles = snapshot_tiles.duplicate(true)
+	snapshot_tiles = snapshot_tiles.filter(func(tile: Variant): return not tile is Dictionary or floori(float(int((tile as Dictionary).get("x", WorldSim.COORD_LIMIT))) / float(WorldSim.CHUNK_WIDTH)) != chunk_x)
+	snapshot_tiles.append_array(resolved_tiles)
+	_world_snapshot["tiles"] = snapshot_tiles
+	var snapshot_plants: Array = _world_snapshot.get("plant_growth", []) if _world_snapshot.get("plant_growth", []) is Array else []
+	snapshot_plants = snapshot_plants.duplicate(true)
+	snapshot_plants = snapshot_plants.filter(func(plant: Variant): return not plant is Dictionary or floori(float(int((plant as Dictionary).get("x", (plant as Dictionary).get("anchor_x", WorldSim.COORD_LIMIT)))) / float(WorldSim.CHUNK_WIDTH)) != chunk_x)
+	snapshot_plants.append_array(plant_entries)
+	_world_snapshot["plant_growth"] = snapshot_plants
+	_safe_exploration_waypoint_cache.clear()
+	_safe_exploration_waypoint_cache_checked_msec = -1
+	_physics_route.clear()
+	_physics_route_replan_msec = 0
+	return true
+
+
+func _erase_chunk_index_keys(index: Dictionary, chunk_x: int) -> void:
+	for raw_key in index.keys().duplicate():
+		var parts := str(raw_key).split(":")
+		if parts.size() == 2 and floori(float(parts[0].to_int()) / float(WorldSim.CHUNK_WIDTH)) == chunk_x:
+			index.erase(raw_key)
 
 
 func _ingest_plant_entry(entry: Dictionary) -> void:
@@ -2400,6 +2609,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 						_host_rejected_transitions[transition_key] = retry_after_msec
 						_host_rejected_transition_from = transition_from
 						_host_rejected_transition_until_msec = retry_after_msec
+						_safe_exploration_waypoint_cache_checked_msec = -1
 						structured_log.emit({
 							"event": "host_rejected_air_transition",
 							"from": [transition_from.x, transition_from.y],
@@ -3084,6 +3294,8 @@ func _safe_exploration_waypoints(self_state: Dictionary) -> Array[Dictionary]:
 		origin_tile,
 		Callable(self, "_terrain_standable_tile"),
 		Callable(self, "_terrain_climbable_tile"),
+		Navigator.MAX_PHYSICS_ROUTE_NODES,
+		Callable(self, "_physics_transition_allowed"),
 	)
 	var result: Array[Dictionary] = []
 	var max_horizontal_tiles := ceili(STARTER_TOOLING_RESOURCE_SCAN_RADIUS / float(BlockDefs.TILE))
