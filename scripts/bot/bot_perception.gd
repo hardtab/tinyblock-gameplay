@@ -132,6 +132,8 @@ static func mine_target_is_safe(observation: Dictionary, target: Dictionary) -> 
 		# cannot be identified as the current support tile, so preserve the existing
 		# reach/tool checks instead of treating every such resource as unsafe.
 		return true
+	if _is_descent_return_support(observation, target):
+		return false
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	if self_state.is_empty():
 		return false
@@ -165,6 +167,44 @@ static func mine_target_is_safe(observation: Dictionary, target: Dictionary) -> 
 		if landing_cell.is_empty():
 			continue
 		return _safe_solid_terrain(landing_cell)
+	return false
+
+
+static func _is_descent_return_support(observation: Dictionary, target: Dictionary) -> bool:
+	var target_x := int(target.get("x", 2147483647))
+	var target_y := int(target.get("y", 2147483647))
+	if target_x == 2147483647 or target_y == 2147483647:
+		return false
+	# Only a host-observed regenerative source may be mined even when it is part
+	# of the protected route. Do not trust capability flags on a proposed target.
+	var target_id := str(target.get("id", ""))
+	if not target_id.is_empty():
+		var raw_resources: Variant = observation.get("visible_resources", [])
+		if raw_resources is Array:
+			for raw_resource in raw_resources as Array:
+				if not raw_resource is Dictionary:
+					continue
+				var resource := raw_resource as Dictionary
+				if str(resource.get("id", "")) != target_id:
+					continue
+				if int(resource.get("x", 2147483647)) != target_x or int(resource.get("y", 2147483647)) != target_y:
+					continue
+				if bool(resource.get("regenerates_on_mine", false)) and bool(resource.get("preserves_support_on_mine", false)):
+					return false
+	var protected_supports: Array = []
+	var raw_supports: Variant = observation.get("descent_protected_supports", [])
+	if raw_supports is Array:
+		protected_supports.append_array(raw_supports as Array)
+	var descent_plan: Dictionary = observation.get("descent_plan", {}) if observation.get("descent_plan", {}) is Dictionary else {}
+	raw_supports = descent_plan.get("protected_supports", [])
+	if raw_supports is Array:
+		protected_supports.append_array(raw_supports as Array)
+	for raw_support in protected_supports:
+		if not raw_support is Array or (raw_support as Array).size() < 2:
+			continue
+		var support := raw_support as Array
+		if int(support[0]) == target_x and int(support[1]) == target_y:
+			return true
 	return false
 
 
