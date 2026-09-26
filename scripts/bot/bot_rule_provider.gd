@@ -146,7 +146,18 @@ func decide(observation: Dictionary) -> Dictionary:
 	var attacker_id := str(defense.get("attacker_player_id", ""))
 	var aggressive_player_id := str(observation.get("aggressive_player_id", ""))
 	var attacker_target := _player_target_by_id(observation, attacker_id)
-	if not attacker_id.is_empty() and bool(defense.get("can_retaliate", false)) and Contract.ACTION_RETALIATE_ONCE in legal:
+	var attacker_in_retaliation_range := (
+		not attacker_target.is_empty()
+		and bool(attacker_target.get("alive", true))
+		and not bool(attacker_target.get("stale", attacker_target.get("last_known", false)))
+		and float(attacker_target.get("distance", INF)) <= maxf(0.0, float(observation.get("retaliation_distance", 52.0)))
+	)
+	if (
+		not attacker_id.is_empty()
+		and bool(defense.get("can_retaliate", false))
+		and attacker_in_retaliation_range
+		and Contract.ACTION_RETALIATE_ONCE in legal
+	):
 		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_RETALIATE_ONCE, {"id": attacker_id}, 700, 0.99)
 	if not attacker_target.is_empty() and attacker_id != aggressive_player_id and Contract.ACTION_FLEE_FROM in legal:
 		# Outside PvP the safety contract allows one proportional response. Once it
