@@ -1830,6 +1830,18 @@ func _record_recent_player_damage(payload: Dictionary, now_msec: int) -> void:
 
 
 func _handle_confirmed_respawn(now_msec: int) -> void:
+	# The action that was running before death targets the old life/position. In
+	# particular, a long MOVE_TO can otherwise survive every respawn and keep the
+	# bot walking back into the same danger instead of re-evaluating survival.
+	if behavior != null and behavior.executor != null and behavior.executor.is_busy():
+		var interrupted_decision: Dictionary = behavior.executor.current_decision.duplicate(true)
+		behavior.executor.cancel("respawn_replan")
+		structured_log.emit({
+			"event": "respawn_action_cancelled",
+			"action": str(interrupted_decision.get("action", "")),
+			"goal": str(interrupted_decision.get("goal", "")),
+			"at_msec": now_msec,
+		})
 	var death_state: Dictionary = (_world_snapshot.get("self", {}) as Dictionary).duplicate(true) if _world_snapshot.get("self", {}) is Dictionary else {}
 	var recent_death_actions: Array[Dictionary] = []
 	for raw_action in _action_history.slice(maxi(0, _action_history.size() - 4)):
