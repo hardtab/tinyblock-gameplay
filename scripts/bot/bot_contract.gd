@@ -126,7 +126,13 @@ static func client_version_at_least(version: String, minimum: String = MIN_SUPPO
 
 
 static func _version_parts(version: String) -> Array[int]:
-	var normalized := version.strip_edges().split("-", false, 1)[0]
+	var trimmed := version.strip_edges()
+	if trimmed.is_empty():
+		return []
+	var version_parts := trimmed.split("-", false, 1)
+	if version_parts.is_empty():
+		return []
+	var normalized := version_parts[0]
 	var parts: Array[int] = []
 	for raw_part in normalized.split("."):
 		if raw_part.is_empty() or not raw_part.is_valid_int():

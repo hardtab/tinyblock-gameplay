@@ -497,6 +497,10 @@ func handle_message(message: Dictionary) -> void:
 	# this message path for exactly that reason.  Waiting here prevents the bot's
 	# first request from being dropped while the channel is still negotiating.
 	if kind == "control" and message_type == "connected":
+		# MultiplayerClient emits `connected` before it finishes extracting the
+		# host id from the peer list. Refresh it here so an omitted client_version
+		# on a P2P host is not mistaken for a legacy guest.
+		_host_player_id = _host_id_from_network()
 		if not _connected_peers_supported(message.get("players", [])):
 			leave("legacy_client")
 			return
