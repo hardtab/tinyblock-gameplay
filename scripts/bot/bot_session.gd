@@ -1431,6 +1431,17 @@ func _record_recent_player_damage(payload: Dictionary, now_msec: int) -> void:
 
 
 func _handle_confirmed_respawn(now_msec: int) -> void:
+	var death_state: Dictionary = (_world_snapshot.get("self", {}) as Dictionary).duplicate(true) if _world_snapshot.get("self", {}) is Dictionary else {}
+	var recent_death_actions: Array[Dictionary] = []
+	for raw_action in _action_history.slice(maxi(0, _action_history.size() - 4)):
+		if raw_action is Dictionary:
+			recent_death_actions.append((raw_action as Dictionary).duplicate(true))
+	var nearby_threat_ids: Array[String] = []
+	var raw_threats: Variant = _world_snapshot.get("threats", [])
+	if raw_threats is Array:
+		for raw_threat in raw_threats:
+			if raw_threat is Dictionary:
+				nearby_threat_ids.append(str((raw_threat as Dictionary).get("id", "")))
 	var killer_id := ""
 	if (
 		not _last_player_damage_attacker_id.is_empty()
@@ -1455,6 +1466,17 @@ func _handle_confirmed_respawn(now_msec: int) -> void:
 		"host_kill_streak": _host_kill_streak,
 		"death_count": _player_death_count,
 		"emoji": emoji,
+		"death_state": {
+			"x": float(death_state.get("x", 0.0)),
+			"y": float(death_state.get("y", 0.0)),
+			"health": int(death_state.get("health", -1)),
+			"nourishment": int(death_state.get("nourishment", -1)),
+			"vy": float(death_state.get("vy", 0.0)),
+			"on_ground": bool(death_state.get("on_ground", false)),
+			"touching_harmful_fluid": _local_touches_harmful_fluid(death_state) if not death_state.is_empty() else false,
+		},
+		"nearby_threat_ids": nearby_threat_ids,
+		"recent_actions": recent_death_actions,
 		"at_msec": now_msec,
 	})
 	behavior.request_decision(now_msec)

@@ -29,6 +29,7 @@ const BOW_ARROW_MIN_SPEED := 250.0
 const BOW_ARROW_MAX_SPEED := 560.0
 const BOW_ARROW_GRAVITY := 310.0
 const CREATURE_DANGER_RADIUS := 224.0
+const SURVIVAL_HEALTH_RATIO := 0.6
 const BUILD_ACTION_COOLDOWN_MSEC := 2_500
 const PLANT_ACTION_COOLDOWN_MSEC := 6_000
 const MAX_CONSECUTIVE_MINING_ACTIONS := 2
@@ -97,7 +98,7 @@ func decide(observation: Dictionary) -> Dictionary:
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var health := int(self_state.get("health", 10))
 	var max_health := maxi(1, int(self_state.get("max_health", 10)))
-	var low_health := float(health) / float(max_health) <= 0.35
+	var low_health := float(health) / float(max_health) <= SURVIVAL_HEALTH_RATIO
 
 	# Immediate survival has priority over social or gathering behaviour.
 	var threats: Array = _as_array(observation.get("threats", []))

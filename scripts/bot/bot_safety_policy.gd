@@ -7,7 +7,7 @@ const EmojiReactions = preload("res://gameplay/scripts/emoji_reactions.gd")
 
 const DEFAULT_RETALIATION_WINDOW_MSEC := 10_000
 const DEFAULT_MAX_RETALIATIONS := 1
-const LOW_HEALTH_RATIO := 0.35
+const LOW_HEALTH_RATIO := 0.6
 
 var retaliation_window_msec := DEFAULT_RETALIATION_WINDOW_MSEC
 var max_retaliations := DEFAULT_MAX_RETALIATIONS
