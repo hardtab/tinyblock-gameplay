@@ -2428,6 +2428,14 @@ func _apply_creatures_snapshot(payload: Dictionary) -> void:
 			creature["provoked_ticks"] = maxi(0, int(entry[11]))
 		if entry.size() > 12:
 			creature["attack_cooldown"] = maxi(0, int(entry[12]))
+		if entry.size() > 13:
+			creature["damage"] = maxi(0, int(entry[13]))
+		if entry.size() > 14:
+			creature["temperament"] = str(entry[14])
+		if entry.size() > 15:
+			creature["attack_trigger"] = str(entry[15])
+		if entry.size() > 16:
+			creature["awareness_blocks"] = clampf(float(entry[16]), 1.0, 16.0)
 		creatures.append(creature)
 	_world_snapshot["creatures"] = creatures
 	_world_snapshot["threats"] = _threats_from_creatures(creatures)
