@@ -6,6 +6,7 @@ const DescentPlanner = preload("res://gameplay/scripts/bot/bot_descent_planner.g
 const BuildPlanner = preload("res://gameplay/scripts/bot/bot_build_planner.gd")
 const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 const RecipePlanner = preload("res://gameplay/scripts/bot/bot_recipe_planner.gd")
+const AchievementRegistry = preload("res://gameplay/scripts/bot/bot_achievement_registry.gd")
 
 var _rng := RandomNumberGenerator.new()
 var _last_build_msec := -1
@@ -53,9 +54,6 @@ const PROGRESSION_CRAFTS := [
 	"stone_axe", "stone_sword", "chest", "crystal_pickaxe",
 	"obsidian_pickaxe", "resonance_pickaxe",
 ]
-## Adventure modes where the survival-tool chain is meaningful. Challenge Run
-## stays a directed course, while Duel is governed by its pinned combat target.
-const TOOL_PROGRESSION_MODES := ["skyblock", "floating_islands", "procedural", "one_block"]
 const MID_TIER_TOOL_OUTPUTS := ["copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "stone_axe", "stone_sword"]
 const WOOD_BLOCK_NAMES := ["wood", "palm_wood", "pine_wood", "weeping_wood"]
 const LEAF_BLOCK_NAMES := ["leaves", "palm_leaves", "pine_needles", "weeping_leaves"]
@@ -287,15 +285,18 @@ func decide(observation: Dictionary) -> Dictionary:
 	# Achievement goals are advisory progression, never a survival or combat
 	# override. One Block is the exception to ordinary progression order because
 	# its authoritative source is renewable and is the world's central resource.
-	var one_block_goal := _open_achievement(observation, "one_block_world")
-	if str(observation.get("world_mode", "")).to_lower() == "one_block" and not one_block_goal.is_empty():
-		var one_block_action := _one_block_achievement_action(observation, legal)
-		if not one_block_action.is_empty():
-			return _tag_achievement_goal(one_block_action, "one_block_world")
+	var mode := str(observation.get("world_mode", "")).to_lower()
+	var mode_strategy_goals := AchievementRegistry.strategy_goal_ids(mode)
+	if "one_block_world" in mode_strategy_goals:
+		var one_block_goal := _open_achievement(observation, "one_block_world")
+		if not one_block_goal.is_empty():
+			var one_block_action := _one_block_achievement_action(observation, legal)
+			if not one_block_action.is_empty():
+				return _tag_achievement_goal(one_block_action, "one_block_world")
 	# Challenge Run is a directed course, not a general survival sandbox. Once
 	# immediate danger and combat have been handled, forward distance outranks
 	# optional recipes, mining and base-building.
-	if str(observation.get("world_mode", "")).to_lower() == "challenge_run":
+	if "dont_look_back" in mode_strategy_goals:
 		var challenge_action := _mode_achievement_action(observation, legal)
 		if not challenge_action.is_empty():
 			return _tag_achievement_goal(challenge_action, "dont_look_back")
@@ -717,10 +718,11 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			continue
 		if not Perception.mine_target_is_safe(observation, resource):
 			continue
-		# Reachable tiles are preferred for MINE; farther tiles stay candidates so
-		# MOVE_TO can walk toward them. DigPlanner already ran for true blocked
-		# routes, so skipping every unreachable resource left the bot with nothing
-		# to gather and fell through to endless social hopping.
+		# `reachable` means close enough to attempt mining, not that physics can
+		# reach a standing position beside the block. Farther resources need an
+		# explicit host-terrain route proof before they can become movement goals.
+		if not _resource_has_proven_approach(resource):
+			continue
 		var distance := float(resource.get("distance", 9999.0))
 		if distance > 288.0:
 			continue
@@ -803,6 +805,8 @@ func _nearest_named_resource(values: Array, want_wood: bool, want_leaves: bool) 
 		if not raw_value is Dictionary:
 			continue
 		var resource := raw_value as Dictionary
+		if not _resource_has_proven_approach(resource):
+			continue
 		var block_name := str(resource.get("block_name", "")).to_lower()
 		if want_wood and _is_wood_log_name(block_name):
 			pass
@@ -815,6 +819,10 @@ func _nearest_named_resource(values: Array, want_wood: bool, want_leaves: bool) 
 			best_distance = distance
 			best = resource
 	return best
+
+
+func _resource_has_proven_approach(resource: Dictionary) -> bool:
+	return bool(resource.get("reachable", false)) or bool(resource.get("approachable", false))
 
 
 func _consecutive_action_streak(observation: Dictionary, action: String) -> int:
@@ -1178,6 +1186,8 @@ func _stone_age_gather_wood_action(observation: Dictionary, legal: PackedStringA
 		if not raw_resource is Dictionary:
 			continue
 		var resource := raw_resource as Dictionary
+		if not _resource_has_proven_approach(resource):
+			continue
 		var block_name := str(resource.get("block_name", "")).to_lower()
 		if not _is_wood_log_name(block_name) or not Perception.mine_target_is_safe(observation, resource):
 			continue
@@ -1201,6 +1211,8 @@ func _stone_age_cobblestone_target(observation: Dictionary) -> Dictionary:
 		if not raw_resource is Dictionary:
 			continue
 		var resource := raw_resource as Dictionary
+		if not _resource_has_proven_approach(resource):
+			continue
 		if str(resource.get("block_name", "")).to_lower() != "cobblestone":
 			continue
 		if int(resource.get("harvest_tier", 1)) > 1 or not Perception.mine_target_is_safe(observation, resource):
@@ -1313,46 +1325,39 @@ func _visible_resource_at(source: Dictionary, resources: Array) -> Dictionary:
 
 func _mode_achievement_action(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
 	var mode := str(observation.get("world_mode", "")).to_lower()
-	if mode == "challenge_run":
-		var challenge_goal := _open_achievement(observation, "dont_look_back")
-		if not challenge_goal.is_empty():
-			var challenge_action := _challenge_distance_action(observation, legal, challenge_goal)
-			if not challenge_action.is_empty():
-				return challenge_action
-	elif mode == "procedural":
-		var jeweler_goal := _open_achievement(observation, "jeweler")
-		if not jeweler_goal.is_empty():
-			var jewel_action := _achievement_resource_action(observation, legal, jeweler_goal, jeweler_goal.get("missing", []))
-			if not jewel_action.is_empty():
-				return _tag_achievement_goal(jewel_action, "jeweler")
-		# The World Underfoot is a genuine Procedural exploration objective. Do
-		# not invent biome destinations: BotSession exposes only host-generated,
-		# locally verified safe surface cells with a complete physics route.
-		var world_underfoot_goal := _open_achievement(observation, "world_underfoot")
-		if not world_underfoot_goal.is_empty():
-			var biome_action := _world_underfoot_action(observation, legal, world_underfoot_goal)
-			if not biome_action.is_empty():
-				return _tag_achievement_goal(biome_action, "world_underfoot")
-		# Resonance Master is a real late-game objective. Expand its live recipe
-		# graph one verified step at a time instead of waiting until every input is
-		# already in the inventory. This also keeps alternate material recipes and
-		# station requirements data-driven.
-		var resonance_goal := _open_achievement(observation, "resonance_master")
-		if not resonance_goal.is_empty():
-			var resonance_plan := RecipePlanner.plan(
-				"resonance_pickaxe",
-				1,
-				_inventory(observation),
-				_as_array(observation.get("recipes", [])),
-			)
-			var resonance_action := _achievement_recipe_plan_action(resonance_plan, observation, legal)
-			if not resonance_action.is_empty():
-				return _tag_achievement_goal(resonance_action, "resonance_master")
-		var deep_goal := _open_achievement(observation, "below_surface")
-		if not deep_goal.is_empty():
-			var depth_action := _procedural_depth_action(observation, legal, deep_goal)
-			if not depth_action.is_empty():
-				return _tag_achievement_goal(depth_action, "below_surface")
+	for goal_id in AchievementRegistry.strategy_goal_ids(mode):
+		var goal := _open_achievement(observation, goal_id)
+		if goal.is_empty():
+			continue
+		match goal_id:
+			"dont_look_back":
+				var challenge_action := _challenge_distance_action(observation, legal, goal)
+				if not challenge_action.is_empty():
+					return challenge_action
+			"jeweler":
+				var jewel_action := _achievement_resource_action(observation, legal, goal, goal.get("missing", []))
+				if not jewel_action.is_empty():
+					return _tag_achievement_goal(jewel_action, goal_id)
+			"world_underfoot":
+				# Do not invent biome destinations: BotSession exposes only host-generated,
+				# locally verified safe surface cells with a complete physics route.
+				var biome_action := _world_underfoot_action(observation, legal, goal)
+				if not biome_action.is_empty():
+					return _tag_achievement_goal(biome_action, goal_id)
+			"resonance_master":
+				var resonance_plan := RecipePlanner.plan(
+					"resonance_pickaxe",
+					1,
+					_inventory(observation),
+					_as_array(observation.get("recipes", [])),
+				)
+				var resonance_action := _achievement_recipe_plan_action(resonance_plan, observation, legal)
+				if not resonance_action.is_empty():
+					return _tag_achievement_goal(resonance_action, goal_id)
+			"below_surface":
+				var depth_action := _procedural_depth_action(observation, legal, goal)
+				if not depth_action.is_empty():
+					return _tag_achievement_goal(depth_action, goal_id)
 	return {}
 
 
@@ -1451,7 +1456,7 @@ func _achievement_recipe_plan_action(plan: Dictionary, observation: Dictionary, 
 func _mid_tier_tool_progression_action(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
 	var mode := str(observation.get("world_mode", "")).to_lower()
 	if (
-		mode not in TOOL_PROGRESSION_MODES
+		mode not in AchievementRegistry.tool_progression_modes()
 		or bool(observation.get("pvp_world", false))
 		or _achievement_progression_locked(observation)
 	):
@@ -1529,6 +1534,8 @@ func _achievement_resource_action(observation: Dictionary, legal: PackedStringAr
 		if not raw_resource is Dictionary:
 			continue
 		var resource := raw_resource as Dictionary
+		if not _resource_has_proven_approach(resource):
+			continue
 		if _normalized_resource_name(str(resource.get("block_name", resource.get("content_id", "")))) not in wanted_names:
 			continue
 		if not Perception.mine_target_is_safe(observation, resource):

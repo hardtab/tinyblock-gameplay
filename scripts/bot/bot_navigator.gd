@@ -86,19 +86,7 @@ static func physics_route(
 	while head < queue.size() and queue.size() <= max_nodes:
 		var current := queue[head]
 		head += 1
-		var candidates: Array[Dictionary] = []
-		for direction in [Vector2i.RIGHT, Vector2i.LEFT]:
-			candidates.append({"tile": current + direction, "kind": "walk"})
-			# A one-block step and a two-block gap are both reachable by the
-			# controller's jump arc. The actual collision solver remains final.
-			candidates.append({"tile": current + direction + Vector2i.UP, "kind": "jump"})
-			candidates.append({"tile": current + direction * 2, "kind": "jump"})
-			candidates.append({"tile": current + direction * 2 + Vector2i.UP, "kind": "jump"})
-			candidates.append({"tile": current + direction + Vector2i.DOWN, "kind": "drop"})
-		for direction in [Vector2i.UP, Vector2i.DOWN]:
-			if climbable.is_valid() and (bool(climbable.call(current)) or bool(climbable.call(current + direction))):
-				candidates.append({"tile": current + direction, "kind": "climb"})
-		for candidate in candidates:
+		for candidate in _physics_candidates(current, climbable):
 			var next: Vector2i = candidate["tile"]
 			if previous.has(next) or not bool(passable.call(next)):
 				continue
@@ -108,6 +96,55 @@ static func physics_route(
 				return _reconstruct_physics_path(previous, edge_kind, origin, target)
 			queue.append(next)
 	return empty
+
+
+## Enumerates the exact support-tile transitions physics_route expands from
+## `current`.  Keeping this in one place lets physics_reachable_tiles prove the
+## same route existence without re-deriving (and drifting from) the edge rules.
+static func _physics_candidates(current: Vector2i, climbable: Callable) -> Array[Dictionary]:
+	var candidates: Array[Dictionary] = []
+	for direction in [Vector2i.RIGHT, Vector2i.LEFT]:
+		candidates.append({"tile": current + direction, "kind": "walk"})
+		# A one-block step and a two-block gap are both reachable by the
+		# controller's jump arc. The actual collision solver remains final.
+		candidates.append({"tile": current + direction + Vector2i.UP, "kind": "jump"})
+		candidates.append({"tile": current + direction * 2, "kind": "jump"})
+		candidates.append({"tile": current + direction * 2 + Vector2i.UP, "kind": "jump"})
+		candidates.append({"tile": current + direction + Vector2i.DOWN, "kind": "drop"})
+	for direction in [Vector2i.UP, Vector2i.DOWN]:
+		if climbable.is_valid() and (bool(climbable.call(current)) or bool(climbable.call(current + direction))):
+			candidates.append({"tile": current + direction, "kind": "climb"})
+	return candidates
+
+
+## Bounded reachability set over the same support-tile graph as physics_route.
+## Every key is a support tile physics_route can reach from `origin`; `origin`
+## is included whenever it is passable.  Because this shares the candidate
+## neighbours, passable/climbable rules and node cap with physics_route, a key's
+## presence is equivalent to a non-empty physics_route to that tile, and a tile
+## being absent means no route within the bound exists.
+static func physics_reachable_tiles(
+	origin: Vector2i,
+	passable: Callable,
+	climbable: Callable = Callable(),
+	max_nodes: int = MAX_PHYSICS_ROUTE_NODES,
+) -> Dictionary:
+	var reachable: Dictionary = {}
+	if not passable.is_valid() or max_nodes <= 0 or not bool(passable.call(origin)):
+		return reachable
+	reachable[origin] = true
+	var queue: Array[Vector2i] = [origin]
+	var head := 0
+	while head < queue.size() and queue.size() <= max_nodes:
+		var current := queue[head]
+		head += 1
+		for candidate in _physics_candidates(current, climbable):
+			var next: Vector2i = candidate["tile"]
+			if reachable.has(next) or not bool(passable.call(next)):
+				continue
+			reachable[next] = true
+			queue.append(next)
+	return reachable
 
 
 static func _reconstruct_path(previous: Dictionary, origin: Vector2i, target: Vector2i) -> Array[Vector2i]:

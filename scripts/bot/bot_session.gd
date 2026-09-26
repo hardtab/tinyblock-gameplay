@@ -11,6 +11,7 @@ const BehaviorClass = preload("res://gameplay/scripts/bot/bot_behavior.gd")
 const RuleProviderClass = preload("res://gameplay/scripts/bot/bot_rule_provider.gd")
 const SafetyClass = preload("res://gameplay/scripts/bot/bot_safety_policy.gd")
 const DescentPlannerClass = preload("res://gameplay/scripts/bot/bot_descent_planner.gd")
+const AchievementRegistryClass = preload("res://gameplay/scripts/bot/bot_achievement_registry.gd")
 const ExecutorClass = preload("res://gameplay/scripts/bot/bot_executor.gd")
 const ActionLoop = preload("res://gameplay/scripts/bot/bot_action_loop.gd")
 const AiClientClass = preload("res://gameplay/scripts/bot/bot_ai_client.gd")
@@ -202,15 +203,6 @@ const SUPPORT_PLACE_INVALID_TILE := Vector2i(2147483647, 2147483647)
 const SUPPORT_BLOCK_PRIORITY: PackedStringArray = [
 	"planks", "palm_planks", "pine_planks", "weeping_planks",
 	"stone_bricks", "cobblestone", "stone", "dirt",
-]
-## World modes /root/Achievements can credit. Anything outside this list
-## (duel, unknown metadata) is neither recorded nor treated as a supported
-## progression mode.
-const ACHIEVEMENT_WORLD_MODES: PackedStringArray = [
-	"skyblock", "floating_islands", "procedural", "one_block", "challenge_run",
-]
-const STONE_AGE_PROGRESS_MODES: PackedStringArray = [
-	"skyblock", "floating_islands", "procedural", "one_block",
 ]
 const BOT_SKIN := {
 	"skin": "#8b5a3c",
@@ -3023,6 +3015,20 @@ func _descent_coverage() -> Dictionary:
 func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
 	var resources: Array = raw_resources as Array if raw_resources is Array else []
 	var filtered: Array = []
+	var needs_approach_proof := false
+	for raw_resource in resources:
+		if raw_resource is Dictionary and not bool((raw_resource as Dictionary).get("reachable", false)):
+			needs_approach_proof = true
+			break
+	var reachable_support_tiles: Dictionary = {}
+	if needs_approach_proof and not _terrain_tiles.is_empty():
+		var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+		var origin := Contract.target_position(self_state)
+		reachable_support_tiles = Navigator.physics_reachable_tiles(
+			_support_tile_for_position(origin),
+			Callable(self, "_terrain_standable_tile"),
+			Callable(self, "_terrain_climbable_tile"),
+		)
 	for raw_resource in resources:
 		if not raw_resource is Dictionary:
 			continue
@@ -3033,8 +3039,31 @@ func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
 			_blocked_action_targets.erase(key)
 			blocked_until = 0
 		if blocked_until <= now_msec:
-			filtered.append(resource)
+			var observed_resource := resource.duplicate(true)
+			if not bool(observed_resource.get("reachable", false)):
+				observed_resource["approachable"] = _resource_has_reachable_stand_tile(observed_resource, reachable_support_tiles)
+			filtered.append(observed_resource)
 	return filtered
+
+
+func _resource_has_reachable_stand_tile(resource: Dictionary, reachable_support_tiles: Dictionary) -> bool:
+	if not resource.has("x") or not resource.has("y") or reachable_support_tiles.is_empty():
+		return false
+	var tile := Vector2i(int(resource.get("x", 0)), int(resource.get("y", 0)))
+	var candidates: Array[Vector2i] = [
+		tile + Vector2i.LEFT,
+		tile + Vector2i.RIGHT,
+		tile + Vector2i.LEFT * 2,
+		tile + Vector2i.RIGHT * 2,
+		tile + Vector2i.LEFT + Vector2i.DOWN,
+		tile + Vector2i.RIGHT + Vector2i.DOWN,
+		tile + Vector2i.LEFT * 2 + Vector2i.DOWN,
+		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN,
+	]
+	for candidate in candidates:
+		if reachable_support_tiles.has(candidate):
+			return true
+	return false
 
 
 func _expire_stale_action_targets(now_msec: int) -> void:
@@ -4045,7 +4074,7 @@ func _sync_stone_age_goal(achievements: Dictionary, now_msec: int = -1) -> void:
 			break
 	var community_locked := bool(achievements.get("community_locked", false))
 	if _stone_age_goal_state.is_empty():
-		if mode not in STONE_AGE_PROGRESS_MODES or community_locked or not stone_age_open or "stone_age" in unlocked or world_id.is_empty():
+		if mode not in AchievementRegistryClass.stone_age_progression_modes() or community_locked or not stone_age_open or "stone_age" in unlocked or world_id.is_empty():
 			return
 		_stone_age_goal_state = {
 			"world_id": world_id,
@@ -4059,7 +4088,7 @@ func _sync_stone_age_goal(achievements: Dictionary, now_msec: int = -1) -> void:
 			"pending": {},
 		}
 		structured_log.emit({"event": "goal_selected", "goal": "stone_age", "stage": "gather_wood", "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
-	if mode not in STONE_AGE_PROGRESS_MODES:
+	if mode not in AchievementRegistryClass.stone_age_progression_modes():
 		_stone_age_goal_state["status"] = "paused"
 		return
 	if community_locked:
@@ -4118,11 +4147,7 @@ func _sync_achievement_goal_states(achievements: Dictionary, mode: String, now_m
 		if not goal_id.is_empty() and not bool(goal.get("locked", false)):
 			open_by_id[goal_id] = goal
 	var community_locked := bool(achievements.get("community_locked", false))
-	for goal_id in [
-		"first_block", "first_craft", "here_will_be_home", "miner", "architect",
-		"jeweler", "world_underfoot", "below_surface", "resonance_master",
-		"one_block_world", "dont_look_back", "five_lives", "not_alone", "back_for_it",
-	]:
+	for goal_id in AchievementRegistryClass.tracked_goal_ids():
 		var entry: Dictionary = _achievement_goal_states.get(goal_id, {}) if _achievement_goal_states.get(goal_id, {}) is Dictionary else {}
 		if goal_id in unlocked:
 			var was_completed := str(entry.get("status", "")) == "completed"
@@ -4195,18 +4220,7 @@ func _sync_achievement_goal_states(achievements: Dictionary, mode: String, now_m
 
 
 func _achievement_goal_mode_allowed(goal_id: String, mode: String) -> bool:
-	match goal_id:
-		"one_block_world":
-			return mode == "one_block"
-		"dont_look_back":
-			return mode == "challenge_run"
-		"jeweler", "world_underfoot", "resonance_master", "below_surface":
-			return mode == "procedural"
-		"five_lives":
-			return mode in ["skyblock", "floating_islands", "procedural", "one_block", "challenge_run"]
-		"first_block", "first_craft", "here_will_be_home", "miner", "architect", "not_alone", "back_for_it":
-			return mode in ["skyblock", "floating_islands", "procedural", "one_block", "challenge_run", "duel", "pvp"]
-	return false
+	return AchievementRegistryClass.goal_mode_allowed(goal_id, mode)
 
 
 func _achievement_goal_step_id(decision: Dictionary) -> String:
@@ -4565,7 +4579,7 @@ func _record_world_state_achievements() -> void:
 		return
 	var progress := _mode_progress_from_snapshot()
 	var mode := str(progress.get("world_mode", "")).to_lower()
-	if mode not in ACHIEVEMENT_WORLD_MODES:
+	if mode not in AchievementRegistryClass.recordable_world_modes():
 		return
 	if achievements.has_method("record_world_mode"):
 		achievements.call("record_world_mode", mode)
