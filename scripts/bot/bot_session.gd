@@ -119,6 +119,9 @@ var _pending_action_targets: Dictionary = {}
 var _blocked_action_targets: Dictionary = {}
 var _protected_build_cells: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
+## Fully replicated procedural chunks prove that omitted cells are air. Static
+## worlds instead use a small bounded area from their complete initial snapshot.
+var _terrain_known_chunks: Dictionary = {}
 var _safe_exploration_waypoint_cache: Array[Dictionary] = []
 var _safe_exploration_waypoint_cache_origin := Vector2i(2147483647, 2147483647)
 var _safe_exploration_waypoint_cache_checked_msec := -1
@@ -345,6 +348,7 @@ func join_session(record: Dictionary) -> void:
 	_protected_build_cells.clear()
 	_action_loop_blocked_until.clear()
 	_terrain_tiles.clear()
+	_terrain_known_chunks.clear()
 	_terrain_observed_cells.clear()
 	_descent_snapshot_complete = false
 	_descent_last_plan.clear()
@@ -1232,7 +1236,39 @@ func _verified_drop_transition(from_tile: Vector2i, to_tile: Vector2i) -> bool:
 
 func _terrain_cell_is_known(tx: int, ty: int) -> bool:
 	var key := "%d:%d" % [tx, ty]
-	return _terrain_observed_cells.has(key) or _terrain_tiles.has(key)
+	if _terrain_observed_cells.has(key) or _terrain_tiles.has(key):
+		return true
+	var generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
+	var mode := str(generation.get("mode", _session_world_mode)).to_lower()
+	if mode in ["procedural", "challenge_run"]:
+		var chunk_x := floori(float(tx) / float(WorldSim.CHUNK_WIDTH))
+		return _terrain_known_chunks.has(chunk_x)
+	if _descent_snapshot_complete and mode in ["one_block", "skyblock", "floating_islands"]:
+		var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+		if self_state.is_empty():
+			return false
+		var reference := _support_tile_for_position(Contract.target_position(self_state))
+		return (
+			absi(tx - reference.x) <= DescentPlannerClass.STATIC_KNOWN_RADIUS_X
+			and absi(ty - reference.y) <= DescentPlannerClass.STATIC_KNOWN_RADIUS_Y
+		)
+	return false
+
+
+func _rebuild_known_chunk_index(raw_chunks: Variant) -> void:
+	_terrain_known_chunks.clear()
+	if raw_chunks is Array:
+		for raw_chunk in raw_chunks:
+			if not raw_chunk is Dictionary or not (raw_chunk as Dictionary).has("x"):
+				continue
+			var chunk_x := int((raw_chunk as Dictionary).get("x", WorldSim.COORD_LIMIT))
+			if absi(chunk_x) <= WorldSim.COORD_LIMIT / WorldSim.CHUNK_WIDTH:
+				_terrain_known_chunks[chunk_x] = true
+	elif raw_chunks is Dictionary:
+		for raw_chunk_x in raw_chunks:
+			var chunk_x := int(raw_chunk_x)
+			if absi(chunk_x) <= WorldSim.COORD_LIMIT / WorldSim.CHUNK_WIDTH:
+				_terrain_known_chunks[chunk_x] = true
 
 
 func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) -> Dictionary:
@@ -1591,6 +1627,7 @@ func _merge_streamed_chunk_terrain(state: Dictionary) -> bool:
 		var key := "%d:%d" % [int(tile["x"]), int(tile["y"])]
 		_terrain_tiles[key] = str(tile["block_name"])
 		_terrain_observed_cells[key] = true
+	_terrain_known_chunks[chunk_x] = true
 	var plant_entries: Array = state.get("plant_growth", []) if state.get("plant_growth", []) is Array else []
 	for raw_plant in plant_entries:
 		if raw_plant is Dictionary:
@@ -2730,6 +2767,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	elif str(snapshot_generation.get("mode", "")).to_lower() == "challenge_run":
 		var challenge_state: Dictionary = _world_snapshot.get("challenge", {}) if _world_snapshot.get("challenge", {}) is Dictionary else {}
 		_live_challenge_best_distance = maxi(_live_challenge_best_distance, maxi(0, int(challenge_state.get("best_distance", 0))))
+	_rebuild_known_chunk_index(snapshot_generation.get("chunks", []))
 	_rebuild_terrain_index(_world_snapshot.get("tiles", []))
 	_rebuild_plant_index(_world_snapshot.get("plant_growth", _world_snapshot.get("plants", [])))
 	_seed_tree_growth_resources(_world_snapshot.get("tree_growth", []))
