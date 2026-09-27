@@ -5275,10 +5275,15 @@ func _stone_age_note_no_action(decision: Dictionary, now_msec: int) -> void:
 		# A safety or combat response legitimately suspends long-term progression.
 		_stone_age_goal_state["no_action_since_msec"] = -1
 		return
-	if action not in [Contract.ACTION_WAIT, Contract.ACTION_LOOK_AT]:
-		# Only passive turns count as no progress. In particular, repeated social
-		# LOOK_AT beside a player is not useful progression and must not suppress
-		# the bounded retry/cooldown for an otherwise idle Stone Age stage.
+	var non_progress_goal := behavior_goal in [
+		Contract.GOAL_IDLE,
+		Contract.GOAL_SOCIAL_FOLLOW,
+		Contract.GOAL_EXPLORE,
+	]
+	if action not in [Contract.ACTION_WAIT, Contract.ACTION_LOOK_AT] and not non_progress_goal:
+		# Mining/crafting/building and other substantive goals count as activity.
+		# Social orbiting and exploratory MOVE_TO retries do not by themselves
+		# advance a crafting stage, so they must not keep an unavailable stage alive.
 		_stone_age_goal_state["no_action_since_msec"] = -1
 		return
 	var since := int(_stone_age_goal_state.get("no_action_since_msec", -1))
