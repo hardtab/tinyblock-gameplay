@@ -199,6 +199,12 @@ func decide(observation: Dictionary) -> Dictionary:
 			and not _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
 		):
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, creature_threat, 1200, 0.97)
+		if Contract.ACTION_WAIT in legal:
+			# If the verified escape graph has no safe route, ordinary exploration can
+			# head straight back toward the same hostile creature. Hold position for a
+			# short retry window instead; weapon, ranged and melee responses above still
+			# take precedence, and the escape is reconsidered as soon as its cooldown ends.
+			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_WAIT, {}, 700, 0.88)
 
 	# The safety policy writes an explicit, short-lived retaliation grant into
 	# the observation.  The rule provider never infers an attacker from nearby
