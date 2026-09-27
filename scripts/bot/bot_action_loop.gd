@@ -5,6 +5,10 @@ const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
 
 const STREAK_LIMIT := 5
 const COOLDOWN_MSEC := 10_000
+## A shot is a discrete combat action. Snapshot-driven decisions can arrive
+## several times per second, so don't let a finished FIRE_BOW action be issued
+## again until a plausible firing interval has elapsed.
+const BOW_SHOT_COOLDOWN_MSEC := 700
 
 ## Actions that must stay available so the bot can recover from a bad streak.
 const ALWAYS_LEGAL: PackedStringArray = [
@@ -78,7 +82,28 @@ static func refresh_blocked_actions(
 			var until := maxi(int(result.get(action, 0)), now_msec + COOLDOWN_MSEC)
 			for related in _streak_family(action):
 				result[str(related)] = maxi(int(result.get(str(related), 0)), until)
+	var latest_bow_shot_msec := _latest_started_action_msec(history, Contract.ACTION_FIRE_BOW)
+	if latest_bow_shot_msec >= 0:
+		var bow_ready_at := latest_bow_shot_msec + BOW_SHOT_COOLDOWN_MSEC
+		if now_msec < bow_ready_at:
+			result[Contract.ACTION_FIRE_BOW] = maxi(
+				int(result.get(Contract.ACTION_FIRE_BOW, 0)),
+				bow_ready_at,
+			)
 	return result
+
+
+static func _latest_started_action_msec(history: Array, action: String) -> int:
+	for index in range(history.size() - 1, -1, -1):
+		if not history[index] is Dictionary:
+			continue
+		var entry := history[index] as Dictionary
+		if str(entry.get("phase", "")) != "started" or str(entry.get("action", "")) != action:
+			continue
+		var at_msec := int(entry.get("at_msec", -1))
+		if at_msec >= 0:
+			return at_msec
+	return -1
 
 
 static func filter_legal_actions(
