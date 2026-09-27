@@ -861,7 +861,11 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		# away than that horizon, keep pursuing through a known, supported tile
 		# that makes measurable progress instead of falling back to a speculative
 		# straight-line jump toward the player's full-distance position.
-		var pursuit_waypoint := _safe_pursuit_waypoint(origin, destination)
+		# Follow's preferred-radius point may be suspended in air or fluid even
+		# when the player has a reachable supported landing below. Measure waypoint
+		# progress against the actual player, not that unsupported comfort point.
+		var pursuit_goal := target if player_target else destination
+		var pursuit_waypoint := _safe_pursuit_waypoint(origin, pursuit_goal)
 		if pursuit_waypoint.is_empty():
 			_set_desired_input(false, false, false)
 			_advance_local_physics(self_state, delta, false)
@@ -884,6 +888,18 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "route_unreachable"}
 	var route_kind := str(route_step.get("kind", ""))
+	var verified_drop := false
+	if route_kind == "drop":
+		var drop_from: Vector2i = route_step.get("from_tile", _support_tile_for_position(origin))
+		var drop_to: Vector2i = route_step.get("to_tile", _support_tile_for_position(route_step.get("position", destination)))
+		verified_drop = _physics_transition_allowed(drop_from, drop_to, "drop")
+		if not verified_drop:
+			_physics_route.clear()
+			_physics_route_replan_msec = Time.get_ticks_msec() + 450
+			_set_desired_input(false, false, false)
+			_advance_local_physics(self_state, delta, false)
+			_world_snapshot["self"] = self_state
+			return {"done": true, "reason": "unsafe_drop_route"}
 	if not route_step.is_empty():
 		destination = route_step.get("position", destination)
 	if route_kind == "jump" and not _jump_route_has_safe_landing(self_state, destination):
@@ -904,6 +920,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		(bool(self_state.get("on_ground", false)) or _local_pose_has_support(self_state))
 		and _would_step_into_void(origin, destination)
 		and route_kind != "jump"
+		and not (route_kind == "drop" and verified_drop)
 	):
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
@@ -914,6 +931,10 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		hint = _pvp_jump_hint(origin, destination)
 	else:
 		hint = route_kind if route_kind in ["jump", "climb"] else _movement_hint(origin, destination)
+		if route_kind == "drop":
+			# A verified drop is entered by walking off its known edge; do not let
+			# the local one-block pit heuristic turn the descent into a jump.
+			hint = "walk"
 	if emergency_lava_escape:
 		# During direct lava contact, leave immediately on the horizontal axis.
 		# Starting a guessed jump/climb arc while embedded in fluid can keep the
@@ -1073,7 +1094,16 @@ func _physics_route_step(origin: Vector2, destination: Vector2, target_id: Strin
 	var origin_tile := _support_tile_for_position(origin)
 	var target_tile := _support_tile_for_position(destination)
 	var now := Time.get_ticks_msec()
-	var needs_replan := (
+	var active_drop_in_flight := false
+	if _physics_route.size() > 1 and str(_physics_route[1].get("kind", "")) == "drop":
+		var active_drop_from: Vector2i = _physics_route[0].get("tile", origin_tile)
+		var active_drop_to: Vector2i = _physics_route[1].get("tile", origin_tile)
+		active_drop_in_flight = (
+			origin_tile != active_drop_from
+			and origin_tile != active_drop_to
+			and _physics_transition_allowed(active_drop_from, active_drop_to, "drop")
+		)
+	var needs_replan := not active_drop_in_flight and (
 		_physics_route.is_empty()
 		or _physics_route_target != target_tile
 		or _physics_route_target_id != target_id
@@ -1103,6 +1133,8 @@ func _physics_route_step(origin: Vector2, destination: Vector2, target_id: Strin
 			return {
 				"position": next_position,
 				"kind": str(_physics_route[1].get("kind", "walk")),
+				"from_tile": _physics_route[0].get("tile", origin_tile),
+				"to_tile": _physics_route[1].get("tile", origin_tile),
 			}
 		_physics_route.pop_front()
 	return {}
@@ -1159,7 +1191,9 @@ func _physics_transition_key(from_tile: Vector2i, to_tile: Vector2i) -> String:
 	return "%d:%d>%d:%d" % [from_tile.x, from_tile.y, to_tile.x, to_tile.y]
 
 
-func _physics_transition_allowed(from_tile: Vector2i, to_tile: Vector2i, _kind: String = "") -> bool:
+func _physics_transition_allowed(from_tile: Vector2i, to_tile: Vector2i, kind: String = "") -> bool:
+	if kind == "drop" and not _verified_drop_transition(from_tile, to_tile):
+		return false
 	var key := _physics_transition_key(from_tile, to_tile)
 	if not _host_rejected_transitions.has(key):
 		return true
@@ -1167,6 +1201,38 @@ func _physics_transition_allowed(from_tile: Vector2i, to_tile: Vector2i, _kind: 
 		_host_rejected_transitions.erase(key)
 		return true
 	return false
+
+
+func _verified_drop_transition(from_tile: Vector2i, to_tile: Vector2i) -> bool:
+	var drop_tiles := to_tile.y - from_tile.y
+	if (
+		drop_tiles <= 0
+		or drop_tiles > Navigator.MAX_VERIFIED_DROP_TILES
+		or absi(to_tile.x - from_tile.x) != 1
+		or not _terrain_standable_tile(from_tile)
+		or not _terrain_standable_tile(to_tile)
+		or _terrain_is_lava_at(to_tile.x, to_tile.y)
+	):
+		return false
+	# The player body crosses the neighboring column from the source headroom
+	# through the landing headroom. Empty cells count as safe only if the host has
+	# actually replicated them; water is traversable, but lava and solid blocks
+	# are not.
+	for corridor_y in range(from_tile.y - 1, to_tile.y):
+		if not _terrain_cell_is_known(to_tile.x, corridor_y):
+			return false
+		if _terrain_solid_at(to_tile.x, corridor_y) or _terrain_is_lava_at(to_tile.x, corridor_y):
+			return false
+	if not _terrain_cell_is_known(to_tile.x, to_tile.y - 2):
+		return false
+	if _terrain_is_lava_at(to_tile.x, to_tile.y - 2):
+		return false
+	return true
+
+
+func _terrain_cell_is_known(tx: int, ty: int) -> bool:
+	var key := "%d:%d" % [tx, ty]
+	return _terrain_observed_cells.has(key) or _terrain_tiles.has(key)
 
 
 func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) -> Dictionary:

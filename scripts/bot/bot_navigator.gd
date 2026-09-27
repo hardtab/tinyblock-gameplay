@@ -6,6 +6,9 @@ extends RefCounted
 
 const MAX_ROUTE_NODES := 64
 const MAX_PHYSICS_ROUTE_NODES := 128
+## Multi-tile descents are only emitted when the caller supplies a transition
+## validator that proves the complete corridor and landing are known and safe.
+const MAX_VERIFIED_DROP_TILES := 6
 
 
 static func step_towards(origin: Vector2, target: Vector2, max_distance: float) -> Vector2:
@@ -87,7 +90,7 @@ static func physics_route(
 	while head < queue.size() and queue.size() <= max_nodes:
 		var current := queue[head]
 		head += 1
-		for candidate in _physics_candidates(current, climbable):
+		for candidate in _physics_candidates(current, climbable, transition_allowed.is_valid()):
 			var next: Vector2i = candidate["tile"]
 			if previous.has(next) or not bool(passable.call(next)):
 				continue
@@ -104,7 +107,7 @@ static func physics_route(
 ## Enumerates the exact support-tile transitions physics_route expands from
 ## `current`.  Keeping this in one place lets physics_reachable_tiles prove the
 ## same route existence without re-deriving (and drifting from) the edge rules.
-static func _physics_candidates(current: Vector2i, climbable: Callable) -> Array[Dictionary]:
+static func _physics_candidates(current: Vector2i, climbable: Callable, allow_verified_drops: bool = false) -> Array[Dictionary]:
 	var candidates: Array[Dictionary] = []
 	for direction in [Vector2i.RIGHT, Vector2i.LEFT]:
 		candidates.append({"tile": current + direction, "kind": "walk"})
@@ -113,7 +116,9 @@ static func _physics_candidates(current: Vector2i, climbable: Callable) -> Array
 		candidates.append({"tile": current + direction + Vector2i.UP, "kind": "jump"})
 		candidates.append({"tile": current + direction * 2, "kind": "jump"})
 		candidates.append({"tile": current + direction * 2 + Vector2i.UP, "kind": "jump"})
-		candidates.append({"tile": current + direction + Vector2i.DOWN, "kind": "drop"})
+		var max_drop_tiles := MAX_VERIFIED_DROP_TILES if allow_verified_drops else 1
+		for drop_tiles in range(1, max_drop_tiles + 1):
+			candidates.append({"tile": current + direction + Vector2i.DOWN * drop_tiles, "kind": "drop"})
 	for direction in [Vector2i.UP, Vector2i.DOWN]:
 		if climbable.is_valid() and (bool(climbable.call(current)) or bool(climbable.call(current + direction))):
 			candidates.append({"tile": current + direction, "kind": "climb"})
@@ -142,7 +147,7 @@ static func physics_reachable_tiles(
 	while head < queue.size() and queue.size() <= max_nodes:
 		var current := queue[head]
 		head += 1
-		for candidate in _physics_candidates(current, climbable):
+		for candidate in _physics_candidates(current, climbable, transition_allowed.is_valid()):
 			var next: Vector2i = candidate["tile"]
 			if reachable.has(next) or not bool(passable.call(next)):
 				continue
