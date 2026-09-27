@@ -1554,9 +1554,13 @@ func _emit_flee_route_unavailable(
 		return
 	_last_flee_route_diagnostic_msec = now_msec
 	var nearby_standable: Array[Dictionary] = []
+	var nearby_solids: Array[Dictionary] = []
 	for tile_y in range(origin_tile.y - 4, origin_tile.y + 5):
 		for tile_x in range(origin_tile.x - 4, origin_tile.x + 5):
 			var tile := Vector2i(tile_x, tile_y)
+			var block_name := _terrain_name_at(tile_x, tile_y)
+			if not block_name.is_empty():
+				nearby_solids.append({"tile": [tile_x, tile_y], "block": block_name})
 			if not _terrain_standable_tile(tile):
 				continue
 			var position := _world_position_for_support_tile(tile)
@@ -1601,6 +1605,7 @@ func _emit_flee_route_unavailable(
 		"threat_position": [threat.x, threat.y],
 		"origin_distance": snappedf(origin_distance, 0.1),
 		"reachable_first_step_count": reachable_first_steps.size(),
+		"nearby_solids": nearby_solids,
 		"nearby_standable": nearby_standable,
 		"direct_candidates": direct_candidates,
 	})
