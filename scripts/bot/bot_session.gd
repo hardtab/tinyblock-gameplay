@@ -1779,7 +1779,11 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 		vx = lerpf(vx, target_vx, clampf(step, 0.0, 1.0))
 	else:
 		vx = target_vx
-	if jump_pressed and (on_ground or in_fluid):
+	# Match WorldSim.can_jump(): fluid permits a jump from mid-water, but only
+	# once the avatar is falling/grounded. Jump input remains held for the whole
+	# route; without the velocity guard this predictor restarted the water jump
+	# every tick while rising, diverging from the host and triggering recovery.
+	if jump_pressed and (on_ground or in_fluid) and vy >= -0.05:
 		vy = jump_power
 		on_ground = false
 	elif on_ground:
