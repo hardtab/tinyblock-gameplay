@@ -36,6 +36,8 @@ var _follow_target_route_cooldown_until: Dictionary = {}
 var _last_flee_target_id := ""
 var _last_flee_route_outcome_key := ""
 var _flee_target_route_cooldown_until: Dictionary = {}
+var _last_aggressive_player_id := ""
+var _last_enemy_player_id := ""
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 ## Only chase a player once they are clearly farther than the preferred gap.
@@ -133,9 +135,13 @@ func reset() -> void:
 	_last_flee_target_id = ""
 	_last_flee_route_outcome_key = ""
 	_flee_target_route_cooldown_until.clear()
+	_last_aggressive_player_id = ""
+	_last_enemy_player_id = ""
 
 
 func decide(observation: Dictionary) -> Dictionary:
+	_last_aggressive_player_id = str(observation.get("aggressive_player_id", ""))
+	_last_enemy_player_id = str(observation.get("enemy_player_id", ""))
 	var legal := Contract.normalize_legal_actions(observation.get("legal_actions", Contract.ALL_ACTIONS))
 	if legal.is_empty():
 		legal = PackedStringArray([Contract.ACTION_WAIT])
@@ -1108,6 +1114,25 @@ func _flee_target_on_route_cooldown(target_id: String, now_msec: int) -> bool:
 	return until_msec > 0 and now_msec < until_msec
 
 
+## The executor can finish a terminal movement step after the observation for
+## this tick was built. Record its result directly so the immediate follow-up
+## decision cannot see stale history and issue one more identical flee.
+func note_flee_route_failure(target_id: String, reason: String, at_msec: int) -> void:
+	if target_id.is_empty() or target_id in [_last_aggressive_player_id, _last_enemy_player_id]:
+		return
+	if reason not in FLEE_ROUTE_FAILURE_REASONS:
+		return
+	_arm_flee_target_route_cooldown(target_id, reason, at_msec)
+
+
+func _arm_flee_target_route_cooldown(target_id: String, reason: String, at_msec: int) -> void:
+	var outcome_key := "%s|%s|%d" % [target_id, reason, at_msec]
+	if outcome_key == _last_flee_route_outcome_key:
+		return
+	_last_flee_route_outcome_key = outcome_key
+	_flee_target_route_cooldown_until[target_id] = at_msec + FLEE_ROUTE_FAILURE_COOLDOWN_MSEC
+
+
 ## Consume one terminal escape-route outcome. Keep the failed target out of the
 ## flee branch briefly so policy can equip/attack or choose another activity;
 ## never cool down a pinned duel/aggression target.
@@ -1131,14 +1156,11 @@ func _sync_flee_route_failures(observation: Dictionary) -> void:
 			continue
 		if str(entry.get("reason", "")) not in FLEE_ROUTE_FAILURE_REASONS:
 			continue
-		var outcome_key := "%s|%s|%d" % [
-			target_id, str(entry.get("reason", "")), int(entry.get("at_msec", -1)),
-		]
-		if outcome_key == _last_flee_route_outcome_key:
-			return
-		_last_flee_route_outcome_key = outcome_key
-		var now_msec := int(observation.get("observed_at_msec", 0))
-		_flee_target_route_cooldown_until[target_id] = now_msec + FLEE_ROUTE_FAILURE_COOLDOWN_MSEC
+		_arm_flee_target_route_cooldown(
+			target_id,
+			str(entry.get("reason", "")),
+			int(entry.get("at_msec", -1)),
+		)
 		return
 
 

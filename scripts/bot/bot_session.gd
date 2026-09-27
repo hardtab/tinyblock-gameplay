@@ -4893,6 +4893,7 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 	if bool(decision.get("descent_transition", false)) and reason not in ["movement_step"]:
 		_descent_planner.cancel_intended_transition()
 	var target_id := str(decision.get("target_id", ""))
+	_note_flee_route_failure(decision, reason)
 	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "timeout"] and target_id.begins_with("tile:"):
 		var retry_delay := UNSAFE_ROUTE_RETRY_BLOCK_MSEC if reason in ["unsafe_jump_route", "route_unreachable"] else ACTION_RETRY_BLOCK_MSEC
 		_blocked_action_targets[target_id] = Time.get_ticks_msec() + retry_delay
@@ -4904,11 +4905,25 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 
 func _on_executor_action_failed(decision: Dictionary, reason: String) -> void:
 	_clear_aborted_movement_transition_if_needed(decision, reason)
+	_note_flee_route_failure(decision, reason)
 	if bool(decision.get("descent_transition", false)):
 		_descent_planner.cancel_intended_transition()
 	_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
 	_achievement_goal_note_failure(decision, reason, Time.get_ticks_msec())
 	_record_action_history("failed", decision, reason)
+
+
+func _note_flee_route_failure(decision: Dictionary, reason: String) -> void:
+	if str(decision.get("action", "")) != Contract.ACTION_FLEE_FROM:
+		return
+	if behavior == null or behavior.provider == null or not behavior.provider.has_method("note_flee_route_failure"):
+		return
+	behavior.provider.call(
+		"note_flee_route_failure",
+		str(decision.get("target_id", "")),
+		reason,
+		Time.get_ticks_msec(),
+	)
 
 
 func _clear_aborted_movement_transition_if_needed(decision: Dictionary, reason: String) -> void:
