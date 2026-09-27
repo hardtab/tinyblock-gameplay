@@ -1186,7 +1186,10 @@ func _physics_route_step(
 ) -> Dictionary:
 	if _terrain_tiles.is_empty():
 		return {}
-	var origin_tile := _support_tile_for_position(origin)
+	var origin_tile := _route_origin_support_tile(
+		origin,
+		_world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {},
+	)
 	var target_tile := _support_tile_for_position(destination)
 	var now := Time.get_ticks_msec()
 	var active_drop_in_flight := false
@@ -1249,8 +1252,8 @@ func _safe_jump_first_step_filter(self_state: Dictionary) -> Callable:
 
 
 func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2, first_step_allowed: Callable = Callable()) -> Dictionary:
-	var origin_tile := _support_tile_for_position(origin)
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	var origin_tile := _route_origin_support_tile(origin, self_state)
 	if not first_step_allowed.is_valid():
 		first_step_allowed = _safe_jump_first_step_filter(self_state)
 	if _terrain_tiles.is_empty():
@@ -1396,7 +1399,7 @@ func _safe_flee_waypoint(
 ) -> Dictionary:
 	if _terrain_tiles.is_empty():
 		return {}
-	var origin_tile := _support_tile_for_position(origin)
+	var origin_tile := _route_origin_support_tile(origin, self_state)
 	var origin_distance := origin.distance_to(threat)
 	if not first_step_allowed.is_valid():
 		first_step_allowed = _safe_flee_first_step_filter(self_state, origin, threat)
@@ -1779,7 +1782,10 @@ func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) ->
 	if not target.has("x") or not target.has("y") or _terrain_tiles.is_empty():
 		return {}
 	var tile := Vector2i(int(target.get("x", 0)), int(target.get("y", 0)))
-	var origin_support := _support_tile_for_position(origin)
+	var origin_support := _route_origin_support_tile(
+		origin,
+		_world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {},
+	)
 	var candidates: Array[Vector2i] = [
 		tile + Vector2i.LEFT,
 		tile + Vector2i.RIGHT,
@@ -1819,6 +1825,40 @@ func _support_tile_for_position(position: Vector2) -> Vector2i:
 		floori((position.x + 10.0) / float(BlockDefs.TILE)),
 		floori((position.y + 28.0) / float(BlockDefs.TILE)),
 	)
+
+
+## Route origin support tile for a bot pose.
+##
+## The host grounds a player when any solid tile sits under the foot span
+## (WorldSim.find_ground_support scans px+3 .. px+w-3), while
+## `_support_tile_for_position` maps the pose to the single centre column. A bot
+## standing on a platform lip therefore has a real support tile beside its
+## centre even though the centre cell is empty. Route planners must start from
+## that real tile or bounded reachability refuses the origin and movement stalls
+## with `origin_not_reachable`. Only grounded poses are re-anchored; airborne
+## poses keep the plain centre mapping. Nothing here moves the bot.
+func _route_origin_support_tile(position: Vector2, self_state: Dictionary) -> Vector2i:
+	var tile := _support_tile_for_position(position)
+	if not bool(self_state.get("on_ground", false)) or _terrain_standable_tile(tile):
+		return tile
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var foot_left := position.x + 3.0
+	var foot_right := position.x + width - 3.0
+	var row := floori((position.y + height) / float(BlockDefs.TILE))
+	var left := floori(foot_left / float(BlockDefs.TILE))
+	var right := floori((foot_right - 0.001) / float(BlockDefs.TILE))
+	var best_tile := tile
+	var best_distance := 2147483647
+	for candidate_x in range(left, right + 1):
+		var candidate := Vector2i(candidate_x, row)
+		if candidate == tile or not _terrain_standable_tile(candidate):
+			continue
+		var distance := absi(candidate.x - tile.x) + absi(candidate.y - tile.y)
+		if distance < best_distance:
+			best_distance = distance
+			best_tile = candidate
+	return best_tile
 
 
 func _world_position_for_support_tile(tile: Vector2i) -> Vector2:
@@ -2402,7 +2442,7 @@ func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> D
 
 func _jump_route_has_safe_landing(self_state: Dictionary, destination: Vector2) -> bool:
 	var origin := Contract.target_position(self_state)
-	var origin_support := _support_tile_for_position(origin)
+	var origin_support := _route_origin_support_tile(origin, self_state)
 	var landing_support := _support_tile_for_position(destination)
 	var horizontal_tiles := absi(landing_support.x - origin_support.x)
 	if horizontal_tiles <= 0 or horizontal_tiles > 2:
@@ -4340,7 +4380,7 @@ func _annotate_active_build_project_route(observation: Dictionary, now_msec: int
 		return
 	var players: Array = observation.get("players", []) if observation.get("players", []) is Array else []
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
-	var origin_tile := _support_tile_for_position(Contract.target_position(self_state))
+	var origin_tile := _route_origin_support_tile(Contract.target_position(self_state), self_state)
 	var preferred_distance := float(observation.get("preferred_player_distance", 84.0))
 	for index in range(players.size()):
 		if not players[index] is Dictionary:
@@ -4390,7 +4430,7 @@ func _reachable_world_underfoot_waypoints(snapshot: Dictionary) -> Array[Diction
 		return []
 	var self_state: Dictionary = snapshot.get("self", {}) if snapshot.get("self", {}) is Dictionary else {}
 	var origin_position := Contract.target_position(self_state)
-	var origin_tile := _support_tile_for_position(origin_position)
+	var origin_tile := _route_origin_support_tile(origin_position, self_state)
 	var reachable: Array[Dictionary] = []
 	for raw_waypoint in own_waypoints:
 		if not raw_waypoint is Dictionary:
@@ -4433,7 +4473,7 @@ func _safe_exploration_waypoints(self_state: Dictionary) -> Array[Dictionary]:
 	if _terrain_tiles.is_empty():
 		return []
 	var origin := Contract.target_position(self_state)
-	var origin_tile := _support_tile_for_position(origin)
+	var origin_tile := _route_origin_support_tile(origin, self_state)
 	var first_step_allowed := _safe_jump_first_step_filter(self_state)
 	var state_signature := "%.1f:%.1f:%.1f:%.1f" % [
 		float(self_state.get("x", origin.x)),
@@ -4549,7 +4589,7 @@ func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
 		var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 		var origin := Contract.target_position(self_state)
 		var first_step_allowed := _safe_jump_first_step_filter(self_state)
-		for raw_tile in _physics_reachable_support_tiles(_support_tile_for_position(origin), first_step_allowed):
+		for raw_tile in _physics_reachable_support_tiles(_route_origin_support_tile(origin, self_state), first_step_allowed):
 			if typeof(raw_tile) == TYPE_VECTOR2I:
 				reachable_support_tiles[raw_tile] = true
 	for raw_resource in resources:
