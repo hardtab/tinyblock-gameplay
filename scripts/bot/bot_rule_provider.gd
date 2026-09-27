@@ -213,11 +213,13 @@ func decide(observation: Dictionary) -> Dictionary:
 			# not make the bot alternate pursuit targets every decision.
 			var approach_target := _creature_approach_target(observation, creature_threat)
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_MOVE_TO, approach_target, 2600, 0.9)
-		if Contract.ACTION_WAIT in legal:
+		if Contract.ACTION_WAIT in legal and _creature_route_failure_still_requires_hold(creature_threat, observation):
 			# If the verified escape graph has no safe route, ordinary exploration can
 			# head straight back toward the same hostile creature. Hold position for a
-			# short retry window instead; weapon, ranged and melee responses above still
-			# take precedence, and the escape is reconsidered as soon as its cooldown ends.
+			# short retry window only while the creature is actually attacking or
+			# already close enough to strike. A distant hostile behind solid terrain must
+			# not turn a failed flee into repeated idle decisions; normal goals can run
+			# while the bounded flee cooldown expires and the threat is re-evaluated.
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_WAIT, {}, 700, 0.88)
 
 	# The safety policy writes an explicit, short-lived retaliation grant into
@@ -673,6 +675,16 @@ func _dangerous_creature_threat(observation: Dictionary, threats: Array) -> Dict
 		best = pinned
 	_last_creature_threat_id = str(best.get("id", ""))
 	return best
+
+
+func _creature_route_failure_still_requires_hold(creature: Dictionary, observation: Dictionary) -> bool:
+	if bool(creature.get("is_attacking", false)) or bool(creature.get("attacking", false)):
+		return true
+	if int(creature.get("attack_cooldown", 0)) > 0 or int(creature.get("provoked_ticks", 0)) > 0:
+		return true
+	var attack_distance := maxf(24.0, float(observation.get("creature_attack_distance", 48.0)))
+	var immediate_distance := maxf(72.0, attack_distance * 1.5)
+	return float(creature.get("distance", INF)) <= immediate_distance
 
 
 func _creature_approach_target(observation: Dictionary, creature: Dictionary) -> Dictionary:
