@@ -825,6 +825,14 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		# close enough horizontally, so MOVE_NEAR_PLAYER repeatedly completed at
 		# its current position instead of navigating down a tree or ledge.
 		destination = Navigator.preferred_follow_target(target, origin, float(observation.get("preferred_player_distance", 84.0)))
+		if not _is_pvp_world():
+			# Reachability alone can hand pursuit a support tile that is closer to
+			# the player yet enterable only through a jump the movement guard below
+			# refuses with unsafe_jump_route. That abort repeated every frame while
+			# the bot stood still beside its target. Constrain the direct route and
+			# the fallback pursuit waypoint to the same first edges with a proven
+			# landing so a safe walk/drop/climb alternative wins instead.
+			physics_first_step_guard = _safe_pursuit_first_step_filter(self_state)
 	elif action == Contract.ACTION_FLEE_FROM:
 		# A straight-line escape vector can point through water, a ravine or an
 		# unsupported edge. Pick an actually reachable support tile that increases
@@ -910,14 +918,16 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		# when the player has a reachable supported landing below. Measure waypoint
 		# progress against the actual player, not that unsupported comfort point.
 		var pursuit_goal := target if player_target else destination
-		var pursuit_waypoint := _safe_pursuit_waypoint(origin, pursuit_goal)
+		var pursuit_waypoint := _safe_pursuit_waypoint(origin, pursuit_goal, physics_first_step_guard)
 		if pursuit_waypoint.is_empty():
 			_set_desired_input(false, false, false)
 			_advance_local_physics(self_state, delta, false)
 			_world_snapshot["self"] = self_state
 			return {"done": true, "reason": "pursuit_no_safe_waypoint"}
 		destination = pursuit_waypoint.get("position", destination)
-		route_step = _physics_route_step(origin, destination, target_id)
+		# Execute the waypoint through the same first-step guard that proved it, so
+		# the planned edge and the executed edge cannot disagree mid-route.
+		route_step = _physics_route_step(origin, destination, target_id, physics_first_step_guard)
 		if bool(route_step.get("unreachable", false)):
 			_set_desired_input(false, false, false)
 			_advance_local_physics(self_state, delta, false)
@@ -1193,22 +1203,49 @@ func _physics_route_step(
 	return {}
 
 
-func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2) -> Dictionary:
+func _safe_pursuit_first_step_filter(self_state: Dictionary) -> Callable:
+	# Reachability does not prove a first edge is executable. A support tile can
+	# be closer to the player yet enterable only through a jump whose arc the
+	# movement guard refuses (unsafe_jump_route), so pursuit must reject that
+	# first edge and keep any safe walk/drop/climb route to the same destination.
+	return func(_from_tile: Vector2i, to_tile: Vector2i, kind: String) -> bool:
+		if kind != "jump":
+			return true
+		return _jump_route_has_safe_landing(self_state, _world_position_for_support_tile(to_tile))
+
+
+func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2, first_step_allowed: Callable = Callable()) -> Dictionary:
 	if _terrain_tiles.is_empty():
 		return {}
 	var origin_tile := _support_tile_for_position(origin)
-	var reachable := _physics_reachable_support_tiles(origin_tile)
-	if not reachable.has(origin_tile):
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	if not first_step_allowed.is_valid():
+		first_step_allowed = _safe_pursuit_first_step_filter(self_state)
+	var reachable_first_steps := Navigator.physics_reachable_first_steps(
+		origin_tile,
+		Callable(self, "_terrain_standable_tile"),
+		Callable(self, "_terrain_climbable_tile"),
+		Navigator.MAX_PHYSICS_ROUTE_NODES,
+		Callable(self, "_physics_transition_allowed"),
+		first_step_allowed,
+	)
+	if not reachable_first_steps.has(origin_tile):
 		return {}
 	var origin_distance := origin.distance_to(destination)
 	var best_distance := origin_distance
 	var best_position := Vector2.ZERO
 	var found_waypoint := false
-	for raw_tile in reachable.keys():
+	for raw_tile in reachable_first_steps.keys():
 		if typeof(raw_tile) != TYPE_VECTOR2I:
 			continue
 		var tile: Vector2i = raw_tile
 		if tile == origin_tile or not _terrain_standable_tile(tile):
+			continue
+		var first_edge: Dictionary = reachable_first_steps[raw_tile]
+		if (
+			str(first_edge.get("kind", "")) == "jump"
+			and not _jump_route_has_safe_landing(self_state, _world_position_for_support_tile(first_edge.get("tile", origin_tile)))
+		):
 			continue
 		var position := _world_position_for_support_tile(tile)
 		var remaining_distance := position.distance_to(destination)
