@@ -120,6 +120,7 @@ var _blocked_action_targets: Dictionary = {}
 var _protected_build_cells: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
 var _last_flee_route_diagnostic_msec := -1
+var _last_pursuit_route_diagnostic_msec := -1
 ## Fully replicated procedural chunks prove that omitted cells are air. Static
 ## worlds instead use a small bounded area from their complete initial snapshot.
 var _terrain_known_chunks: Dictionary = {}
@@ -1244,12 +1245,13 @@ func _safe_jump_first_step_filter(self_state: Dictionary) -> Callable:
 
 
 func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2, first_step_allowed: Callable = Callable()) -> Dictionary:
-	if _terrain_tiles.is_empty():
-		return {}
 	var origin_tile := _support_tile_for_position(origin)
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	if not first_step_allowed.is_valid():
 		first_step_allowed = _safe_jump_first_step_filter(self_state)
+	if _terrain_tiles.is_empty():
+		_emit_pursuit_route_unavailable(origin_tile, "terrain_empty", first_step_allowed, {})
+		return {}
 	var reachable_first_steps := Navigator.physics_reachable_first_steps(
 		origin_tile,
 		Callable(self, "_terrain_standable_tile"),
@@ -1259,6 +1261,7 @@ func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2, first_step_al
 		first_step_allowed,
 	)
 	if not reachable_first_steps.has(origin_tile):
+		_emit_pursuit_route_unavailable(origin_tile, "origin_not_reachable", first_step_allowed, reachable_first_steps)
 		return {}
 	var origin_distance := origin.distance_to(destination)
 	var best_score := origin_distance
@@ -1291,12 +1294,79 @@ func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2, first_step_al
 		best_position = position
 		found_waypoint = true
 	if not found_waypoint:
+		_emit_pursuit_route_unavailable(origin_tile, "no_closer_waypoint", first_step_allowed, reachable_first_steps)
 		return {}
 	return {
 		"position": best_position,
 		"support_tile": _support_tile_for_position(best_position),
 		"remaining_distance": best_distance,
 	}
+
+
+## Throttled route evidence for pursuit deadlocks. This is a local diagnostic
+## journal record: it deliberately contains no target/player/session/world IDs
+## or destination coordinates, only bounded terrain around the bot.
+func _emit_pursuit_route_unavailable(
+	origin_tile: Vector2i,
+	failure_kind: String,
+	first_step_allowed: Callable,
+	reachable_first_steps: Dictionary,
+) -> void:
+	var now_msec := Time.get_ticks_msec()
+	if _last_pursuit_route_diagnostic_msec >= 0 and now_msec - _last_pursuit_route_diagnostic_msec < 30_000:
+		return
+	_last_pursuit_route_diagnostic_msec = now_msec
+	var nearby_solids: Array[Dictionary] = []
+	for tile_y in range(origin_tile.y - 3, origin_tile.y + 4):
+		for tile_x in range(origin_tile.x - 3, origin_tile.x + 4):
+			var block_name := _terrain_name_at(tile_x, tile_y)
+			if block_name.is_empty():
+				continue
+			nearby_solids.append({
+				"offset": [tile_x - origin_tile.x, tile_y - origin_tile.y],
+				"block": block_name,
+			})
+	var direct_candidates: Array[Dictionary] = []
+	for direction in [Vector2i.LEFT, Vector2i.RIGHT]:
+		var candidates: Array[Dictionary] = [
+			{"tile": origin_tile + direction, "kind": "walk"},
+			{"tile": origin_tile + direction + Vector2i.UP, "kind": "jump"},
+			{"tile": origin_tile + direction * 2, "kind": "jump"},
+			{"tile": origin_tile + direction * 2 + Vector2i.UP, "kind": "jump"},
+		]
+		for candidate in candidates:
+			var tile: Vector2i = candidate.get("tile", origin_tile)
+			var kind := str(candidate.get("kind", "walk"))
+			var standable := _terrain_standable_tile(tile)
+			var transition_allowed := standable and _physics_transition_allowed(origin_tile, tile, kind)
+			var jump_safe := kind != "jump" or (
+				standable
+				and _jump_route_has_safe_landing(
+					_world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {},
+					_world_position_for_support_tile(tile),
+				)
+			)
+			direct_candidates.append({
+				"offset": [tile.x - origin_tile.x, tile.y - origin_tile.y],
+				"kind": kind,
+				"standable": standable,
+				"transition_allowed": transition_allowed,
+				"jump_safe": jump_safe,
+				"first_edge_allowed": not first_step_allowed.is_valid() or bool(first_step_allowed.call(origin_tile, tile, kind)),
+			})
+	structured_log.emit({
+		"event": "pursuit_route_unavailable",
+		"at_msec": now_msec,
+		"failure_kind": failure_kind,
+		"origin_tile": [origin_tile.x, origin_tile.y],
+		"origin_standable": _terrain_standable_tile(origin_tile),
+		"terrain_tile_count": _terrain_tiles.size(),
+		"observed_cell_count": _terrain_observed_cells.size(),
+		"known_chunk_count": _terrain_known_chunks.size(),
+		"reachable_support_count": reachable_first_steps.size(),
+		"nearby_solids": nearby_solids,
+		"direct_candidates": direct_candidates,
+	})
 
 
 func _safe_flee_first_step_filter(self_state: Dictionary, origin: Vector2, threat: Vector2) -> Callable:
