@@ -1845,7 +1845,10 @@ func _route_origin_support_tile(position: Vector2, self_state: Dictionary) -> Ve
 	var height := maxf(1.0, float(self_state.get("h", 28.0)))
 	var foot_left := position.x + 3.0
 	var foot_right := position.x + width - 3.0
-	var row := floori((position.y + height) / float(BlockDefs.TILE))
+	# Match WorldSim.find_ground_support's 1.5px snap tolerance. A grounded
+	# avatar may sit just above the tile boundary, so plain floor(feet / TILE)
+	# can select the empty row immediately above the host's actual support row.
+	var row := floori((position.y + height + 1.5) / float(BlockDefs.TILE))
 	var left := floori(foot_left / float(BlockDefs.TILE))
 	var right := floori((foot_right - 0.001) / float(BlockDefs.TILE))
 	var best_tile := tile
