@@ -4636,6 +4636,20 @@ func _record_action_history(phase: String, decision: Dictionary, reason: String 
 	_action_history.append(entry)
 	while _action_history.size() > Perception.DEFAULT_MAX_EVENTS:
 		_action_history.pop_front()
+	# Mirror the action-history phase into the structured journal. This is a
+	# privacy-safe projection that omits target_id and any player, name, or
+	# coordinate detail, so live journals reveal started/finished/failed/
+	# rejected/result outcomes without leaking identifying data.
+	var log_event := {
+		"event": "bot_action_history",
+		"phase": phase,
+		"action": str(decision.get("action", "")),
+		"goal": str(decision.get("goal", "")),
+		"at_msec": int(entry["at_msec"]),
+	}
+	if not reason.is_empty():
+		log_event["reason"] = reason
+	structured_log.emit(log_event)
 
 
 func _apply_local_eat(food_name: String) -> bool:
