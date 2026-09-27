@@ -917,6 +917,19 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 			physics_first_step_guard = _safe_jump_first_step_filter(self_state)
 	else:
 		destination.y = origin.y
+	# Once a jump was validated and launched, do not re-run grounded pathfinding
+	# from its unsupported airborne pose. That made pursuit classify the middle
+	# of every real jump as origin_not_reachable, cancel the held input, and start
+	# over on the next policy tick. Finish the already-proven transition toward
+	# its planned landing support; no new jump or speculative route is introduced.
+	if _jump_active:
+		var jump_destination := destination
+		var planned_landing: Variant = _active_air_transition.get("to")
+		if typeof(planned_landing) == TYPE_VECTOR2I:
+			jump_destination = _world_position_for_support_tile(planned_landing)
+		var jump_direction := signf(jump_destination.x - origin.x)
+		_set_desired_input(jump_direction < 0.0, jump_direction > 0.0, true)
+		return _jump_step(self_state, jump_destination, delta)
 	# In a duel, never let the short-horizon jump planner consume an input at
 	# the island lip.  The bridge planner needs the bot grounded at the edge;
 	# checking only after route/jump selection lets one speculative jump start an
