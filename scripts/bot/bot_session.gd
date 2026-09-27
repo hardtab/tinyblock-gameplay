@@ -206,7 +206,16 @@ const DUEL_PROTOCOL_VERSION := 3
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const LOCAL_MAX_FALL_SPEED := 12.0
 const MAX_AUTHORITATIVE_MOTION_DIVERGENCE := BlockDefs.TILE * 3.0
-const HOST_GROUNDED_AIR_REJECTION_TOLERANCE := BlockDefs.TILE * 0.25
+## A grounded host echo can arrive one network physics tick behind the local
+## predictor: the launch frame of the bot's own jump moves a full JUMP impulse
+## (|JUMP| = 9.5 px) in a single tick, which is wider than a quarter tile. With
+## the old 8 px window that normal launch echo was misread as a host rejection,
+## so the in-flight transition was blacklisted and its origin tile was cooled
+## down for eight seconds - the bot then kept predicting an airborne arc the
+## authoritative host had already grounded, and movement stalled. Cover the
+## one-tick launch echo; the displaced-pose cases the host-rejection tests pin
+## stay rejected.
+const HOST_GROUNDED_AIR_REJECTION_TOLERANCE := maxf(BlockDefs.TILE * 0.25, absf(BlockDefs.JUMP))
 const HOST_REJECTED_TRANSITION_COOLDOWN_MSEC := 8_000
 const TREE_CLIMB_SPEED := -3.2
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
@@ -2274,6 +2283,25 @@ func _terrain_climbable_at(tx: int, ty: int) -> bool:
 	)
 
 
+## Authoritative terrain verdict for the support cell directly under an avatar's
+## feet. "unknown" means the bot has no terrain data there and must not conclude
+## the cell is unsupported; fluid and climbable cells are legitimate support.
+func _authoritative_support_verdict(tile: Vector2i) -> String:
+	var name := _terrain_name_at(tile.x, tile.y)
+	if not name.is_empty():
+		var entry := _block_entry(name)
+		if bool(entry.get("fluid", false)):
+			return "fluid"
+		if bool(entry.get("solid", false)) or _terrain_climbable_at(tile.x, tile.y):
+			return "supported"
+		return "unsupported"
+	if not _terrain_cell_is_known(tile.x, tile.y):
+		return "unknown"
+	if _terrain_climbable_at(tile.x, tile.y):
+		return "supported"
+	return "unsupported"
+
+
 func _local_ignores_trees(self_state: Dictionary) -> bool:
 	return bool(self_state.get("tree_ghost", false)) or bool(self_state.get("climbing", false)) or _climb_active
 
@@ -3674,13 +3702,30 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 					or (_climb_active and not bool(entry.get("climbing", false)) and not bool(entry.get("tree_ghost", false)))
 				)
 			)
+			# The private jump/climb predictor can be left hovering over a cell the
+			# authoritative terrain proves has nothing to stand on - its support was
+			# mined away, or the host never reproduced the landing. The grounded
+			# rejection above cannot catch that because the host may report the own
+			# avatar airborne. When the host pose itself sits on authoritative
+			# support, that pose wins: reseat and end the local arc instead of
+			# floating at an unsupported tile. Fluid and climbable cells are
+			# legitimate support, so they never trigger this.
+			var host_support_reseat := false
+			if entry.has("x") and entry.has("y") and (_jump_active or _climb_active):
+				var local_support_verdict := _authoritative_support_verdict(_support_tile_for_position(local_position))
+				var host_support_verdict := _authoritative_support_verdict(_support_tile_for_position(host_position))
+				host_support_reseat = (
+					local_support_verdict == "unsupported"
+					and host_support_verdict == "supported"
+				)
 			var reconcile_motion := (
 				respawned
 				or motion_diverged
 				or host_rejected_air_motion
+				or host_support_reseat
 				or (not _jump_active and not _climb_active)
 			)
-			if motion_diverged or host_rejected_air_motion:
+			if motion_diverged or host_rejected_air_motion or host_support_reseat:
 				# Never let a host-rejected jump/climb leave the local predictor
 				# airborne. Even a small drift matters here: continuing the private
 				# arc makes later plans target terrain the authoritative avatar never
@@ -3708,9 +3753,14 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 				_physics_route.clear()
 				_physics_route_replan_msec = 0
 				_set_desired_input(false, false, false)
+				var recovery_reason := (
+					"host_rejected_air_motion"
+					if host_rejected_air_motion
+					else ("local_support_unsupported" if host_support_reseat else "distance_diverged")
+				)
 				structured_log.emit({
 					"event": "authoritative_motion_recovered",
-					"reason": "host_rejected_air_motion" if host_rejected_air_motion else "distance_diverged",
+					"reason": recovery_reason,
 					"local_x": local_position.x,
 					"local_y": local_position.y,
 					"host_x": host_position.x,
