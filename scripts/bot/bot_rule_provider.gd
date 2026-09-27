@@ -23,12 +23,29 @@ var _explore_suspended_until_msec := -1
 ## window, so without this the same stale outcome was re-evaluated on every
 ## decide() and could flip the heading again long after it was accounted for.
 var _last_explore_outcome_key := ""
+## Social/search follow target id the provider most recently aimed at, plus the
+## last terminal route failure already applied to it. Without the cooldown the
+## bot re-issued MOVE_NEAR_PLAYER to the same host every decide() after the
+## movement executor returned unsafe_jump_route, and stood still forever.
+var _last_follow_target_id := ""
+var _last_follow_route_outcome_key := ""
+var _follow_target_route_cooldown_until: Dictionary = {}
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 ## Only chase a player once they are clearly farther than the preferred gap.
 ## Without slack, distance 84.6 forever re-issues MOVE_NEAR / FOLLOW and the
 ## bot looks like it is only hopping beside the player.
 const SOCIAL_FOLLOW_START_SLACK := 48.0
+## Terminal route failures toward the same social/search follow target repeated
+## every decide(). Back off that exact player for a short window so policy falls
+## through to exploration or another useful action instead of standing still.
+## PvP/retaliation pursuit is deliberately exempt: a pinned duel opponent or an
+## aggressor is always re-approached (see _follow_route_failure_cooldowns_apply).
+const FOLLOW_ROUTE_FAILURE_COOLDOWN_MSEC := 30_000
+const FOLLOW_ROUTE_FAILURE_REASONS := [
+	"blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable",
+	"pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable",
+]
 const WANDER_RADIUS := 96.0
 const WANDER_COMMIT_MSEC := 1800
 const EXPLORE_RADIUS := 384.0
@@ -99,6 +116,9 @@ func reset() -> void:
 	_last_explore_right_failure_msec = -1
 	_explore_suspended_until_msec = -1
 	_last_explore_outcome_key = ""
+	_last_follow_target_id = ""
+	_last_follow_route_outcome_key = ""
+	_follow_target_route_cooldown_until.clear()
 
 
 func decide(observation: Dictionary) -> Dictionary:
@@ -111,6 +131,10 @@ func decide(observation: Dictionary) -> Dictionary:
 	var health := int(self_state.get("health", 10))
 	var max_health := maxi(1, int(self_state.get("max_health", 10)))
 	var low_health := float(health) / float(max_health) <= SURVIVAL_HEALTH_RATIO
+	var now_msec := int(observation.get("observed_at_msec", 0))
+	# Consume any fresh terminal route failure toward the last social/search
+	# follow target before choosing this tick's action.
+	_sync_follow_route_failures(observation)
 
 	# Immediate survival has priority over social or gathering behaviour.
 	var threats: Array = _as_array(observation.get("threats", []))
@@ -494,10 +518,16 @@ func decide(observation: Dictionary) -> Dictionary:
 	# checked; otherwise a player standing beside the bot would starve all useful
 	# actions and leave the avatar idling at their shoulder.
 	var follow_threshold := preferred_distance + SOCIAL_FOLLOW_START_SLACK
-	if not social_target_id.is_empty() and social_distance > follow_threshold:
+	if (
+		not social_target_id.is_empty()
+		and social_distance > follow_threshold
+		and not _follow_target_blocked(observation, social_target_id, now_msec)
+	):
 		if Contract.ACTION_MOVE_NEAR_PLAYER in legal:
+			_last_follow_target_id = social_target_id
 			return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_MOVE_NEAR_PLAYER, social_target, 2400, 0.58)
 		if Contract.ACTION_FOLLOW in legal:
+			_last_follow_target_id = social_target_id
 			return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_FOLLOW, social_target, 2400, 0.58)
 
 	# Do not freeze once the bot has reached the comfortable social distance.
@@ -508,7 +538,12 @@ func decide(observation: Dictionary) -> Dictionary:
 	if Contract.ACTION_MOVE_TO in legal and _rng.randf() < 0.72:
 		return _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, _wander_target(self_state), WANDER_COMMIT_MSEC, 0.55)
 
-	if Contract.ACTION_LOOK_AT in legal and not social_target_id.is_empty() and _rng.randf() < 0.28:
+	if (
+		Contract.ACTION_LOOK_AT in legal
+		and not social_target_id.is_empty()
+		and not _follow_target_blocked(observation, social_target_id, now_msec)
+		and _rng.randf() < 0.28
+	):
 		return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_LOOK_AT, social_target, 700, 0.51)
 	if Contract.ACTION_WAIT in legal:
 		return _decision(Contract.GOAL_IDLE, Contract.ACTION_WAIT, {}, _rng.randi_range(700, 1800), 0.45)
@@ -1010,6 +1045,69 @@ func _note_explore_direction_failure(target_id: String, now_msec: int) -> void:
 		)
 
 
+## A pinned duel opponent or a retained retaliation target must always be
+## re-approached; the follow back-off only applies to the ordinary non-PvP,
+## non-aggressive social/gathering follow where standing still was the bug.
+func _follow_route_failure_cooldowns_apply(observation: Dictionary) -> bool:
+	if bool(observation.get("pvp_world", false)):
+		return false
+	if str(observation.get("world_mode", "")).to_lower() in ["duel", "pvp"]:
+		return false
+	if not str(observation.get("aggressive_player_id", "")).is_empty():
+		return false
+	return true
+
+
+func _follow_target_on_route_cooldown(target_id: String, now_msec: int) -> bool:
+	if target_id.is_empty():
+		return false
+	var until_msec := int(_follow_target_route_cooldown_until.get(target_id, 0))
+	return until_msec > 0 and now_msec < until_msec
+
+
+func _follow_target_blocked(observation: Dictionary, target_id: String, now_msec: int) -> bool:
+	if not _follow_route_failure_cooldowns_apply(observation):
+		return false
+	return _follow_target_on_route_cooldown(target_id, now_msec)
+
+
+## Consume the newest terminal route failure toward the last issued social/search
+## follow target exactly once and put that player on a short cooldown. The
+## action history keeps terminal entries for the whole bounded window, so the
+## outcome-key guard stops a single stale entry from re-arming the cooldown on
+## every decide() and freezing the target forever.
+func _sync_follow_route_failures(observation: Dictionary) -> void:
+	if not _follow_route_failure_cooldowns_apply(observation):
+		return
+	var followed_id := _last_follow_target_id
+	if followed_id.is_empty():
+		return
+	var history: Array = _as_array(observation.get("action_history", []))
+	for index in range(history.size() - 1, -1, -1):
+		if not history[index] is Dictionary:
+			continue
+		var entry := history[index] as Dictionary
+		if str(entry.get("phase", "")) not in ["finished", "failed"]:
+			continue
+		if str(entry.get("target_id", "")) != followed_id:
+			continue
+		if str(entry.get("reason", "")) not in FOLLOW_ROUTE_FAILURE_REASONS:
+			continue
+		if str(entry.get("action", "")) not in [
+			Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_MOVE_TO, Contract.ACTION_FOLLOW,
+		]:
+			continue
+		var outcome_key := "%s|%s|%d" % [
+			followed_id, str(entry.get("reason", "")), int(entry.get("at_msec", -1)),
+		]
+		if outcome_key == _last_follow_route_outcome_key:
+			return
+		_last_follow_route_outcome_key = outcome_key
+		var now_msec := int(observation.get("observed_at_msec", 0))
+		_follow_target_route_cooldown_until[followed_id] = now_msec + FOLLOW_ROUTE_FAILURE_COOLDOWN_MSEC
+		return
+
+
 ## Stable identity of a recorded explore outcome. Real history entries always
 ## carry the host clock stamp, so at_msec + phase + target + reason separates two
 ## distinct events while staying stable across repeated observations.
@@ -1211,6 +1309,9 @@ func _stone_age_progression_action(observation: Dictionary, legal: PackedStringA
 	var goal: Dictionary = observation.get("stone_age_goal", {}) if observation.get("stone_age_goal", {}) is Dictionary else {}
 	if goal.is_empty() or str(goal.get("status", "")) != "active":
 		return {}
+	# Tests and alternate callers can reach this stage without decide(); consume
+	# the follow route-failure history here too so the cooldown still arms.
+	_sync_follow_route_failures(observation)
 	var stage := str(goal.get("stage", ""))
 	var pending: Dictionary = goal.get("pending", {}) if goal.get("pending", {}) is Dictionary else {}
 	# A craft/equip/place command is still awaiting the host. Don't repeat it off
@@ -1296,6 +1397,7 @@ func _stone_age_player_search_action(observation: Dictionary, legal: PackedStrin
 	if Contract.ACTION_MOVE_NEAR_PLAYER not in legal and Contract.ACTION_MOVE_TO not in legal:
 		return {}
 	var preferred_distance := float(observation.get("preferred_player_distance", PREFERRED_PLAYER_DISTANCE))
+	var now_msec := int(observation.get("observed_at_msec", 0))
 	var best_player := {}
 	var best_distance := INF
 	for raw_player in _as_array(observation.get("players", [])):
@@ -1307,11 +1409,16 @@ func _stone_age_player_search_action(observation: Dictionary, legal: PackedStrin
 		var distance := float(player.get("distance", INF))
 		if distance <= preferred_distance + SOCIAL_FOLLOW_START_SLACK or distance >= best_distance:
 			continue
+		# A host the router already proved unreachable is not retried this tick;
+		# the search falls through to exploration or another useful action.
+		if _follow_target_blocked(observation, str(player.get("id", "")), now_msec):
+			continue
 		best_player = player
 		best_distance = distance
 	if best_player.is_empty():
 		return {}
 	var action := Contract.ACTION_MOVE_NEAR_PLAYER if Contract.ACTION_MOVE_NEAR_PLAYER in legal else Contract.ACTION_MOVE_TO
+	_last_follow_target_id = str(best_player.get("id", ""))
 	return _stone_age_decision(stage, action, best_player, 2400, 0.64, observation)
 
 
