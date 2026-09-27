@@ -58,7 +58,8 @@ const GOAL_METADATA: Array[Dictionary] = [
 	{"id": "dont_look_back", "modes": ["challenge_run"], "actionable": true, "strategy_priority": 10},
 	{"id": "five_lives", "modes": ADVENTURE_MODES, "actionable": false, "strategy_priority": -1},
 	{"id": "not_alone", "modes": SHARED_PROGRESS_MODES, "actionable": false, "strategy_priority": -1},
-	{"id": "back_for_it", "modes": SHARED_PROGRESS_MODES, "actionable": false, "strategy_priority": -1},
+	# A focused recovery objective activated only when the bot's own cache is visible.
+	{"id": "back_for_it", "modes": ADVENTURE_MODES, "actionable": true, "strategy_priority": -1},
 ]
 
 

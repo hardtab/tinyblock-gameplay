@@ -214,13 +214,19 @@ func decide(observation: Dictionary) -> Dictionary:
 	# bot often sees wood and its own cache in the same radius; without this
 	# early pass it keeps chopping and never recovers the dropped inventory.
 	# Owner does not matter — multiplayer recovery intentionally allows anyone
-	# nearby to collect a cache.
+	# nearby to collect a cache. When Back for It is open, prefer the bot's own
+	# death cache; that focused objective is unavailable in combat modes.
 	var loot_cache := _priority_loot_cache(observation)
 	if not loot_cache.is_empty():
+		var cache_decision := {}
 		if bool(loot_cache.get("reachable", false)) and Contract.ACTION_OPEN_CONTAINER in legal:
-			return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_OPEN_CONTAINER, loot_cache, 900, 0.93)
-		if Contract.ACTION_MOVE_TO in legal:
-			return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, loot_cache, 1800, 0.9)
+			cache_decision = _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_OPEN_CONTAINER, loot_cache, 900, 0.93)
+		elif Contract.ACTION_MOVE_TO in legal:
+			cache_decision = _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, loot_cache, 1800, 0.9)
+		if not cache_decision.is_empty() and str(loot_cache.get("achievement_goal_id", "")) == "back_for_it":
+			return _tag_achievement_goal(cache_decision, "back_for_it")
+		if not cache_decision.is_empty():
+			return cache_decision
 
 	if not bridge_step.is_empty() and Contract.ACTION_PLACE in legal:
 		return _tag_useful_home_placement(Contract.normalize_decision(bridge_step), observation)
@@ -625,6 +631,18 @@ func _lava_threat(observation: Dictionary) -> Dictionary:
 func _priority_loot_cache(observation: Dictionary) -> Dictionary:
 	var best := {}
 	var best_distance := INF
+	var own_death_cache := {}
+	var own_death_cache_distance := INF
+	var own_player_id := str(observation.get("own_player_id", ""))
+	var mode := str(observation.get("world_mode", "")).strip_edges().to_lower()
+	var back_for_it_open := (
+		not _open_achievement(observation, "back_for_it").is_empty()
+		and AchievementRegistry.goal_action_allowed(
+			"back_for_it",
+			mode,
+			_achievement_progression_locked(observation),
+		)
+	)
 	for raw_container in _as_array(observation.get("visible_containers", [])):
 		if not raw_container is Dictionary:
 			continue
@@ -636,6 +654,15 @@ func _priority_loot_cache(observation: Dictionary) -> Dictionary:
 		if distance < best_distance:
 			best = container
 			best_distance = distance
+		var owner_id := str(container.get("owner_player_id", ""))
+		var is_death_cache := kind == "death_cache" or bool(container.get("death_cache", false))
+		if back_for_it_open and is_death_cache and not own_player_id.is_empty() and owner_id == own_player_id and distance < own_death_cache_distance:
+			own_death_cache = container
+			own_death_cache_distance = distance
+	if not own_death_cache.is_empty():
+		var tagged_own_cache := own_death_cache.duplicate(true)
+		tagged_own_cache["achievement_goal_id"] = "back_for_it"
+		return tagged_own_cache
 	return best
 
 
