@@ -1907,7 +1907,6 @@ func _terrain_standable_tile(tile: Vector2i) -> bool:
 	if not (
 		_terrain_solid_at(tile.x, tile.y)
 		and not _terrain_solid_at(tile.x, tile.y - 1)
-		and not _terrain_solid_at(tile.x, tile.y - 2)
 	):
 		return false
 	var body_left := (tile.x * BlockDefs.TILE)
@@ -5270,9 +5269,16 @@ func _stone_age_note_no_action(decision: Dictionary, now_msec: int) -> void:
 		_stone_age_goal_state["no_action_since_msec"] = -1
 		_stone_age_goal_state["no_action_failures"] = 0
 		return
-	if str(decision.get("action", "")) != Contract.ACTION_WAIT or str(decision.get("goal", "")) != Contract.GOAL_IDLE:
-		# Survival, combat, social behavior, or generic exploration is already
-		# yielding the turn. Only an otherwise idle bot can stall this goal.
+	var action := str(decision.get("action", ""))
+	var behavior_goal := str(decision.get("goal", ""))
+	if behavior_goal in [Contract.GOAL_SURVIVE, Contract.GOAL_SELF_DEFENSE]:
+		# A safety or combat response legitimately suspends long-term progression.
+		_stone_age_goal_state["no_action_since_msec"] = -1
+		return
+	if action not in [Contract.ACTION_WAIT, Contract.ACTION_LOOK_AT]:
+		# Only passive turns count as no progress. In particular, repeated social
+		# LOOK_AT beside a player is not useful progression and must not suppress
+		# the bounded retry/cooldown for an otherwise idle Stone Age stage.
 		_stone_age_goal_state["no_action_since_msec"] = -1
 		return
 	var since := int(_stone_age_goal_state.get("no_action_since_msec", -1))
