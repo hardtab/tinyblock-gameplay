@@ -212,7 +212,7 @@ func decide(observation: Dictionary) -> Dictionary:
 			# pin this threat until it is no longer dangerous so nearby attackers do
 			# not make the bot alternate pursuit targets every decision.
 			var approach_target := _creature_approach_target(observation, creature_threat)
-			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_MOVE_TO, approach_target, 1400, 0.9)
+			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_MOVE_TO, approach_target, 2600, 0.9)
 		if Contract.ACTION_WAIT in legal:
 			# If the verified escape graph has no safe route, ordinary exploration can
 			# head straight back toward the same hostile creature. Hold position for a
@@ -692,6 +692,8 @@ func _creature_approach_target(observation: Dictionary, creature: Dictionary) ->
 	result["y"] = approach_position.y
 	result["distance"] = self_position.distance_to(approach_position)
 	result["combat_approach"] = true
+	result["combat_approach_side"] = toward_bot
+	result["combat_approach_gap"] = horizontal_gap
 	return result
 
 

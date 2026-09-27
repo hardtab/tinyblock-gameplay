@@ -794,6 +794,28 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 				flee_target_x = target.x + maxf(1.0, float(player_state.get("w", 20.0))) * 0.5
 				player_target = true
 				break
+	# Combat approach is a live intercept, not a point-in-time destination. A
+	# creature can cover several tiles during a movement action; following the
+	# position embedded in the decision made the bot chase a stale point until the
+	# action timed out. Keep the originally chosen side and gap, but recompute the
+	# approach point from each fresh threat observation while the executor is busy.
+	var decision_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+	if action == Contract.ACTION_MOVE_TO and bool(decision_target.get("combat_approach", false)) and not target_id.is_empty():
+		for raw_threat in observation.get("threats", []):
+			if not raw_threat is Dictionary:
+				continue
+			var threat := raw_threat as Dictionary
+			if str(threat.get("id", "")) != target_id or not bool(threat.get("alive", true)):
+				continue
+			var approach_side := signf(float(decision_target.get("combat_approach_side", 0.0)))
+			if is_zero_approx(approach_side):
+				approach_side = signf(origin.x - Contract.target_position(threat).x)
+			if is_zero_approx(approach_side):
+				approach_side = -1.0 if int(self_state.get("facing", 1)) > 0 else 1.0
+			var live_threat_position := Contract.target_position(threat)
+			var approach_gap := clampf(float(decision_target.get("combat_approach_gap", 32.0)), 16.0, 48.0)
+			target = Vector2(live_threat_position.x + approach_side * approach_gap, live_threat_position.y)
+			break
 	if action == Contract.ACTION_MOVE_TO and target_id.begins_with("tile:"):
 		var stand_position := _reachable_stand_position_for_block(origin, decision.get("target", {}) as Dictionary)
 		if stand_position.is_empty():
