@@ -38,6 +38,7 @@ var _last_flee_route_outcome_key := ""
 var _flee_target_route_cooldown_until: Dictionary = {}
 var _last_aggressive_player_id := ""
 var _last_enemy_player_id := ""
+var _last_creature_threat_id := ""
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 ## Only chase a player once they are clearly farther than the preferred gap.
@@ -137,6 +138,7 @@ func reset() -> void:
 	_flee_target_route_cooldown_until.clear()
 	_last_aggressive_player_id = ""
 	_last_enemy_player_id = ""
+	_last_creature_threat_id = ""
 
 
 func decide(observation: Dictionary) -> Dictionary:
@@ -206,8 +208,11 @@ func decide(observation: Dictionary) -> Dictionary:
 		):
 			# If the route solver cannot find a safe retreat, an armed bot should
 			# close to a usable attack rather than stand idle for the whole retry
-			# window. Weapon equip and ranged attacks above still take precedence.
-			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_MOVE_TO, creature_threat, 900, 0.9)
+			# window. Aim for melee range instead of the moving creature's body, and
+			# pin this threat until it is no longer dangerous so nearby attackers do
+			# not make the bot alternate pursuit targets every decision.
+			var approach_target := _creature_approach_target(observation, creature_threat)
+			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_MOVE_TO, approach_target, 1400, 0.9)
 		if Contract.ACTION_WAIT in legal:
 			# If the verified escape graph has no safe route, ordinary exploration can
 			# head straight back toward the same hostile creature. Hold position for a
@@ -627,6 +632,7 @@ func _dangerous_creature_threat(observation: Dictionary, threats: Array) -> Dict
 	var danger_radius := float(observation.get("creature_danger_distance", CREATURE_DANGER_RADIUS))
 	var best := {}
 	var best_distance := INF
+	var pinned := {}
 	for raw_threat in threats:
 		if not raw_threat is Dictionary:
 			continue
@@ -661,7 +667,32 @@ func _dangerous_creature_threat(observation: Dictionary, threats: Array) -> Dict
 		if distance < best_distance:
 			best = threat
 			best_distance = distance
+		if str(threat.get("id", "")) == _last_creature_threat_id:
+			pinned = threat
+	if not pinned.is_empty():
+		best = pinned
+	_last_creature_threat_id = str(best.get("id", ""))
 	return best
+
+
+func _creature_approach_target(observation: Dictionary, creature: Dictionary) -> Dictionary:
+	"""Choose a grounded approach point in melee reach, not inside a moving target."""
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var self_position := Contract.target_position(self_state)
+	var threat_position := Contract.target_position(creature)
+	var toward_bot := signf(self_position.x - threat_position.x)
+	if is_zero_approx(toward_bot):
+		toward_bot = -1.0 if int(self_state.get("facing", 1)) > 0 else 1.0
+	var attack_distance := maxf(24.0, float(observation.get("creature_attack_distance", 48.0)))
+	var horizontal_gap := minf(36.0, attack_distance * 0.68)
+	var approach_position := Vector2(threat_position.x + toward_bot * horizontal_gap, threat_position.y)
+	var result := creature.duplicate(true)
+	result["position"] = [approach_position.x, approach_position.y]
+	result["x"] = approach_position.x
+	result["y"] = approach_position.y
+	result["distance"] = self_position.distance_to(approach_position)
+	result["combat_approach"] = true
+	return result
 
 
 func _lava_threat(observation: Dictionary) -> Dictionary:
