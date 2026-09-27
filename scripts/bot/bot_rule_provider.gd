@@ -1808,6 +1808,17 @@ func _safe_descent_plan_action(observation: Dictionary, legal: PackedStringArray
 			var clear_target := _descent_clear_target(observation, descent_plan)
 			if clear_target.is_empty() or not Perception.mine_target_is_safe(observation, clear_target):
 				return {}
+			# Route excavation is only actionable with a tool the safety contract
+			# accepts. In particular, harvest-tier-0 blocks (such as ice) must not
+			# trick this strategy into proposing a bare-hand MINE that safety will
+			# reject every time. Yield to starter progression until a pickaxe exists.
+			var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+			var equipped_hand := str(equipment.get("hand", "")).to_lower()
+			if not _is_dig_route_tool(equipped_hand):
+				var owned_dig_tool := _best_owned_mining_tool(observation)
+				if not owned_dig_tool.is_empty() and Contract.ACTION_EQUIP in legal:
+					return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_EQUIP, {"id": owned_dig_tool}, 350, 0.91)
+				return {}
 			var mining_tool := _mining_tool_for_target(observation, clear_target)
 			if not mining_tool.is_empty() and Contract.ACTION_EQUIP in legal:
 				return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_EQUIP, {"id": mining_tool}, 350, 0.91)
@@ -1867,6 +1878,11 @@ func _descent_clear_target(observation: Dictionary, descent_plan: Dictionary) ->
 		target["dig_route"] = true
 		return target
 	return {}
+
+
+func _is_dig_route_tool(item_name: String) -> bool:
+	var normalized := item_name.strip_edges().to_lower()
+	return normalized.contains("pickaxe") or normalized == "stone_axe"
 
 
 func _challenge_distance_action(observation: Dictionary, legal: PackedStringArray, goal: Dictionary) -> Dictionary:
