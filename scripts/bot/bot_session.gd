@@ -119,6 +119,7 @@ var _pending_action_targets: Dictionary = {}
 var _blocked_action_targets: Dictionary = {}
 var _protected_build_cells: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
+var _last_flee_route_diagnostic_msec := -1
 ## Fully replicated procedural chunks prove that omitted cells are air. Static
 ## worlds instead use a small bounded area from their complete initial snapshot.
 var _terrain_known_chunks: Dictionary = {}
@@ -1343,7 +1344,12 @@ func _safe_flee_waypoint(
 			return step_escape
 		# Tier 2: no strictly farther escape exists, so allow a same-distance
 		# reposition instead of standing still and re-entering WAIT.
-		return _safe_flee_reposition_waypoint(self_state, origin_tile, threat, origin_distance, first_step_allowed)
+		var reposition := _safe_flee_reposition_waypoint(self_state, origin_tile, threat, origin_distance, first_step_allowed)
+		if reposition.is_empty():
+			_emit_flee_route_unavailable(
+				self_state, origin, threat, origin_tile, origin_distance, first_step_allowed, reachable_first_steps
+			)
+		return reposition
 	var best_distance := origin_distance + float(BlockDefs.TILE) * 0.25
 	var best_position := Vector2.ZERO
 	var best_tile := origin_tile
@@ -1377,9 +1383,14 @@ func _safe_flee_waypoint(
 		# Tier 2: a strictly farther tile may be unreachable while a legitimate
 		# lateral/step-up reposition that keeps threat distance is. Return that so
 		# FLEE_FROM does not collapse into flee_no_safe_waypoint -> WAIT.
-		return _safe_flee_reposition_waypoint(
+		var reposition := _safe_flee_reposition_waypoint(
 			self_state, origin_tile, threat, origin_distance, first_step_allowed, reachable_first_steps
 		)
+		if reposition.is_empty():
+			_emit_flee_route_unavailable(
+				self_state, origin, threat, origin_tile, origin_distance, first_step_allowed, reachable_first_steps
+			)
+		return reposition
 	return {
 		"position": best_position,
 		"support_tile": best_tile,
@@ -1524,6 +1535,75 @@ func _safe_flee_reposition_step(
 				"reposition_only": true,
 			}
 	return best
+
+
+## Emit a throttled, local-only journal breadcrumb when every safe flee route is
+## rejected. This captures enough known support/transition geometry to diagnose
+## live deadlocks without shipping analytics or dumping the full world snapshot.
+func _emit_flee_route_unavailable(
+	self_state: Dictionary,
+	origin: Vector2,
+	threat: Vector2,
+	origin_tile: Vector2i,
+	origin_distance: float,
+	first_step_allowed: Callable,
+	reachable_first_steps: Dictionary,
+) -> void:
+	var now_msec := Time.get_ticks_msec()
+	if _last_flee_route_diagnostic_msec >= 0 and now_msec - _last_flee_route_diagnostic_msec < 30_000:
+		return
+	_last_flee_route_diagnostic_msec = now_msec
+	var nearby_standable: Array[Dictionary] = []
+	for tile_y in range(origin_tile.y - 4, origin_tile.y + 5):
+		for tile_x in range(origin_tile.x - 4, origin_tile.x + 5):
+			var tile := Vector2i(tile_x, tile_y)
+			if not _terrain_standable_tile(tile):
+				continue
+			var position := _world_position_for_support_tile(tile)
+			nearby_standable.append({
+				"tile": [tile.x, tile.y],
+				"distance": snappedf(position.distance_to(threat), 0.1),
+				"reachable": reachable_first_steps.has(tile),
+			})
+	var direct_candidates: Array[Dictionary] = []
+	for direction in [Vector2i.LEFT, Vector2i.RIGHT]:
+		var candidates: Array[Dictionary] = [
+			{"tile": origin_tile + direction, "kind": "walk"},
+			{"tile": origin_tile + direction + Vector2i.UP, "kind": "jump"},
+			{"tile": origin_tile + direction * 2, "kind": "jump"},
+			{"tile": origin_tile + direction * 2 + Vector2i.UP, "kind": "jump"},
+		]
+		for candidate in candidates:
+			var tile: Vector2i = candidate.get("tile", origin_tile)
+			var kind := str(candidate.get("kind", "walk"))
+			var standable := _terrain_standable_tile(tile)
+			var transition_allowed := standable and _physics_transition_allowed(origin_tile, tile, kind)
+			var jump_safe := kind != "jump" or (standable and _jump_route_has_safe_landing(self_state, _world_position_for_support_tile(tile)))
+			var first_edge_allowed := (
+				not first_step_allowed.is_valid()
+				or bool(first_step_allowed.call(origin_tile, tile, kind))
+			)
+			direct_candidates.append({
+				"tile": [tile.x, tile.y],
+				"kind": kind,
+				"standable": standable,
+				"transition_allowed": transition_allowed,
+				"jump_safe": jump_safe,
+				"first_edge_allowed": first_edge_allowed,
+				"distance": snappedf(_world_position_for_support_tile(tile).distance_to(threat), 0.1) if standable else -1.0,
+			})
+	structured_log.emit({
+		"event": "flee_route_unavailable",
+		"at_msec": now_msec,
+		"origin": [origin.x, origin.y],
+		"origin_tile": [origin_tile.x, origin_tile.y],
+		"origin_standable": _terrain_standable_tile(origin_tile),
+		"threat_position": [threat.x, threat.y],
+		"origin_distance": snappedf(origin_distance, 0.1),
+		"reachable_first_step_count": reachable_first_steps.size(),
+		"nearby_standable": nearby_standable,
+		"direct_candidates": direct_candidates,
+	})
 
 
 func _host_rejected_transition_blocks_origin(origin_tile: Vector2i) -> bool:
