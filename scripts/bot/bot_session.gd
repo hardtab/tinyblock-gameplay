@@ -137,6 +137,7 @@ var _physics_route: Array[Dictionary] = []
 var _physics_route_target := Vector2i(2147483647, 2147483647)
 var _physics_route_target_id := ""
 var _physics_route_replan_msec := -1
+var _physics_route_first_step_guarded := false
 var _host_rejected_transitions: Dictionary = {}
 var _active_air_transition: Dictionary = {}
 var _host_rejected_transition_from := Vector2i(2147483647, 2147483647)
@@ -356,6 +357,7 @@ func join_session(record: Dictionary) -> void:
 	_physics_route.clear()
 	_physics_route_target = Vector2i(2147483647, 2147483647)
 	_physics_route_target_id = ""
+	_physics_route_first_step_guarded = false
 	_physics_route_replan_msec = -1
 	_host_rejected_transitions.clear()
 	_active_air_transition.clear()
@@ -780,6 +782,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	var origin := Contract.target_position(self_state)
 	var target := Contract.target_position(decision.get("target", {}))
+	var physics_first_step_guard := Callable()
 	var flee_target_x := target.x
 	var target_id := str(decision.get("target_id", ""))
 	var player_target := false
@@ -845,7 +848,8 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 							float(player_state.get("h", 28.0)) * 0.5,
 						)
 						break
-			var flee_waypoint := _safe_flee_waypoint(self_state, origin, threat_center)
+			physics_first_step_guard = _safe_flee_first_step_filter(self_state, origin, threat_center)
+			var flee_waypoint := _safe_flee_waypoint(self_state, origin, threat_center, physics_first_step_guard)
 			if flee_waypoint.is_empty():
 				_set_desired_input(false, false, false)
 				_advance_local_physics(self_state, delta, false)
@@ -887,7 +891,11 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# makes the guest oscillate above the bridge instead of requesting its next
 	# support block.  The arena lane is flat, so keep this transition grounded.
 	var emergency_lava_escape := action == Contract.ACTION_FLEE_FROM and _local_touches_harmful_fluid(self_state)
-	var route_step := {} if _is_pvp_world() or emergency_lava_escape else _physics_route_step(origin, destination, target_id)
+	var route_step := (
+		{}
+		if _is_pvp_world() or emergency_lava_escape
+		else _physics_route_step(origin, destination, target_id, physics_first_step_guard)
+	)
 	if bool(route_step.get("unreachable", false)) and _host_rejected_transition_blocks_origin(_support_tile_for_position(origin)):
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
@@ -1125,7 +1133,12 @@ func _set_desired_input(move_left: bool, move_right: bool, jump: bool) -> void:
 	}
 
 
-func _physics_route_step(origin: Vector2, destination: Vector2, target_id: String) -> Dictionary:
+func _physics_route_step(
+	origin: Vector2,
+	destination: Vector2,
+	target_id: String,
+	first_step_allowed: Callable = Callable(),
+) -> Dictionary:
 	if _terrain_tiles.is_empty():
 		return {}
 	var origin_tile := _support_tile_for_position(origin)
@@ -1144,6 +1157,7 @@ func _physics_route_step(origin: Vector2, destination: Vector2, target_id: Strin
 		_physics_route.is_empty()
 		or _physics_route_target != target_tile
 		or _physics_route_target_id != target_id
+		or _physics_route_first_step_guarded != first_step_allowed.is_valid()
 		or _physics_route_replan_msec < 0
 		or now >= _physics_route_replan_msec
 	)
@@ -1155,10 +1169,12 @@ func _physics_route_step(origin: Vector2, destination: Vector2, target_id: Strin
 			Callable(self, "_terrain_climbable_tile"),
 			Navigator.MAX_PHYSICS_ROUTE_NODES,
 			Callable(self, "_physics_transition_allowed"),
+			first_step_allowed,
 		)
 		_physics_route_target = target_tile
 		_physics_route_target_id = target_id
-		_physics_route_replan_msec = now + 450
+		_physics_route_first_step_guarded = first_step_allowed.is_valid()
+		_physics_route_replan_msec = now + (250 if first_step_allowed.is_valid() else 450)
 	if _physics_route.is_empty() and origin_tile != target_tile:
 		return {"unreachable": true}
 	if _physics_route.size() <= 1:
@@ -1214,19 +1230,42 @@ func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2) -> Dictionary
 	}
 
 
-func _safe_flee_waypoint(self_state: Dictionary, origin: Vector2, threat: Vector2) -> Dictionary:
+func _safe_flee_first_step_filter(self_state: Dictionary, origin: Vector2, threat: Vector2) -> Callable:
+	var origin_distance := origin.distance_to(threat)
+	return func(_from_tile: Vector2i, to_tile: Vector2i, kind: String) -> bool:
+		var first_position := _world_position_for_support_tile(to_tile)
+		if first_position.distance_to(threat) <= origin_distance + float(BlockDefs.TILE) * 0.25:
+			return false
+		return kind != "jump" or _jump_route_has_safe_landing(self_state, first_position)
+
+
+func _safe_flee_waypoint(
+	self_state: Dictionary,
+	origin: Vector2,
+	threat: Vector2,
+	first_step_allowed: Callable = Callable(),
+) -> Dictionary:
 	if _terrain_tiles.is_empty():
 		return {}
 	var origin_tile := _support_tile_for_position(origin)
-	var reachable := _physics_reachable_support_tiles(origin_tile)
-	if not reachable.has(origin_tile):
-		return {}
 	var origin_distance := origin.distance_to(threat)
+	if not first_step_allowed.is_valid():
+		first_step_allowed = _safe_flee_first_step_filter(self_state, origin, threat)
+	var reachable_first_steps := Navigator.physics_reachable_first_steps(
+		origin_tile,
+		Callable(self, "_terrain_standable_tile"),
+		Callable(self, "_terrain_climbable_tile"),
+		Navigator.MAX_PHYSICS_ROUTE_NODES,
+		Callable(self, "_physics_transition_allowed"),
+		first_step_allowed,
+	)
+	if not reachable_first_steps.has(origin_tile):
+		return {}
 	var best_distance := origin_distance + float(BlockDefs.TILE) * 0.25
 	var best_position := Vector2.ZERO
 	var best_tile := origin_tile
 	var found_waypoint := false
-	for raw_tile in reachable.keys():
+	for raw_tile in reachable_first_steps.keys():
 		if typeof(raw_tile) != TYPE_VECTOR2I:
 			continue
 		var tile: Vector2i = raw_tile
@@ -1236,17 +1275,7 @@ func _safe_flee_waypoint(self_state: Dictionary, origin: Vector2, threat: Vector
 		var distance_from_threat := position.distance_to(threat)
 		if distance_from_threat <= best_distance:
 			continue
-		var route: Array[Dictionary] = Navigator.physics_route(
-			origin_tile,
-			tile,
-			Callable(self, "_terrain_standable_tile"),
-			Callable(self, "_terrain_climbable_tile"),
-			Navigator.MAX_PHYSICS_ROUTE_NODES,
-			Callable(self, "_physics_transition_allowed"),
-		)
-		if route.size() < 2:
-			continue
-		var first_edge := route[1] as Dictionary
+		var first_edge: Dictionary = reachable_first_steps[raw_tile]
 		var first_position := _world_position_for_support_tile(first_edge.get("tile", origin_tile))
 		if first_position.distance_to(threat) <= origin_distance + float(BlockDefs.TILE) * 0.25:
 			continue

@@ -77,6 +77,7 @@ static func physics_route(
 	climbable: Callable = Callable(),
 	max_nodes: int = MAX_PHYSICS_ROUTE_NODES,
 	transition_allowed: Callable = Callable(),
+	first_step_allowed: Callable = Callable(),
 ) -> Array[Dictionary]:
 	var empty: Array[Dictionary] = []
 	if not passable.is_valid() or max_nodes <= 0 or not bool(passable.call(origin)):
@@ -95,6 +96,8 @@ static func physics_route(
 			if previous.has(next) or not bool(passable.call(next)):
 				continue
 			if transition_allowed.is_valid() and not bool(transition_allowed.call(current, next, str(candidate["kind"]))):
+				continue
+			if current == origin and first_step_allowed.is_valid() and not bool(first_step_allowed.call(current, next, str(candidate["kind"]))):
 				continue
 			previous[next] = current
 			edge_kind[next] = str(candidate["kind"])
@@ -156,6 +159,44 @@ static func physics_reachable_tiles(
 			reachable[next] = true
 			queue.append(next)
 	return reachable
+
+
+## Bounded reachability search that also records the first edge on the shortest
+## discovered route to each support tile. Callers that need to rank many
+## reachable destinations can validate their first movement without rerunning
+## a complete physics_route search for every destination.
+static func physics_reachable_first_steps(
+	origin: Vector2i,
+	passable: Callable,
+	climbable: Callable = Callable(),
+	max_nodes: int = MAX_PHYSICS_ROUTE_NODES,
+	transition_allowed: Callable = Callable(),
+	first_step_allowed: Callable = Callable(),
+) -> Dictionary:
+	var first_steps: Dictionary = {}
+	if not passable.is_valid() or max_nodes <= 0 or not bool(passable.call(origin)):
+		return first_steps
+	first_steps[origin] = {"tile": origin, "kind": "start"}
+	var queue: Array[Vector2i] = [origin]
+	var head := 0
+	while head < queue.size() and queue.size() <= max_nodes:
+		var current := queue[head]
+		head += 1
+		for candidate in _physics_candidates(current, climbable, transition_allowed.is_valid()):
+			var next: Vector2i = candidate["tile"]
+			if first_steps.has(next) or not bool(passable.call(next)):
+				continue
+			var kind := str(candidate["kind"])
+			if transition_allowed.is_valid() and not bool(transition_allowed.call(current, next, kind)):
+				continue
+			if current == origin:
+				if first_step_allowed.is_valid() and not bool(first_step_allowed.call(current, next, kind)):
+					continue
+				first_steps[next] = {"tile": next, "kind": kind}
+			else:
+				first_steps[next] = first_steps[current]
+			queue.append(next)
+	return first_steps
 
 
 static func _reconstruct_path(previous: Dictionary, origin: Vector2i, target: Vector2i) -> Array[Vector2i]:
