@@ -3790,11 +3790,34 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 					# only reseat when the predictor is more than one cell off.
 					and support_tile_separation > 1
 				)
+			# A grounded host pose can confirm that a jump reached a valid nearby
+			# landing before the private arc has caught up. Treat that as a landing
+			# reconciliation, not a rejected transition/cooldown. Live Android
+			# snapshots showed this echo just 3.7 px beyond the old distance cutoff.
+			var host_confirmed_near_landing := false
+			if host_grounded and entry.has("x") and entry.has("y") and _jump_active and not _active_air_transition.is_empty():
+				var landing_tile: Vector2i = _active_air_transition.get("to", Vector2i(2147483647, 2147483647))
+				if landing_tile.x != 2147483647:
+					var host_tile := _support_tile_for_position(host_position)
+					var tile_distance := maxi(absi(host_tile.x - landing_tile.x), absi(host_tile.y - landing_tile.y))
+					var landing_position := _world_position_for_support_tile(landing_tile)
+					var intended_dx := landing_position.x - _jump_start_x
+					var host_dx := host_position.x - _jump_start_x
+					host_confirmed_near_landing = (
+						tile_distance <= 1
+						and absf(intended_dx) > 0.001
+						and absf(host_dx) >= 8.0
+						and intended_dx * host_dx > 0.0
+						and absf(float(entry.get("vx", 0.0))) <= 0.05
+						and local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
+						and _authoritative_support_verdict(host_tile) in ["supported", "fluid"]
+					)
 			# When terrain proves the local predicted support is absent and the host
 			# pose is on support, this is a stale local arc, not evidence that the
 			# intended edge was rejected. Reseat without poisoning the transition.
 			var host_rejected_air_motion := host_grounded and not host_support_reseat and (
-				local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
+				not host_confirmed_near_landing
+				and local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
 				and (
 					_jump_active
 					or (_climb_active and not bool(entry.get("climbing", false)) and not bool(entry.get("tree_ghost", false)))
@@ -3805,9 +3828,10 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 				or motion_diverged
 				or host_rejected_air_motion
 				or host_support_reseat
+				or host_confirmed_near_landing
 				or (not _jump_active and not _climb_active)
 			)
-			if motion_diverged or host_rejected_air_motion or host_support_reseat:
+			if motion_diverged or host_rejected_air_motion or host_support_reseat or host_confirmed_near_landing:
 				# Never let a host-rejected jump/climb leave the local predictor
 				# airborne. Even a small drift matters here: continuing the private
 				# arc makes later plans target terrain the authoritative avatar never
@@ -3835,11 +3859,13 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 				_physics_route.clear()
 				_physics_route_replan_msec = 0
 				_set_desired_input(false, false, false)
-				var recovery_reason := (
-					"host_rejected_air_motion"
-					if host_rejected_air_motion
-					else ("local_support_unsupported" if host_support_reseat else "distance_diverged")
-				)
+				var recovery_reason := "distance_diverged"
+				if host_confirmed_near_landing:
+					recovery_reason = "host_confirmed_transition_landing"
+				elif host_rejected_air_motion:
+					recovery_reason = "host_rejected_air_motion"
+				elif host_support_reseat:
+					recovery_reason = "local_support_unsupported"
 				structured_log.emit({
 					"event": "authoritative_motion_recovered",
 					"reason": recovery_reason,
