@@ -206,16 +206,11 @@ const DUEL_PROTOCOL_VERSION := 3
 const NETWORK_PHYSICS_TICKS_PER_SECOND := 60.0
 const LOCAL_MAX_FALL_SPEED := 12.0
 const MAX_AUTHORITATIVE_MOTION_DIVERGENCE := BlockDefs.TILE * 3.0
-## A grounded host echo can arrive one network physics tick behind the local
-## predictor: the launch frame of the bot's own jump moves a full JUMP impulse
-## (|JUMP| = 9.5 px) in a single tick, which is wider than a quarter tile. With
-## the old 8 px window that normal launch echo was misread as a host rejection,
-## so the in-flight transition was blacklisted and its origin tile was cooled
-## down for eight seconds - the bot then kept predicting an airborne arc the
-## authoritative host had already grounded, and movement stalled. Cover the
-## one-tick launch echo; the displaced-pose cases the host-rejection tests pin
-## stay rejected.
-const HOST_GROUNDED_AIR_REJECTION_TOLERANCE := maxf(BlockDefs.TILE * 0.25, absf(BlockDefs.JUMP))
+## Host snapshots can trail input-driven prediction by several physics frames.
+## Live traces show a normal grounded echo up to about 37 px from the local pose;
+## a smaller window misclassified that network lag as a rejected jump and
+## blacklisted an otherwise usable edge for eight seconds.
+const HOST_GROUNDED_AIR_REJECTION_TOLERANCE := maxf(BlockDefs.TILE * 1.25, absf(BlockDefs.JUMP))
 const HOST_REJECTED_TRANSITION_COOLDOWN_MSEC := 8_000
 const TREE_CLIMB_SPEED := -3.2
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
@@ -3692,16 +3687,9 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 			var motion_diverged := (
 				entry.has("x")
 				and entry.has("y")
-				and local_position.distance_to(host_position) > MAX_AUTHORITATIVE_MOTION_DIVERGENCE
+					and local_position.distance_to(host_position) > MAX_AUTHORITATIVE_MOTION_DIVERGENCE
 			)
 			var host_grounded := entry.has("on_ground") and bool(entry.get("on_ground", false))
-			var host_rejected_air_motion := host_grounded and (
-				local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
-				and (
-					_jump_active
-					or (_climb_active and not bool(entry.get("climbing", false)) and not bool(entry.get("tree_ghost", false)))
-				)
-			)
 			# The private jump/climb predictor can be left hovering over a cell the
 			# authoritative terrain proves has nothing to stand on - its support was
 			# mined away, or the host never reproduced the landing. The grounded
@@ -3718,6 +3706,16 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 					local_support_verdict == "unsupported"
 					and host_support_verdict == "supported"
 				)
+			# When terrain proves the local predicted support is absent and the host
+			# pose is on support, this is a stale local arc, not evidence that the
+			# intended edge was rejected. Reseat without poisoning the transition.
+			var host_rejected_air_motion := host_grounded and not host_support_reseat and (
+				local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
+				and (
+					_jump_active
+					or (_climb_active and not bool(entry.get("climbing", false)) and not bool(entry.get("tree_ghost", false)))
+				)
+			)
 			var reconcile_motion := (
 				respawned
 				or motion_diverged
