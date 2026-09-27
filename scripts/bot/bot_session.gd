@@ -1835,20 +1835,27 @@ func _support_tile_for_position(position: Vector2) -> Vector2i:
 ## standing on a platform lip therefore has a real support tile beside its
 ## centre even though the centre cell is empty. Route planners must start from
 ## that real tile or bounded reachability refuses the origin and movement stalls
-## with `origin_not_reachable`. Only grounded poses are re-anchored; airborne
-## poses keep the plain centre mapping. Nothing here moves the bot.
+## with `origin_not_reachable`. Grounded and near-stationary poses inside the
+## host's ground-snap envelope are re-anchored; freely falling poses keep the
+## plain centre mapping. Nothing here moves the bot.
 func _route_origin_support_tile(position: Vector2, self_state: Dictionary) -> Vector2i:
 	var tile := _support_tile_for_position(position)
-	if not bool(self_state.get("on_ground", false)) or _terrain_standable_tile(tile):
+	if _terrain_standable_tile(tile):
 		return tile
 	var width := maxf(1.0, float(self_state.get("w", 20.0)))
 	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var feet_y := position.y + height
+	var row := floori((feet_y + 1.5) / float(BlockDefs.TILE))
+	var feet_from_support_top := feet_y - float(row * BlockDefs.TILE)
+	var within_ground_snap := feet_from_support_top >= -0.05 and feet_from_support_top <= 1.5
+	var nearly_stationary_vertically := absf(float(self_state.get("vy", 0.0))) <= 0.05
+	if not bool(self_state.get("on_ground", false)) and not (within_ground_snap and nearly_stationary_vertically):
+		return tile
 	var foot_left := position.x + 3.0
 	var foot_right := position.x + width - 3.0
 	# Match WorldSim.find_ground_support's 1.5px snap tolerance. A grounded
 	# avatar may sit just above the tile boundary, so plain floor(feet / TILE)
 	# can select the empty row immediately above the host's actual support row.
-	var row := floori((position.y + height + 1.5) / float(BlockDefs.TILE))
 	var left := floori(foot_left / float(BlockDefs.TILE))
 	var right := floori((foot_right - 0.001) / float(BlockDefs.TILE))
 	var best_tile := tile
