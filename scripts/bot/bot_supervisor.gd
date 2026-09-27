@@ -27,7 +27,7 @@ const DEFAULT_RETRY_BASE_SECONDS := 5.0
 const DEFAULT_RETRY_MAX_SECONDS := 300.0
 const DEFAULT_NO_WORLD_RETRY_MAX_SECONDS := 12.0
 const DEFAULT_POST_LEAVE_DISCOVERY_DELAY_SECONDS := 1.0
-const TRANSIENT_DISCONNECT_RETRY_SECONDS := 10.0
+const TRANSIENT_SESSION_RETRY_SECONDS := 10.0
 const DEFAULT_BLOCKED_WORLDS_PATH := "user://bot_blocked_worlds.json"
 const BLOCKED_WORLDS_VERSION := 1
 ## Community servers are operated by us but are reported by the backend as
@@ -241,13 +241,13 @@ func _on_session_left(reason: String) -> void:
 		visited_key = str(finished.get("world_id", ""))
 	if not visited_key.is_empty():
 		var now_msec := Time.get_ticks_msec()
-		if reason == "transport_error" or reason.begins_with("disconnected_"):
+		if _is_transient_session_exit(reason):
 			# MultiplayerClient has already exhausted its bounded WebRTC reconnect
-			# attempts, or the join-ticket HTTP request failed before the socket
-			# existed. Let discovery establish a fresh guest transport shortly;
-			# the normal five-minute visit cooldown made a healthy public world look
-			# abandoned after one transient mobile-network interruption.
-			blacklisted_sessions[visited_key] = now_msec + int(TRANSIENT_DISCONNECT_RETRY_SECONDS * 1000.0)
+			# attempts, the join-ticket HTTP request failed before the socket existed,
+			# or snapshot sync timed out on a silent peer. Let discovery establish a
+			# fresh guest transport shortly; the normal five-minute visit cooldown
+			# made a recoverable public world look abandoned after one interruption.
+			blacklisted_sessions[visited_key] = now_msec + int(TRANSIENT_SESSION_RETRY_SECONDS * 1000.0)
 			recently_visited.erase(visited_key)
 		else:
 			recently_visited[visited_key] = now_msec
@@ -261,6 +261,10 @@ func _on_session_left(reason: String) -> void:
 	# after network teardown, then discovery can select a different/new room.
 	_set_state(STATE_DISCOVERING)
 	_next_discovery_msec = Time.get_ticks_msec() + int(post_leave_discovery_delay_seconds() * 1000.0)
+
+
+func _is_transient_session_exit(reason: String) -> bool:
+	return reason == "transport_error" or reason == "snapshot_timeout" or reason.begins_with("disconnected_")
 
 
 func _on_session_log(event: Dictionary) -> void:
