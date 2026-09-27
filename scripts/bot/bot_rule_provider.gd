@@ -576,7 +576,9 @@ func decide(observation: Dictionary) -> Dictionary:
 	# guaranteed probability gives the next decision a chance to pick up a newly
 	# visible resource or recipe instead of repeating a patrol forever.
 	if Contract.ACTION_MOVE_TO in legal and _rng.randf() < 0.72:
-		return _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, _wander_target(self_state), WANDER_COMMIT_MSEC, 0.55)
+		var wander_target := _exploration_target(observation, WANDER_RADIUS)
+		if not wander_target.is_empty():
+			return _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, wander_target, WANDER_COMMIT_MSEC, 0.55)
 
 	if (
 		Contract.ACTION_LOOK_AT in legal
@@ -977,13 +979,7 @@ func _consecutive_action_streak(observation: Dictionary, action: String) -> int:
 	return streak
 
 
-func _wander_target(self_state: Dictionary) -> Dictionary:
-	var origin := Contract.target_position(self_state)
-	var direction := -1.0 if _rng.randf() < 0.5 else 1.0
-	return {"position": [origin.x + direction * WANDER_RADIUS, origin.y]}
-
-
-func _exploration_target(observation: Dictionary) -> Dictionary:
+func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_RADIUS) -> Dictionary:
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var origin := Contract.target_position(self_state)
 	var now_msec := int(observation.get("observed_at_msec", 0))
@@ -1043,7 +1039,7 @@ func _exploration_target(observation: Dictionary) -> Dictionary:
 			var position := Contract.target_position(waypoint)
 			var delta_x := position.x - origin.x
 			var progress := delta_x * float(direction)
-			if progress < 24.0 or progress > EXPLORE_RADIUS:
+			if progress < 24.0 or progress > max_distance:
 				continue
 			if progress > target_progress or (is_equal_approx(progress, target_progress) and absf(position.y - origin.y) < absf(target_position.y - origin.y)):
 				target_position = position

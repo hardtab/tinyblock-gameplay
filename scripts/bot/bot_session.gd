@@ -832,7 +832,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 			# the bot stood still beside its target. Constrain the direct route and
 			# the fallback pursuit waypoint to the same first edges with a proven
 			# landing so a safe walk/drop/climb alternative wins instead.
-			physics_first_step_guard = _safe_pursuit_first_step_filter(self_state)
+			physics_first_step_guard = _safe_jump_first_step_filter(self_state)
 	elif action == Contract.ACTION_FLEE_FROM:
 		# A straight-line escape vector can point through water, a ravine or an
 		# unsupported edge. Pick an actually reachable support tile that increases
@@ -880,6 +880,12 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		# climbing the step. Only the non-position-directed actions keep the
 		# horizontal flattening below.
 		destination = target
+		if not _is_pvp_world():
+			# The route graph is intentionally broad; validate its first jump with
+			# the same simulated landing arc used by the movement executor. Otherwise
+			# exploration can repeatedly select graph-reachable edges that are
+			# physically rejected as unsafe_jump_route.
+			physics_first_step_guard = _safe_jump_first_step_filter(self_state)
 	else:
 		destination.y = origin.y
 	# In a duel, never let the short-horizon jump planner consume an input at
@@ -1203,11 +1209,10 @@ func _physics_route_step(
 	return {}
 
 
-func _safe_pursuit_first_step_filter(self_state: Dictionary) -> Callable:
-	# Reachability does not prove a first edge is executable. A support tile can
-	# be closer to the player yet enterable only through a jump whose arc the
-	# movement guard refuses (unsafe_jump_route), so pursuit must reject that
-	# first edge and keep any safe walk/drop/climb route to the same destination.
+func _safe_jump_first_step_filter(self_state: Dictionary) -> Callable:
+	# Graph reachability does not prove a jump's arc is executable. Reject a
+	# first jump whose simulated landing fails so movement can choose a safe
+	# walk/drop/climb alternative or report the target unreachable before input.
 	return func(_from_tile: Vector2i, to_tile: Vector2i, kind: String) -> bool:
 		if kind != "jump":
 			return true
@@ -1220,7 +1225,7 @@ func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2, first_step_al
 	var origin_tile := _support_tile_for_position(origin)
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	if not first_step_allowed.is_valid():
-		first_step_allowed = _safe_pursuit_first_step_filter(self_state)
+		first_step_allowed = _safe_jump_first_step_filter(self_state)
 	var reachable_first_steps := Navigator.physics_reachable_first_steps(
 		origin_tile,
 		Callable(self, "_terrain_standable_tile"),
