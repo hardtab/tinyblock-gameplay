@@ -897,6 +897,41 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		self_state["climbing"] = false
 		self_state["climb_col"] = -1
 		hint = "walk"
+	# A local obstacle hint is only a one-column cue; it must not turn the full
+	# player/resource destination into one large speculative jump. Route jumps
+	# have already been checked above. Direct hints use the same landing proof,
+	# except in duels where the arena edge guard owns traversal, plus the host-
+	# rejected-edge cooldown before they can latch an air transition.
+	if hint == "jump" and not _jump_active and route_kind not in ["jump", "drop"]:
+		var transition_from := _support_tile_for_position(origin)
+		var transition_to := _support_tile_for_position(destination)
+		if not _physics_transition_allowed(transition_from, transition_to, "jump"):
+			_physics_route.clear()
+			_physics_route_replan_msec = Time.get_ticks_msec() + 450
+			_set_desired_input(false, false, false)
+			_advance_local_physics(self_state, delta, false)
+			_world_snapshot["self"] = self_state
+			return {"done": true, "reason": "unsafe_jump_route"}
+		if not _is_pvp_world() and not _jump_route_has_safe_landing(self_state, destination):
+			# Preserve the normal obstacle detector for nearby walls. The original
+			# hint is only one column wide; never turn it into a jump to a distant
+			# target, but let horizontal collision handling choose blocked_obstacle.
+			var direction := signf(destination.x - origin.x)
+			var immediate_obstacle := not _local_collision(
+				float(self_state.get("x", origin.x)) + direction * 2.0,
+				float(self_state.get("y", origin.y)),
+				float(self_state.get("w", 20.0)),
+				float(self_state.get("h", 28.0)),
+			).is_empty()
+			if immediate_obstacle:
+				hint = "walk"
+			else:
+				_physics_route.clear()
+				_physics_route_replan_msec = Time.get_ticks_msec() + 450
+				_set_desired_input(false, false, false)
+				_advance_local_physics(self_state, delta, false)
+				_world_snapshot["self"] = self_state
+				return {"done": true, "reason": "unsafe_jump_route"}
 	if _climb_active or hint == "climb":
 		if not _climb_active:
 			_active_air_transition = {
