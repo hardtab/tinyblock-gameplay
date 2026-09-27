@@ -39,10 +39,27 @@ const MANAGED_COMMUNITY_WORLD_IDS := [
 	"world_b612",
 	"world_wonderland",
 ]
+## Modes that AchievementManager grants five_lives credit for. Used only to
+## bias public-world selection; duel/pvp/unknown modes are intentionally
+## absent so they can never carry the preference bonus.
+const RECORDABLE_WORLD_MODES := [
+	"skyblock",
+	"floating_islands",
+	"procedural",
+	"one_block",
+	"challenge_run",
+]
+## Modest, deterministic weight added when a candidate's recordable mode is
+## still missing from the five_lives achievement. Sized below the small-world
+## player-count weight so it nudges rather than overrides normal selection.
+const FIVE_LIVES_MODE_PREFERENCE_WEIGHT := 0.5
 
 var backend: Object
 var network_client: Object
 var session: BotSession
+## Achievement source (usually the /root/Achievements autoload) consulted for
+## five_lives.missing. Left null in tests that do not inject one.
+var _achievement_source: Object
 var state := STATE_BOOT
 var protocol_version := DEFAULT_PROTOCOL_VERSION
 var discovery_limit := 50
@@ -78,6 +95,7 @@ func _init() -> void:
 func configure(backend_adapter: Object = null, multiplayer_adapter: Object = null, options: Dictionary = {}) -> void:
 	backend = backend_adapter
 	network_client = multiplayer_adapter
+	_achievement_source = options.get("achievements")
 	protocol_version = int(options.get("protocol_version", protocol_version))
 	discovery_limit = clampi(int(options.get("discovery_limit", discovery_limit)), 1, 50)
 	discovery_interval_seconds = maxf(1.0, float(options.get("discovery_interval_seconds", discovery_interval_seconds)))
@@ -447,6 +465,7 @@ func filter_sessions(sessions: Array, expected_protocol_version: int = DEFAULT_P
 func pick_session(sessions: Array, random_unit: float = 0.5) -> Dictionary:
 	if sessions.is_empty():
 		return {}
+	var missing_modes := _missing_five_lives_modes()
 	var weighted: Array[Dictionary] = []
 	var total := 0.0
 	for raw_session in sessions:
@@ -455,6 +474,8 @@ func pick_session(sessions: Array, random_unit: float = 0.5) -> Dictionary:
 		var entry := raw_session as Dictionary
 		var count := _display_player_count(entry)
 		var weight := 1.0 + (0.35 if count <= 3 else 0.0)
+		if _five_lives_mode_eligible(str(entry.get("world_mode", "")), missing_modes):
+			weight += FIVE_LIVES_MODE_PREFERENCE_WEIGHT
 		weighted.append({"entry": entry, "weight": weight})
 		total += weight
 	if weighted.is_empty():
@@ -465,6 +486,59 @@ func pick_session(sessions: Array, random_unit: float = 0.5) -> Dictionary:
 		if cursor <= 0.0:
 			return (item["entry"] as Dictionary).duplicate(true)
 	return (weighted.back()["entry"] as Dictionary).duplicate(true)
+
+
+## Lowercased set of the open five_lives achievement's missing world modes.
+## Returns an empty set when no achievement source is wired up or it has no
+## observation, so discovery keeps its old selection behavior.
+func _missing_five_lives_modes() -> Dictionary:
+	var source := _resolve_achievement_source()
+	if source == null or not source.has_method("observation_for_bot"):
+		return {}
+	var observation: Variant = source.call("observation_for_bot")
+	if not observation is Dictionary:
+		return {}
+	var open_goals: Variant = (observation as Dictionary).get("open", [])
+	if not open_goals is Array:
+		return {}
+	for raw_goal in open_goals:
+		if not raw_goal is Dictionary:
+			continue
+		var goal := raw_goal as Dictionary
+		if str(goal.get("id", "")) != "five_lives":
+			continue
+		var missing: Variant = goal.get("missing", [])
+		if not missing is Array:
+			return {}
+		var result: Dictionary = {}
+		for raw_mode in missing:
+			var mode := str(raw_mode).to_lower()
+			if mode in RECORDABLE_WORLD_MODES:
+				result[mode] = true
+		return result
+	return {}
+
+
+## True only for an exact recordable five_lives mode that is still missing.
+## duel/pvp/unknown modes and an empty missing set never earn the bonus.
+func _five_lives_mode_eligible(world_mode: String, missing_modes: Dictionary) -> bool:
+	if missing_modes.is_empty():
+		return false
+	var mode := world_mode.strip_edges().to_lower()
+	if mode.is_empty() or mode not in RECORDABLE_WORLD_MODES:
+		return false
+	return missing_modes.has(mode)
+
+
+func _resolve_achievement_source() -> Object:
+	if _achievement_source != null:
+		return _achievement_source
+	# A supervisor created outside an active scene tree (pure-policy tests, early
+	# boot) has no /root to look up; fall back to no preference data.
+	if not is_inside_tree():
+		return null
+	var autoload := get_node_or_null("/root/Achievements")
+	return autoload as Object
 
 
 func human_player_count(players: Variant, bot_player_id: String, dedicated_server: bool = false, host_player_id: String = "") -> int:
