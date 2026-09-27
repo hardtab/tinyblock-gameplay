@@ -2154,7 +2154,15 @@ func _jump_route_has_safe_landing(self_state: Dictionary, destination: Vector2) 
 				var block_x := float(horizontal_hit.get("bx", 0.0))
 				var resolved_x := block_x - width if horizontal_direction > 0.0 else block_x + float(BlockDefs.TILE)
 				if not _local_collision(resolved_x, y, width, height).is_empty():
-					return false
+					# The face is only resolved for the row the avatar occupies before
+					# this substep's rise. While the lower few pixels still overlap a
+					# one-block ledge the pre-rise probe keeps hitting it, yet the same
+					# tick lifts the body clear, so mirror the authoritative order by
+					# re-testing the resolved face at the risen row. Only a pose that is
+					# still blocked after the rise is real side penetration.
+					var risen_y := y + vy * substep
+					if vy >= 0.0 or not _local_collision(resolved_x, risen_y, width, height).is_empty():
+						return false
 				x = resolved_x
 			var next_y := y + vy * substep
 			var vertical_hit := _local_collision(x, next_y, width, height)
