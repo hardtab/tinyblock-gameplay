@@ -33,6 +33,13 @@ const STATE_PLAYING := "PLAYING"
 const STATE_LEAVING := "LEAVING"
 
 const DEFAULT_SYNC_TIMEOUT_MSEC := 45_000
+## The shared multiplayer client emits `connected` only once per session, so a
+## P2P RTC reconnect can leave the bot waiting in SYNCING with no further
+## request. Mirror the human guest path: retry the full request until a transfer
+## starts, then request only the missing chunks, then restart a fresh transfer.
+## The existing 45s hard timeout still bounds the whole attempt.
+const SNAPSHOT_RETRY_INTERVAL_MSEC := 6_000
+const SNAPSHOT_RETRY_LIMIT := 3
 const DEFAULT_EMPTY_GRACE_MSEC := 30_000
 const DEFAULT_OBSERVATION_RADIUS := 256.0
 const STARTER_TOOLING_RESOURCE_SCAN_RADIUS := 1536.0
@@ -80,6 +87,8 @@ var _network_signals_connected := false
 var _snapshot_transfer_id := ""
 var _snapshot_expected_chunks := 0
 var _snapshot_chunks: Array[String] = []
+var _snapshot_retry_at_msec := -1
+var _snapshot_retry_count := 0
 var _region_incoming_transfers: Dictionary = {}
 var _region_chunk_request_msec: Dictionary = {}
 var _region_received_chunks: Dictionary = {}
@@ -310,6 +319,8 @@ func join_session(record: Dictionary) -> void:
 	_snapshot_transfer_id = ""
 	_snapshot_expected_chunks = 0
 	_snapshot_chunks.clear()
+	_snapshot_retry_at_msec = -1
+	_snapshot_retry_count = 0
 	_region_incoming_transfers.clear()
 	_region_chunk_request_msec.clear()
 	_region_received_chunks.clear()
@@ -510,8 +521,12 @@ func handle_message(message: Dictionary) -> void:
 		if not _connected_peers_supported(message.get("players", [])):
 			leave("legacy_client")
 			return
-		if state in [STATE_JOINING, STATE_SYNCING] and network_client != null and network_client.has_method("send_command"):
-			network_client.call("send_command", "snapshot_request", {})
+		if state in [STATE_JOINING, STATE_SYNCING]:
+			_send_snapshot_request()
+			# A fresh connected event starts a new exchange; reset the retry
+			# cadence so the first resend happens only after the normal interval.
+			_snapshot_retry_count = 0
+			_snapshot_retry_at_msec = Time.get_ticks_msec() + SNAPSHOT_RETRY_INTERVAL_MSEC
 		return
 	if kind == "control" and message_type == "player_left":
 		var left_id := str(message.get("player_id", ""))
@@ -627,6 +642,12 @@ func _process(delta: float) -> void:
 	if state == STATE_SYNCING:
 		if _sync_started_msec >= 0 and now_msec - _sync_started_msec >= DEFAULT_SYNC_TIMEOUT_MSEC:
 			_emit_left("snapshot_timeout")
+			return
+		if _snapshot_retry_at_msec < 0:
+			# Defensive: if the sync started without scheduling a retry, arm it.
+			_snapshot_retry_at_msec = now_msec + SNAPSHOT_RETRY_INTERVAL_MSEC
+		elif now_msec >= _snapshot_retry_at_msec:
+			_retry_snapshot_sync(now_msec)
 		return
 	if state != STATE_PLAYING:
 		return
@@ -696,6 +717,10 @@ func _on_network_connected(role: String, player_id: String, network_session_id: 
 		session_id = network_session_id
 	_set_state(STATE_SYNCING)
 	_sync_started_msec = Time.get_ticks_msec()
+	_snapshot_retry_count = 0
+	# The shared client suppresses a second `connected` event on RTC reconnect,
+	# so the bot arms its own retry cadence instead of trusting that message.
+	_snapshot_retry_at_msec = _sync_started_msec + SNAPSHOT_RETRY_INTERVAL_MSEC
 	sync_started.emit(session_id)
 
 
@@ -2364,6 +2389,48 @@ func _prepare_snapshot(payload: Dictionary) -> void:
 		_snapshot_expected_chunks = total
 		_snapshot_chunks.clear()
 		_snapshot_chunks.resize(total)
+		# A genuinely new transfer resets the missing-chunk retry budget. A
+		# repeated packet for the same transfer never discards collected chunks.
+		_snapshot_retry_count = 0
+		_snapshot_retry_at_msec = Time.get_ticks_msec() + SNAPSHOT_RETRY_INTERVAL_MSEC
+
+
+func _send_snapshot_request() -> void:
+	if network_client == null or not network_client.has_method("send_command"):
+		return
+	network_client.call("send_command", "snapshot_request", {})
+
+
+func _retry_snapshot_sync(now_msec: int) -> void:
+	_snapshot_retry_at_msec = now_msec + SNAPSHOT_RETRY_INTERVAL_MSEC
+	if network_client == null or not network_client.has_method("send_command"):
+		return
+	if _snapshot_expected_chunks <= 0:
+		# No transfer started; the initial request was likely dropped while the
+		# P2P data channel was still negotiating. Ask again in full.
+		_send_snapshot_request()
+		_record_event("snapshot_request_retried", {"attempt": _snapshot_retry_count})
+		return
+	var missing: Array[int] = []
+	for index in _snapshot_chunks.size():
+		if _snapshot_chunks[index].is_empty():
+			missing.append(index)
+	_snapshot_retry_count += 1
+	if _snapshot_retry_count >= SNAPSHOT_RETRY_LIMIT:
+		# Bounded restart: drop the stalled transfer and request a fresh one so
+		# a lost snapshot_start/complete packet cannot strand the bot.
+		_snapshot_transfer_id = ""
+		_snapshot_expected_chunks = 0
+		_snapshot_chunks.clear()
+		_snapshot_retry_count = 0
+		_send_snapshot_request()
+		_record_event("snapshot_restart", {"missing": missing.size()})
+		return
+	network_client.call("send_command", "snapshot_retry", {
+		"transfer_id": _snapshot_transfer_id,
+		"missing": missing,
+	})
+	_record_event("snapshot_missing_retry", {"missing": missing.size(), "attempt": _snapshot_retry_count})
 
 
 func _apply_snapshot_if_complete() -> void:
@@ -2509,6 +2576,8 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_snapshot_transfer_id = ""
 	_snapshot_expected_chunks = 0
 	_snapshot_chunks.clear()
+	_snapshot_retry_at_msec = -1
+	_snapshot_retry_count = 0
 	_update_human_count()
 	_set_state(STATE_PLAYING)
 	_maybe_strip_progression_gear()
