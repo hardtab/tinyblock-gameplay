@@ -47,6 +47,13 @@ static func next_step(observation: Dictionary, explicit_route_target: Dictionary
 			return _place_step(next_x, origin.y - 1, origin, target, observation, terrain)
 		if _solid(terrain, next_x, origin.y - 2):
 			return _mine_step(next_x, origin.y - 2, origin, target, observation)
+		# The step-up cell is solid and its headroom is already clear, yet a live
+		# journal shows this lateral solid blocking the bot's only candidate
+		# jump. A block with no floor beneath it cannot be climbed as a step, so
+		# treat it as a corridor obstacle and clear it through the same
+		# protected/return-support/harvest-tier gates as any other route mine.
+		if not _solid(terrain, next_x, origin.y):
+			return _mine_step(next_x, origin.y - 1, origin, target, observation)
 		return {}
 	# Clear the two-cell player corridor before trying to walk through a wall.
 	for head_y in [origin.y - 1, origin.y - 2]:
@@ -104,7 +111,7 @@ static func _target_tile(observation: Dictionary, origin: Vector2i, explicit_rou
 
 
 static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, observation: Dictionary) -> Dictionary:
-	if not _has_equipped_mining_tool(observation):
+	if not _can_clear_route_block(observation, x, y):
 		return {}
 	if _is_protected_build_cell(observation, x, y):
 		# Never excavate a cell the session deliberately constructed.  Without this
@@ -256,6 +263,58 @@ static func _has_equipped_mining_tool(observation: Dictionary) -> bool:
 	return equipped in MINING_TOOL_NAMES
 
 
+static func _can_clear_route_block(observation: Dictionary, x: int, y: int) -> bool:
+	var tile := _terrain_tile(observation, x, y)
+	if tile.is_empty() or not tile.has("harvest_tier"):
+		# No authoritative harvest tier is known for this cell, so keep the
+		# previous conservative behaviour and require a mining tool.
+		return _has_equipped_mining_tool(observation)
+	var required_tier := int(tile.get("harvest_tier", 0))
+	if required_tier <= 0:
+		# Authoritative tier-0 blocks (dirt, sand, wood, leaves, and other
+		# starter material) are harvestable bare-handed: the host's
+		# WorldSim.can_harvest_block only requires active_harvest_tier >= 0.
+		# This lets the bot clear its own enclosed origin without first
+		# crafting a pickaxe.
+		return true
+	return _equipped_mining_tool_tier(observation) >= required_tier
+
+
+static func _equipped_mining_tool_tier(observation: Dictionary) -> int:
+	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
+	var hand := str(equipment.get("hand", ""))
+	if hand.is_empty() or not hand in MINING_TOOL_NAMES:
+		return 0
+	var entry := _block_entry(hand)
+	var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
+	if str(definition.get("category", "")) != "mining_tool":
+		return 0
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	return int(effects.get("harvest_tier", 0))
+
+
+static func _terrain_tile(observation: Dictionary, x: int, y: int) -> Dictionary:
+	var raw_tiles: Variant = observation.get("terrain_tiles", [])
+	if not raw_tiles is Array:
+		return {}
+	for raw_tile in raw_tiles:
+		if raw_tile is Dictionary and int((raw_tile as Dictionary).get("x", 0)) == x and int((raw_tile as Dictionary).get("y", 0)) == y:
+			return raw_tile as Dictionary
+	return {}
+
+
+static func _block_entry(block_name: String) -> Dictionary:
+	var loop := Engine.get_main_loop()
+	if loop == null or not loop.has_method("get_root"):
+		return {}
+	var root: Node = loop.get_root()
+	var defs := root.get_node_or_null("BlockDefs")
+	if defs == null or not defs.get("BLOCKS") is Dictionary:
+		return {}
+	var blocks: Dictionary = defs.get("BLOCKS")
+	return blocks.get(block_name, {}) if blocks.get(block_name, {}) is Dictionary else {}
+
+
 static func _support_block(observation: Dictionary) -> String:
 	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
 	for name in SUPPORT_BLOCK_NAMES:
@@ -316,7 +375,9 @@ static func _solid(terrain: Dictionary, x: int, y: int) -> bool:
 
 static func _interesting_resource(name: String) -> bool:
 	var normalized := name.to_lower()
-	for token in ["ore", "crystal", "gem", "coal", "copper", "iron", "gold", "diamond", "obsidian", "aegisite", "stone", "flint"]:
+	# Wood/leaves are included so the starter-tooling fallback has a bounded,
+	# useful route target when the bot is enclosed and needs its first tool.
+	for token in ["ore", "crystal", "gem", "coal", "copper", "iron", "gold", "diamond", "obsidian", "aegisite", "stone", "flint", "wood", "log", "leaves"]:
 		if normalized.contains(token):
 			return true
 	return false

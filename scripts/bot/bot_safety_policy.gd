@@ -302,8 +302,6 @@ func _valid_dig_route_target(decision: Dictionary, observation: Dictionary) -> b
 		return false
 	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
 	var hand := str(equipment.get("hand", ""))
-	if not (hand.contains("pickaxe") or hand == "stone_axe"):
-		return false
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var origin_x := floori((float(self_state.get("x", 0.0)) + 10.0) / 32.0)
 	var origin_y := floori((float(self_state.get("y", 0.0)) + 28.0) / 32.0)
@@ -321,11 +319,24 @@ func _valid_dig_route_target(decision: Dictionary, observation: Dictionary) -> b
 		var block_name := str(tile.get("block_name", ""))
 		if block_name.is_empty() or block_name in ["air", "core.air"]:
 			return false
-		var required_tier := int(tile.get("harvest_tier", 0))
-		if required_tier > 0 and _tool_harvest_tier(hand) < required_tier:
-			return false
-		return true
+		return _hand_can_clear_tile(hand, tile)
 	return false
+
+
+func _hand_can_clear_tile(hand: String, tile: Dictionary) -> bool:
+	# An authoritative harvest_tier 0 target is harvestable bare-handed: the
+	# host's WorldSim.can_harvest_block only requires active_harvest_tier >= 0,
+	# so clearing dirt, wood, leaves, and similar blockers needs no tool.
+	if tile.has("harvest_tier") and int(tile.get("harvest_tier", 0)) <= 0:
+		return true
+	# Higher (or unknown) tiers still require a mining tool, and a tool that is
+	# too low for the block's tier does not qualify.
+	if not (hand.contains("pickaxe") or hand == "stone_axe"):
+		return false
+	var required_tier := int(tile.get("harvest_tier", 0))
+	if required_tier > 0 and _tool_harvest_tier(hand) < required_tier:
+		return false
+	return true
 
 
 func _descent_support_is_protected(observation: Dictionary, target: Dictionary) -> bool:
