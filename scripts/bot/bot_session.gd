@@ -3700,11 +3700,20 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 			# legitimate support, so they never trigger this.
 			var host_support_reseat := false
 			if entry.has("x") and entry.has("y") and (_jump_active or _climb_active):
-				var local_support_verdict := _authoritative_support_verdict(_support_tile_for_position(local_position))
-				var host_support_verdict := _authoritative_support_verdict(_support_tile_for_position(host_position))
+				var local_support_tile := _support_tile_for_position(local_position)
+				var host_support_tile := _support_tile_for_position(host_position)
+				var local_support_verdict := _authoritative_support_verdict(local_support_tile)
+				var host_support_verdict := _authoritative_support_verdict(host_support_tile)
+				var support_tile_separation := maxi(
+					absi(local_support_tile.x - host_support_tile.x),
+					absi(local_support_tile.y - host_support_tile.y),
+				)
 				host_support_reseat = (
 					local_support_verdict == "unsupported"
 					and host_support_verdict == "supported"
+					# A one-cell support-row change is a normal jump/step transition;
+					# only reseat when the predictor is more than one cell off.
+					and support_tile_separation > 1
 				)
 			# When terrain proves the local predicted support is absent and the host
 			# pose is on support, this is a stale local arc, not evidence that the
