@@ -150,10 +150,20 @@ func _discover() -> void:
 		return
 	_record_successful_listing()
 	var body: Dictionary = (response as Dictionary).get("body", {}) if (response as Dictionary).get("body", {}) is Dictionary else {}
-	var candidates := filter_public_sessions(body.get("sessions", []), protocol_version, Time.get_ticks_msec(), recently_visited)
+	var raw_sessions: Variant = body.get("sessions", [])
+	var sessions: Array = raw_sessions as Array if raw_sessions is Array else []
+	var discovery_now := Time.get_ticks_msec()
+	var candidates := filter_public_sessions(sessions, protocol_version, discovery_now, recently_visited)
 	if not allow_world_ids.is_empty():
 		candidates = candidates.filter(func(entry: Dictionary): return str(entry.get("world_id", "")) in allow_world_ids)
 	if candidates.is_empty():
+		_log("discovery_filter_summary", session_filter_summary(
+			sessions,
+			protocol_version,
+			discovery_now,
+			recently_visited,
+			allow_world_ids,
+		))
 		_schedule_retry("no_eligible_world")
 		return
 	var selected := pick_session(candidates, _rng.randf())
@@ -306,51 +316,95 @@ func filter_public_sessions(sessions: Array, expected_protocol_version: int = DE
 	for raw_session in sessions:
 		if not raw_session is Dictionary:
 			continue
-		var entry := (raw_session as Dictionary).duplicate(true)
-		var session_id := str(entry.get("session_id", ""))
-		var world_id := str(entry.get("world_id", ""))
-		var access_mode := str(entry.get("access_mode", "public")).to_lower()
-		var world_mode := str(entry.get("world_mode", "")).to_lower()
-		var player_count := _display_player_count(entry)
-		var max_players := int(entry.get("max_players", 0))
-		var blacklist_until := int(entry.get("blacklisted_until_msec", blacklisted_sessions.get(session_id, 0)))
-		var recent_at := int(recently_visited_sessions.get(session_id, recently_visited_sessions.get(world_id, 0)))
-		var current_now := now_msec if now_msec > 0 else Time.get_ticks_msec()
-		if blacklist_until > 0 and blacklist_until <= current_now and blacklisted_sessions.has(session_id):
-			blacklisted_sessions.erase(session_id)
-		var official := bool(entry.get("official", entry.get("is_official", false)))
-		var dedicated_server := bool(entry.get("dedicated_server", false))
-		if session_id.is_empty() or access_mode != "public":
-			continue
-		if permanently_blocked_worlds.has(world_id):
-			continue
-		# Managed community worlds are marked `official` by the backend even
-		# though they are intended to be visible in the community pool.  Keep
-		# first-party official worlds out, but allow those known dedicated worlds.
-		var managed_community := dedicated_server and world_id in MANAGED_COMMUNITY_WORLD_IDS
-		if official and not managed_community:
-			continue
-		# P2P worlds are host-authoritative.  Only join when the listing carries
-		# the host/creator version proving it understands the current protocol;
-		# an absent version is deliberately rejected rather than guessed.
-		if not dedicated_server and not _p2p_host_supported(entry):
-			continue
-		var minimum_client_version := str(entry.get("minimum_client_version", entry.get("min_client_version", "")))
-		if not minimum_client_version.is_empty() and not Contract.client_version_at_least(
-			minimum_client_version,
-			Contract.MIN_SUPPORTED_CLIENT_VERSION,
-		):
-			continue
-		var entry_protocol := int(entry.get("protocol_version", -1))
-		var duel_protocol_allowed := world_mode == "duel" and expected_protocol_version == DEFAULT_PROTOCOL_VERSION and entry_protocol == 3
-		if entry_protocol != expected_protocol_version and not duel_protocol_allowed:
-			continue
-		if player_count < 1 or (max_players > 0 and player_count >= max_players):
-			continue
-		if blacklist_until > current_now or (recent_at > 0 and current_now - recent_at < int(session_cooldown_seconds * 1000.0)):
-			continue
-		result.append(entry)
+		var reason := _session_ineligibility_reason(raw_session as Dictionary, expected_protocol_version, now_msec, recently_visited_sessions)
+		if reason.is_empty():
+			result.append((raw_session as Dictionary).duplicate(true))
 	return result
+
+
+## Aggregate-only diagnostics for an empty discovery result. Reason names and
+## counts are safe to send to the server journal; no session/world/player IDs,
+## display names, or version strings are included.
+func session_filter_summary(
+	sessions: Array,
+	expected_protocol_version: int = DEFAULT_PROTOCOL_VERSION,
+	now_msec: int = 0,
+	recently_visited_sessions: Dictionary = {},
+	allowed_world_ids: PackedStringArray = PackedStringArray(),
+) -> Dictionary:
+	var counts: Dictionary = {}
+	var eligible_count := 0
+	for raw_session in sessions:
+		var reason := "invalid_entry"
+		if raw_session is Dictionary:
+			var entry := raw_session as Dictionary
+			reason = _session_ineligibility_reason(entry, expected_protocol_version, now_msec, recently_visited_sessions)
+			if reason.is_empty() and not allowed_world_ids.is_empty() and str(entry.get("world_id", "")) not in allowed_world_ids:
+				reason = "not_allowlisted"
+		if reason.is_empty():
+			eligible_count += 1
+		else:
+			counts[reason] = int(counts.get(reason, 0)) + 1
+	return {
+		"listed_count": sessions.size(),
+		"eligible_count": eligible_count,
+		"rejected_by_reason": counts,
+		"allowlist_active": not allowed_world_ids.is_empty(),
+	}
+
+
+func _session_ineligibility_reason(
+	entry: Dictionary,
+	expected_protocol_version: int,
+	now_msec: int,
+	recently_visited_sessions: Dictionary,
+) -> String:
+	var session_id := str(entry.get("session_id", ""))
+	var world_id := str(entry.get("world_id", ""))
+	var current_now := now_msec if now_msec > 0 else Time.get_ticks_msec()
+	var blacklist_until := int(entry.get("blacklisted_until_msec", blacklisted_sessions.get(session_id, 0)))
+	if blacklist_until > 0 and blacklist_until <= current_now and blacklisted_sessions.has(session_id):
+		blacklisted_sessions.erase(session_id)
+	if session_id.is_empty():
+		return "missing_session_id"
+	if str(entry.get("access_mode", "public")).to_lower() != "public":
+		return "not_public"
+	if permanently_blocked_worlds.has(world_id):
+		return "permanently_blocked"
+	var official := bool(entry.get("official", entry.get("is_official", false)))
+	var dedicated_server := bool(entry.get("dedicated_server", false))
+	var managed_community := dedicated_server and world_id in MANAGED_COMMUNITY_WORLD_IDS
+	if official and not managed_community:
+		return "official_world"
+	# P2P worlds are host-authoritative. Only join when the listing carries the
+	# host/creator version proving compatibility; do not guess if it is absent.
+	if not dedicated_server:
+		var host_version := _session_host_client_version(entry)
+		if host_version.strip_edges().is_empty():
+			return "p2p_host_version_missing"
+		if not Contract.client_version_at_least(host_version, Contract.MIN_SUPPORTED_CLIENT_VERSION):
+			return "p2p_host_version_unsupported"
+	var minimum_client_version := str(entry.get("minimum_client_version", entry.get("min_client_version", "")))
+	if not minimum_client_version.is_empty() and not Contract.client_version_at_least(
+		minimum_client_version,
+		Contract.MIN_SUPPORTED_CLIENT_VERSION,
+	):
+		return "minimum_client_version_unsupported"
+	var world_mode := str(entry.get("world_mode", "")).to_lower()
+	var entry_protocol := int(entry.get("protocol_version", -1))
+	var duel_protocol_allowed := world_mode == "duel" and expected_protocol_version == DEFAULT_PROTOCOL_VERSION and entry_protocol == 3
+	if entry_protocol != expected_protocol_version and not duel_protocol_allowed:
+		return "protocol_mismatch"
+	var player_count := _display_player_count(entry)
+	var max_players := int(entry.get("max_players", 0))
+	if player_count < 1:
+		return "no_players"
+	if max_players > 0 and player_count >= max_players:
+		return "world_full"
+	var recent_at := int(recently_visited_sessions.get(session_id, recently_visited_sessions.get(world_id, 0)))
+	if blacklist_until > current_now or (recent_at > 0 and current_now - recent_at < int(session_cooldown_seconds * 1000.0)):
+		return "cooldown"
+	return ""
 
 
 func _p2p_host_supported(entry: Dictionary) -> bool:

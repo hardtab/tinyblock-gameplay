@@ -846,6 +846,24 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		_advance_local_physics(self_state, delta, false)
 		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "edge_guard"}
+	if bool(route_step.get("unreachable", false)) and player_target and not _is_pvp_world():
+		# The physics graph is intentionally bounded. When the player is farther
+		# away than that horizon, keep pursuing through a known, supported tile
+		# that makes measurable progress instead of falling back to a speculative
+		# straight-line jump toward the player's full-distance position.
+		var pursuit_waypoint := _safe_pursuit_waypoint(origin, destination)
+		if pursuit_waypoint.is_empty():
+			_set_desired_input(false, false, false)
+			_advance_local_physics(self_state, delta, false)
+			_world_snapshot["self"] = self_state
+			return {"done": true, "reason": "pursuit_no_safe_waypoint"}
+		destination = pursuit_waypoint.get("position", destination)
+		route_step = _physics_route_step(origin, destination, target_id)
+		if bool(route_step.get("unreachable", false)):
+			_set_desired_input(false, false, false)
+			_advance_local_physics(self_state, delta, false)
+			_world_snapshot["self"] = self_state
+			return {"done": true, "reason": "pursuit_waypoint_unreachable"}
 	# Exploration targets deliberately point into newly revealed/unknown space;
 	# refuse them unless the cached terrain proves a route. For ordinary movement,
 	# keep the collision/edge guards below in charge so a failed route search around
@@ -1078,6 +1096,43 @@ func _physics_route_step(origin: Vector2, destination: Vector2, target_id: Strin
 			}
 		_physics_route.pop_front()
 	return {}
+
+
+func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2) -> Dictionary:
+	if _terrain_tiles.is_empty():
+		return {}
+	var origin_tile := _support_tile_for_position(origin)
+	var reachable := _physics_reachable_support_tiles(origin_tile)
+	if not reachable.has(origin_tile):
+		return {}
+	var origin_distance := origin.distance_to(destination)
+	var best_distance := origin_distance
+	var best_position := Vector2.ZERO
+	var found_waypoint := false
+	for raw_tile in reachable.keys():
+		if typeof(raw_tile) != TYPE_VECTOR2I:
+			continue
+		var tile: Vector2i = raw_tile
+		if tile == origin_tile or not _terrain_standable_tile(tile):
+			continue
+		var position := _world_position_for_support_tile(tile)
+		var remaining_distance := position.distance_to(destination)
+		# Ignore numerical/noise-sized improvements; a waypoint must advance the
+		# pursuit by at least a quarter block so replanning cannot oscillate in place.
+		if remaining_distance + float(BlockDefs.TILE) * 0.25 >= origin_distance:
+			continue
+		if remaining_distance >= best_distance:
+			continue
+		best_distance = remaining_distance
+		best_position = position
+		found_waypoint = true
+	if not found_waypoint:
+		return {}
+	return {
+		"position": best_position,
+		"support_tile": _support_tile_for_position(best_position),
+		"remaining_distance": best_distance,
+	}
 
 
 func _host_rejected_transition_blocks_origin(origin_tile: Vector2i) -> bool:
