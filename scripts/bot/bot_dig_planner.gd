@@ -100,6 +100,11 @@ static func _target_tile(observation: Dictionary, origin: Vector2i) -> Vector2i:
 
 
 static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, observation: Dictionary) -> Dictionary:
+	if _is_protected_build_cell(observation, x, y):
+		# Never excavate a cell the session deliberately constructed.  Without this
+		# guard a placed step (for example a workbench) reads back as a solid
+		# blocker and the planner places then mines the same tile forever.
+		return {}
 	if _is_descent_return_support(observation, x, y):
 		# The generic obstacle planner must honor the same return-route invariant
 		# as the descent planner. Otherwise safety rejects this identical MINE
@@ -124,6 +129,28 @@ static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, obser
 		"commit_for_ms": 1200,
 		"confidence": 0.74,
 	}
+
+
+static func _is_protected_build_cell(observation: Dictionary, x: int, y: int) -> bool:
+	var key := "%d:%d" % [x, y]
+	var protected_cells: Variant = observation.get("protected_build_cells", {})
+	if protected_cells is Dictionary and (protected_cells as Dictionary).has(key):
+		return true
+	var raw_history: Variant = observation.get("action_history", [])
+	if not raw_history is Array:
+		return false
+	for raw_entry in raw_history:
+		if not raw_entry is Dictionary:
+			continue
+		var entry := raw_entry as Dictionary
+		if str(entry.get("action", "")) != Contract.ACTION_PLACE:
+			continue
+		var parts := str(entry.get("target_id", "")).split(":")
+		if parts.size() < 3 or not parts[-1].is_valid_int() or not parts[-2].is_valid_int():
+			continue
+		if int(parts[-2]) == x and int(parts[-1]) == y:
+			return true
+	return false
 
 
 static func _is_descent_return_support(observation: Dictionary, x: int, y: int) -> bool:

@@ -74,7 +74,7 @@ func observe_initial_snapshot(self_state: Dictionary, terrain: Dictionary, cover
 	if not _initial_snapshot_complete or not _mode_is_allowed():
 		return false
 	var support := _support_for_position(self_state)
-	if not bool(self_state.get("on_ground", false)) or not _safe_standable(support, terrain, coverage, support):
+	if not bool(self_state.get("on_ground", false)) or not _standable_root_support(support, terrain, coverage, support):
 		return false
 	if _root_support == _invalid_tile():
 		_root_support = support
@@ -89,7 +89,7 @@ func observe_authoritative_position(self_state: Dictionary, terrain: Dictionary,
 	if not bool(self_state.get("on_ground", false)):
 		return false
 	var support := _support_for_position(self_state)
-	if not _safe_standable(support, terrain, coverage, support):
+	if not _standable_root_support(support, terrain, coverage, support):
 		return false
 	if _root_support == _invalid_tile() or _support_path.is_empty():
 		# The initial world snapshot can arrive before the bot has a grounded
@@ -137,7 +137,7 @@ func plan_next(self_state: Dictionary, terrain: Dictionary, coverage: Dictionary
 		result["reason"] = "current_support_not_authoritatively_on_return_path"
 		_last_plan = result.duplicate(true)
 		return result
-	if not bool(self_state.get("on_ground", false)) or not _safe_standable(current, terrain, coverage, current):
+	if not bool(self_state.get("on_ground", false)) or not _standable_root_support(current, terrain, coverage, current):
 		result["reason"] = "current_support_unsafe_or_airborne"
 		_last_plan = result.duplicate(true)
 		return result
@@ -307,8 +307,12 @@ func _safe_standable(tile: Vector2i, terrain: Dictionary, coverage: Dictionary, 
 	var support_entry := _tile_entry(tile, terrain)
 	if bool(support_entry.get("falls_when_unsupported", false)):
 		return false
+	return _body_cells_known_and_clear(tile, terrain, coverage, reference, projected_air)
+
+
+func _body_cells_known_and_clear(support: Vector2i, terrain: Dictionary, coverage: Dictionary, reference: Vector2i, projected_air: Dictionary = {}) -> bool:
 	for offset_y in [-1, -2]:
-		var body_cell := tile + Vector2i(0, offset_y)
+		var body_cell := support + Vector2i(0, offset_y)
 		if not _tile_is_known(body_cell, coverage, reference):
 			return false
 		if projected_air.has(body_cell):
@@ -316,6 +320,48 @@ func _safe_standable(tile: Vector2i, terrain: Dictionary, coverage: Dictionary, 
 		if _tile_is_solid(body_cell, terrain) or not _tile_is_safe(body_cell, terrain):
 			return false
 	return true
+
+
+## Host capability for the configured One Block regenerating source. The session
+## supplies this only when the host snapshot confirms the source regenerates on
+## mine and preserves its own support; absent metadata means "unconfirmed" and is
+## never treated as a standable support.
+func _source_capability(coverage: Dictionary) -> Dictionary:
+	var capability: Dictionary = coverage.get("one_block_source_capability", {}) if coverage.get("one_block_source_capability", {}) is Dictionary else {}
+	var regenerates: Variant = capability.get("regenerates_on_mine", coverage.get("one_block_source_regenerates_on_mine", false))
+	var preserves: Variant = capability.get("preserves_support_on_mine", coverage.get("one_block_source_preserves_support_on_mine", false))
+	return {
+		"regenerates_on_mine": bool(regenerates),
+		"preserves_support_on_mine": bool(preserves),
+	}
+
+
+func _is_support_preserving_source(tile: Vector2i, coverage: Dictionary) -> bool:
+	if _world_mode != "one_block":
+		return false
+	var source := _one_block_source_for(coverage)
+	if source == _invalid_tile() or tile != source:
+		return false
+	var capability := _source_capability(coverage)
+	return (
+		bool(capability.get("regenerates_on_mine", false))
+		and bool(capability.get("preserves_support_on_mine", false))
+	)
+
+
+## A host-confirmed One Block source keeps the avatar supported while the block is
+## replicated air, so it stays a valid grounded root/current support even when it
+## is temporarily absent from the local terrain map. It is never a descent
+## candidate or mine target: _safe_support_candidate still rejects the source tile
+## and _is_regenerating_source still rejects it as a clear cell.
+func _source_root_standable(tile: Vector2i, terrain: Dictionary, coverage: Dictionary, reference: Vector2i) -> bool:
+	if not _is_support_preserving_source(tile, coverage):
+		return false
+	return _body_cells_known_and_clear(tile, terrain, coverage, reference, {})
+
+
+func _standable_root_support(tile: Vector2i, terrain: Dictionary, coverage: Dictionary, reference: Vector2i) -> bool:
+	return _safe_standable(tile, terrain, coverage, reference) or _source_root_standable(tile, terrain, coverage, reference)
 
 
 func _safe_support_tile(tile: Vector2i, terrain: Dictionary, coverage: Dictionary, reference: Vector2i, projected_air: Dictionary = {}) -> bool:
@@ -400,7 +446,13 @@ func _physics_route(origin: Vector2i, destination: Vector2i, terrain: Dictionary
 	return Navigator.physics_route(
 		origin,
 		destination,
-		func(tile: Vector2i) -> bool: return _safe_standable(tile, terrain, coverage, origin, projected_air),
+		func(tile: Vector2i) -> bool:
+			if _safe_standable(tile, terrain, coverage, origin, projected_air):
+				return true
+			# The One Block source may be transiently air locally while the host
+			# still supports the avatar on it. Allow it as the route destination
+			# (the descent root) but never as an intermediate waypoint.
+			return tile == destination and _source_root_standable(tile, terrain, coverage, origin),
 		Callable(),
 		MAX_ROUTE_NODES,
 	)

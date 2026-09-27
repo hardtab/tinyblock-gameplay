@@ -3918,7 +3918,7 @@ func _descent_coverage() -> Dictionary:
 		for raw_chunk_x in raw_chunks:
 			generated_chunks[str(raw_chunk_x)] = true
 	var one_block_source := _descent_one_block_source()
-	return {
+	var coverage := {
 		"mode": mode,
 		"complete": _descent_snapshot_complete,
 		"chunk_width": 16,
@@ -3926,6 +3926,16 @@ func _descent_coverage() -> Dictionary:
 		"observed_cells": _terrain_observed_cells,
 		"one_block_source": [one_block_source.x, one_block_source.y] if one_block_source.x != 2147483647 else [],
 	}
+	# Only the host-confirmed regenerating source may reseed a descent root while
+	# the block is transiently air locally. Absent confirmation leaves the planner
+	# without capability metadata, so it will not treat the source as standable.
+	var regenerating_source := _regenerating_block_observation()
+	if not regenerating_source.is_empty():
+		coverage["one_block_source_capability"] = {
+			"regenerates_on_mine": bool(regenerating_source.get("regenerates_on_mine", false)),
+			"preserves_support_on_mine": bool(regenerating_source.get("preserves_support_on_mine", false)),
+		}
+	return coverage
 
 
 func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
