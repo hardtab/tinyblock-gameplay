@@ -829,11 +829,14 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		var body_center := origin + Vector2(float(self_state.get("w", 20.0)) * 0.5, 0.0)
 		var away_center := Navigator.step_away_from(body_center, Vector2(flee_target_x, body_center.y), 120.0)
 		destination = away_center - Vector2(float(self_state.get("w", 20.0)) * 0.5, 0.0)
-	elif action == Contract.ACTION_MOVE_TO and _is_pvp_world():
-		# Preserve the enemy's vertical position in a duel. The previous generic
-		# movement branch flattened every destination to the bot's current Y, so a
-		# player who jumped onto a block looked horizontally reachable and the bot
-		# waited instead of starting a jump.
+	elif action == Contract.ACTION_MOVE_TO:
+		# Explicit MOVE_TO targets already carry a validated standing Y: duel
+		# opponents who jumped onto a block, plus exploration/biome waypoints that
+		# sit on a supported step at another elevation. Flattening them to the
+		# bot's current Y turned a supported target into a *different*, unsupported
+		# tile and stalled the route planner with route_unreachable instead of
+		# climbing the step. Only the non-position-directed actions keep the
+		# horizontal flattening below.
 		destination = target
 	else:
 		destination.y = origin.y
