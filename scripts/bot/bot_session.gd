@@ -5282,7 +5282,7 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "timeout"] and target_id.begins_with("tile:"):
 		var retry_delay := UNSAFE_ROUTE_RETRY_BLOCK_MSEC if reason in ["unsafe_jump_route", "route_unreachable"] else ACTION_RETRY_BLOCK_MSEC
 		_blocked_action_targets[target_id] = Time.get_ticks_msec() + retry_delay
-	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "timeout", "mine_ack_timeout"]:
+	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable", "timeout", "mine_ack_timeout"]:
 		_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
 		_achievement_goal_note_failure(decision, reason, Time.get_ticks_msec())
 	_record_action_history("finished", decision, reason)
@@ -6148,7 +6148,22 @@ func _stone_age_note_failure(decision: Dictionary, reason: String, now_msec: int
 	var decision_goal := str(decision.get("stone_age_goal_id", _stone_age_goal_name()))
 	if decision_goal != _stone_age_goal_name():
 		return
-	_stone_age_fail_pending(str(decision.get("stone_age_stage", "")), reason, now_msec)
+	var stage := str(decision.get("stone_age_stage", ""))
+	if stage.is_empty():
+		return
+	var pending: Dictionary = _stone_age_goal_state.get("pending", {}) if _stone_age_goal_state.get("pending", {}) is Dictionary else {}
+	if pending.is_empty() and reason in ["pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable"] and str(decision.get("action", "")) in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_MOVE_TO]:
+		# Movement is not a completed Stone Age step by itself, so we do not keep
+		# it pending until an inventory snapshot. But an executor-level route
+		# failure is a definitive failed attempt; put a transient pending record
+		# through the same bounded retry/abandon path as a rejected craft or mine.
+		_stone_age_goal_state["pending"] = {
+			"stage": stage,
+			"action": str(decision.get("action", "")),
+			"target_id": str(decision.get("target_id", "")),
+			"started_at_msec": now_msec,
+		}
+	_stone_age_fail_pending(stage, reason, now_msec)
 
 
 func _stone_age_fail_pending(stage: String, reason: String, now_msec: int) -> void:
