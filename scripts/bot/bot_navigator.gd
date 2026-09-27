@@ -130,16 +130,17 @@ static func _physics_candidates(current: Vector2i, climbable: Callable, allow_ve
 
 ## Bounded reachability set over the same support-tile graph as physics_route.
 ## Every key is a support tile physics_route can reach from `origin`; `origin`
-## is included whenever it is passable.  Because this shares the candidate
-## neighbours, passable/climbable rules and node cap with physics_route, a key's
-## presence is equivalent to a non-empty physics_route to that tile, and a tile
-## being absent means no route within the bound exists.
+## is included whenever it is passable. Because this shares the candidate
+## neighbours, transition rules, first-edge guard and node cap with
+## physics_route, a key's presence is equivalent to a non-empty physics_route
+## to that tile, and a tile being absent means no route within the bound exists.
 static func physics_reachable_tiles(
 	origin: Vector2i,
 	passable: Callable,
 	climbable: Callable = Callable(),
 	max_nodes: int = MAX_PHYSICS_ROUTE_NODES,
 	transition_allowed: Callable = Callable(),
+	first_step_allowed: Callable = Callable(),
 ) -> Dictionary:
 	var reachable: Dictionary = {}
 	if not passable.is_valid() or max_nodes <= 0 or not bool(passable.call(origin)):
@@ -154,7 +155,10 @@ static func physics_reachable_tiles(
 			var next: Vector2i = candidate["tile"]
 			if reachable.has(next) or not bool(passable.call(next)):
 				continue
-			if transition_allowed.is_valid() and not bool(transition_allowed.call(current, next, str(candidate["kind"]))):
+			var kind := str(candidate["kind"])
+			if transition_allowed.is_valid() and not bool(transition_allowed.call(current, next, kind)):
+				continue
+			if current == origin and first_step_allowed.is_valid() and not bool(first_step_allowed.call(current, next, kind)):
 				continue
 			reachable[next] = true
 			queue.append(next)
@@ -176,7 +180,7 @@ static func physics_reachable_first_steps(
 	var first_steps: Dictionary = {}
 	if not passable.is_valid() or max_nodes <= 0 or not bool(passable.call(origin)):
 		return first_steps
-	first_steps[origin] = {"tile": origin, "kind": "start"}
+	first_steps[origin] = {"tile": origin, "kind": "start", "steps": 0}
 	var queue: Array[Vector2i] = [origin]
 	var head := 0
 	while head < queue.size() and queue.size() <= max_nodes:
@@ -192,9 +196,11 @@ static func physics_reachable_first_steps(
 			if current == origin:
 				if first_step_allowed.is_valid() and not bool(first_step_allowed.call(current, next, kind)):
 					continue
-				first_steps[next] = {"tile": next, "kind": kind}
+				first_steps[next] = {"tile": next, "kind": kind, "steps": 1}
 			else:
-				first_steps[next] = first_steps[current]
+				var first_edge: Dictionary = (first_steps[current] as Dictionary).duplicate()
+				first_edge["steps"] = int(first_edge.get("steps", 0)) + 1
+				first_steps[next] = first_edge
 			queue.append(next)
 	return first_steps
 
