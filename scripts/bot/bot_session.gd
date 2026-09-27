@@ -2065,7 +2065,12 @@ func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> D
 		_jump_active = true
 		_jump_start_x = origin.x
 	var direction := signf(destination.x - origin.x)
-	_set_desired_input(direction < 0.0, direction > 0.0, true)
+	# Preserve the actual jump/hold controls, but release horizontal steering once
+	# the requested landing column is reached. Holding left/right for the entire
+	# arc overshoots one-block steps (especially step-ups) because jump airtime is
+	# much longer than the 32 px support-tile transition.
+	var landing_column_reached := absf(destination.x - origin.x) <= 8.0
+	_set_desired_input(not landing_column_reached and direction < 0.0, not landing_column_reached and direction > 0.0, true)
 	var was_airborne := not bool(self_state.get("on_ground", false))
 	_advance_local_physics(self_state, delta, true)
 	var landed := was_airborne and bool(self_state.get("on_ground", false))
@@ -2110,10 +2115,21 @@ func _jump_route_has_safe_landing(self_state: Dictionary, destination: Vector2) 
 		var substeps := maxi(1, int(ceil(maxf(absf(vx), absf(vy)) / 6.0)))
 		var substep := 1.0 / float(substeps)
 		for _substep_index in substeps:
-			var next_x := x + vx * substep
-			if not _local_collision(next_x, y, width, height).is_empty():
-				return false
-			x = next_x
+			var horizontal_direction := direction if absf(destination.x - x) > 8.0 else 0.0
+			var next_x := x + horizontal_direction * (BlockDefs.MOVE * float(fluid.get("move_speed_multiplier", 1.0))) * substep
+			var horizontal_hit := _local_collision(next_x, y, width, height)
+			if horizontal_hit.is_empty():
+				x = next_x
+			else:
+				# WorldSim resolves horizontal contact against the block face and then
+				# applies this substep's vertical motion. Rejecting the arc here instead
+				# made the body-width overlap at a one-block ledge look like a blocked
+				# jump, so flee/pathfinding discarded the only safe step-up route.
+				var block_x := float(horizontal_hit.get("bx", 0.0))
+				var resolved_x := block_x - width if horizontal_direction > 0.0 else block_x + float(BlockDefs.TILE)
+				if not _local_collision(resolved_x, y, width, height).is_empty():
+					return false
+				x = resolved_x
 			var next_y := y + vy * substep
 			var vertical_hit := _local_collision(x, next_y, width, height)
 			if vertical_hit.is_empty():

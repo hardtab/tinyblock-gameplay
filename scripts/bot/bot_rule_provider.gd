@@ -199,6 +199,15 @@ func decide(observation: Dictionary) -> Dictionary:
 			and not _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
 		):
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, creature_threat, 1200, 0.97)
+		if (
+			Contract.ACTION_MOVE_TO in legal
+			and (_is_melee_weapon(hand) or bow_ready)
+			and _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
+		):
+			# If the route solver cannot find a safe retreat, an armed bot should
+			# close to a usable attack rather than stand idle for the whole retry
+			# window. Weapon equip and ranged attacks above still take precedence.
+			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_MOVE_TO, creature_threat, 900, 0.9)
 		if Contract.ACTION_WAIT in legal:
 			# If the verified escape graph has no safe route, ordinary exploration can
 			# head straight back toward the same hostile creature. Hold position for a
