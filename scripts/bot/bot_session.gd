@@ -4260,6 +4260,9 @@ func _build_observation(now_msec: int) -> Dictionary:
 	# here for the decision provider: 0 outside their mode, world_mode disambiguates.
 	observation["one_block_mined"] = int(mode_progress.get("one_block_mined", 0))
 	observation["challenge_best_distance"] = int(mode_progress.get("challenge_best_distance", 0))
+	# Placement retries recorded on the host rejection/timeout paths are only
+	# useful to policy if the cooled tiles travel with the observation.
+	observation["blocked_action_targets"] = _active_blocked_action_tiles(now_msec)
 	observation["stone_age_goal"] = _stone_age_goal_state.duplicate(true)
 	observation["achievement_goal_states"] = _achievement_goal_states.duplicate(true)
 	observation["build_project_state"] = _build_project_state.duplicate(true)
@@ -4514,6 +4517,23 @@ func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
 			observed_resource["blocked_until_msec"] = blocked_until
 		filtered.append(observed_resource)
 	return filtered
+
+
+func _active_blocked_action_tiles(now_msec: int) -> Dictionary:
+	# Placement retries live in _blocked_action_targets as "tile:x:y" entries.
+	# Policy needs the surviving cooldowns so it can stop re-selecting a cell the
+	# host already rejected or that never produced a placement acknowledgement.
+	var tiles: Dictionary = {}
+	for raw_key in _blocked_action_targets.keys():
+		var key := str(raw_key)
+		if not key.begins_with("tile:"):
+			continue
+		var blocked_until := int(_blocked_action_targets[raw_key])
+		if blocked_until <= now_msec:
+			_blocked_action_targets.erase(raw_key)
+			continue
+		tiles[key] = blocked_until
+	return tiles
 
 
 func _physics_reachable_support_tiles(origin_tile: Vector2i, first_step_allowed: Callable = Callable()) -> Dictionary:

@@ -1453,8 +1453,19 @@ func _station_place_target(observation: Dictionary, station_name: String) -> Dic
 	var center_x := floori((float(self_state.get("x", 0.0)) + 10.0) / 32.0)
 	var support_y := floori((float(self_state.get("y", 0.0)) + 28.0) / 32.0)
 	var occupied := _terrain_occupied_map(observation)
+	var now_msec := int(observation.get("observed_at_msec", 0))
+	var blocked_tiles: Dictionary = (
+		observation.get("blocked_action_targets", {}) as Dictionary
+		if observation.get("blocked_action_targets", {}) is Dictionary
+		else {}
+	)
 	for offset_x in [1, -1, 2, -2, 3, -3]:
 		var target := Vector2i(center_x + offset_x, support_y - 1)
+		# A host rejection or a missed placement acknowledgement already cooled
+		# this exact cell. Re-picking it deterministically every tick produced an
+		# endless PLACE loop instead of trying another supported cell.
+		if int(blocked_tiles.get("tile:%d:%d" % [target.x, target.y], 0)) > now_msec:
+			continue
 		var target_name := str(occupied.get("%d:%d" % [target.x, target.y], ""))
 		var support_name := str(occupied.get("%d:%d" % [target.x, target.y + 1], ""))
 		if not target_name.is_empty() and target_name.to_lower() not in ["air", "core.air"]:
