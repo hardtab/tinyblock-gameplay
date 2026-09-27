@@ -1323,6 +1323,12 @@ func _emit_pursuit_route_unavailable(
 	if _last_pursuit_route_diagnostic_msec >= 0 and now_msec - _last_pursuit_route_diagnostic_msec < 30_000:
 		return
 	_last_pursuit_route_diagnostic_msec = now_msec
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	var self_position := Contract.target_position(self_state)
+	var self_width := float(self_state.get("w", 20.0))
+	var self_height := float(self_state.get("h", 28.0))
+	var feet_y := self_position.y + self_height
+	var host_support_row := floori((feet_y + 1.5) / float(BlockDefs.TILE))
 	var nearby_solids: Array[Dictionary] = []
 	for tile_y in range(origin_tile.y - 3, origin_tile.y + 4):
 		for tile_x in range(origin_tile.x - 3, origin_tile.x + 4):
@@ -1367,6 +1373,12 @@ func _emit_pursuit_route_unavailable(
 		"failure_kind": failure_kind,
 		"origin_tile": [origin_tile.x, origin_tile.y],
 		"origin_standable": _terrain_standable_tile(origin_tile),
+		"self_position": [self_position.x, self_position.y],
+		"self_on_ground": bool(self_state.get("on_ground", false)),
+		"self_velocity": [float(self_state.get("vx", 0.0)), float(self_state.get("vy", 0.0))],
+		"self_size": [self_width, self_height],
+		"host_support_row": host_support_row,
+		"feet_from_host_support_top": snappedf(feet_y - float(host_support_row * BlockDefs.TILE), 0.01),
 		"terrain_tile_count": _terrain_tiles.size(),
 		"observed_cell_count": _terrain_observed_cells.size(),
 		"known_chunk_count": _terrain_known_chunks.size(),
