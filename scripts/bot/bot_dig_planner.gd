@@ -25,12 +25,12 @@ const SUPPORT_BLOCK_NAMES: PackedStringArray = [
 ]
 
 
-static func next_step(observation: Dictionary) -> Dictionary:
+static func next_step(observation: Dictionary, explicit_route_target: Dictionary = {}) -> Dictionary:
 	var terrain := _terrain_map(observation.get("terrain_tiles", []))
-	if terrain.is_empty() or not _has_equipped_mining_tool(observation):
+	if terrain.is_empty():
 		return {}
 	var origin := _support_tile(observation.get("self", {}))
-	var target := _target_tile(observation, origin)
+	var target := _target_tile(observation, origin, explicit_route_target)
 	if target == _invalid_tile() or origin.distance_to(target) > MAX_TARGET_DISTANCE_TILES:
 		return {}
 	var horizontal_direction := signi(target.x - origin.x)
@@ -44,7 +44,7 @@ static func next_step(observation: Dictionary) -> Dictionary:
 		# A solid block one level above is a usable natural/constructed step. Do
 		# not mine the step we just placed; only clear a ceiling above it.
 		if not _solid(terrain, next_x, origin.y - 1):
-			return _place_step(next_x, origin.y - 1, origin, target, observation)
+			return _place_step(next_x, origin.y - 1, origin, target, observation, terrain)
 		if _solid(terrain, next_x, origin.y - 2):
 			return _mine_step(next_x, origin.y - 2, origin, target, observation)
 		return {}
@@ -56,13 +56,17 @@ static func next_step(observation: Dictionary) -> Dictionary:
 	# will see the new support block and continue one block at a time.
 	if not _solid(terrain, next_x, origin.y):
 		if _solid(terrain, next_x, origin.y + 1):
-			return _place_step(next_x, origin.y, origin, target, observation)
+			return _place_step(next_x, origin.y, origin, target, observation, terrain)
 		# An unsupported void is unsafe to bridge without a nearby lower support.
 		return {}
 	return {}
 
 
-static func _target_tile(observation: Dictionary, origin: Vector2i) -> Vector2i:
+static func _target_tile(observation: Dictionary, origin: Vector2i, explicit_route_target: Dictionary = {}) -> Vector2i:
+	if not explicit_route_target.is_empty():
+		# Explicit route targets are live player observations in pixel coordinates,
+		# unlike resource targets which may already contain tile coordinates.
+		return _support_tile(explicit_route_target)
 	var players: Array = observation.get("players", []) if observation.get("players", []) is Array else []
 	var preferred_distance := float(observation.get("preferred_player_distance", 84.0))
 	for raw_player in players:
@@ -100,6 +104,8 @@ static func _target_tile(observation: Dictionary, origin: Vector2i) -> Vector2i:
 
 
 static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, observation: Dictionary) -> Dictionary:
+	if not _has_equipped_mining_tool(observation):
+		return {}
 	if _is_protected_build_cell(observation, x, y):
 		# Never excavate a cell the session deliberately constructed.  Without this
 		# guard a placed step (for example a workbench) reads back as a solid
@@ -171,7 +177,22 @@ static func _is_descent_return_support(observation: Dictionary, x: int, y: int) 
 	return false
 
 
-static func _place_step(x: int, y: int, origin: Vector2i, target: Vector2i, observation: Dictionary) -> Dictionary:
+static func _place_step(
+	x: int,
+	y: int,
+	origin: Vector2i,
+	target: Vector2i,
+	observation: Dictionary,
+	terrain: Dictionary,
+) -> Dictionary:
+	if (
+		not _known_empty_cell(observation, terrain, x, y)
+		or not _solid(terrain, x, y + 1)
+		or not _known_empty_cell(observation, terrain, x, y - 1)
+		or not _known_empty_cell(observation, terrain, x, y - 2)
+		or _overlaps_any_player(Vector2i(x, y), observation)
+	):
+		return {}
 	var block := _support_block(observation)
 	if block.is_empty():
 		return {}
@@ -197,7 +218,36 @@ static func _place_step(x: int, y: int, origin: Vector2i, target: Vector2i, obse
 static func _upward_step(origin: Vector2i, x: int, terrain: Dictionary, observation: Dictionary) -> Dictionary:
 	if _solid(terrain, x, origin.y - 1):
 		return {}
-	return _place_step(x, origin.y - 1, origin, Vector2i(x, origin.y - 2), observation)
+	return _place_step(x, origin.y - 1, origin, Vector2i(x, origin.y - 2), observation, terrain)
+
+
+static func _known_empty_cell(observation: Dictionary, terrain: Dictionary, x: int, y: int) -> bool:
+	var key := "%d:%d" % [x, y]
+	var known_cells: Dictionary = observation.get("terrain_known_cells", {}) if observation.get("terrain_known_cells", {}) is Dictionary else {}
+	if not known_cells.has(key):
+		return false
+	var block_name := str(terrain.get(key, "")).to_lower()
+	return block_name.is_empty() or block_name in ["air", "core.air"]
+
+
+static func _overlaps_any_player(tile: Vector2i, observation: Dictionary) -> bool:
+	if _overlaps_player(tile, observation.get("self", {})):
+		return true
+	var players: Array = observation.get("players", []) if observation.get("players", []) is Array else []
+	for raw_player in players:
+		if raw_player is Dictionary and _overlaps_player(tile, raw_player):
+			return true
+	return false
+
+
+static func _overlaps_player(tile: Vector2i, raw_player: Variant) -> bool:
+	if not raw_player is Dictionary:
+		return false
+	var player := raw_player as Dictionary
+	var position := Contract.target_position(player)
+	var tile_rect := Rect2(float(tile.x * TILE), float(tile.y * TILE), float(TILE), float(TILE))
+	var player_rect := Rect2(position.x, position.y, float(player.get("w", 20.0)), float(player.get("h", 28.0)))
+	return tile_rect.grow(-1.0).intersects(player_rect.grow(-1.0))
 
 
 static func _has_equipped_mining_tool(observation: Dictionary) -> bool:

@@ -7,6 +7,7 @@ const BuildPlanner = preload("res://gameplay/scripts/bot/bot_build_planner.gd")
 const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 const RecipePlanner = preload("res://gameplay/scripts/bot/bot_recipe_planner.gd")
 const AchievementRegistry = preload("res://gameplay/scripts/bot/bot_achievement_registry.gd")
+const ROUTE_TILE := 32.0
 
 var _rng := RandomNumberGenerator.new()
 var _last_build_msec := -1
@@ -30,6 +31,7 @@ var _last_explore_outcome_key := ""
 var _last_follow_target_id := ""
 var _last_follow_route_outcome_key := ""
 var _follow_target_route_cooldown_until: Dictionary = {}
+var _pending_follow_route_recovery: Dictionary = {}
 ## A failed flee route must not pin survival policy to an impossible escape
 ## waypoint forever. This short tactical retry window still lets combat/equipment
 ## responses run and preserves pinned PvP/aggression targets.
@@ -59,6 +61,10 @@ const SOCIAL_FOLLOW_START_SLACK := 48.0
 const FOLLOW_ROUTE_FAILURE_COOLDOWN_MSEC := 30_000
 const FOLLOW_ROUTE_FAILURE_REASONS := [
 	"blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable",
+	"pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable",
+]
+const FOLLOW_ROUTE_RECOVERY_REASONS := [
+	"blocked_obstacle", "unsafe_jump_route", "route_unreachable",
 	"pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable",
 ]
 const FLEE_ROUTE_FAILURE_COOLDOWN_MSEC := 5_000
@@ -139,6 +145,7 @@ func reset() -> void:
 	_last_follow_target_id = ""
 	_last_follow_route_outcome_key = ""
 	_follow_target_route_cooldown_until.clear()
+	_pending_follow_route_recovery.clear()
 	_last_flee_target_id = ""
 	_last_flee_route_outcome_key = ""
 	_flee_target_route_cooldown_until.clear()
@@ -404,6 +411,12 @@ func decide(observation: Dictionary) -> Dictionary:
 		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.88)
 	if not aggressive_player_id.is_empty():
 		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.88)
+	# A previously failed ordinary follow may have a safe one-step route fix. Run
+	# that target-pinned repair after all survival/combat decisions but before
+	# progression can fall through to another action or re-issue the failed move.
+	var follow_route_recovery := _follow_route_recovery_action(observation, legal)
+	if not follow_route_recovery.is_empty():
+		return follow_route_recovery
 	# Achievement goals are advisory progression, never a survival or combat
 	# override. One Block is the exception to ordinary progression order because
 	# its authoritative source is renewable and is the world's central resource.
@@ -1321,9 +1334,53 @@ func _sync_follow_route_failures(observation: Dictionary) -> void:
 		if outcome_key == _last_follow_route_outcome_key:
 			return
 		_last_follow_route_outcome_key = outcome_key
-		var now_msec := int(observation.get("observed_at_msec", 0))
-		_follow_target_route_cooldown_until[followed_id] = now_msec + FOLLOW_ROUTE_FAILURE_COOLDOWN_MSEC
+		var reason := str(entry.get("reason", ""))
+		var failed_player := _player_target_by_id(observation, followed_id)
+		if reason in FOLLOW_ROUTE_RECOVERY_REASONS and not failed_player.is_empty():
+			_pending_follow_route_recovery = {
+				"target_id": followed_id,
+				"target": failed_player,
+				"reason": reason,
+				"at_msec": int(entry.get("at_msec", -1)),
+			}
+			return
+		_follow_target_route_cooldown_until[followed_id] = int(observation.get("observed_at_msec", 0)) + FOLLOW_ROUTE_FAILURE_COOLDOWN_MSEC
 		return
+
+
+func _follow_route_recovery_action(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
+	if _pending_follow_route_recovery.is_empty():
+		return {}
+	var pending := _pending_follow_route_recovery.duplicate(true)
+	var target_id := str(pending.get("target_id", ""))
+	var target: Dictionary = pending.get("target", {}) if pending.get("target", {}) is Dictionary else {}
+	var action := {}
+	if not target_id.is_empty() and not target.is_empty() and bool(target.get("alive", true)) and not bool(target.get("stale", target.get("last_known", false))):
+		var route_step: Dictionary = DigPlanner.next_step(observation, target)
+		var route_action := str(route_step.get("action", ""))
+		var route_step_target: Dictionary = route_step.get("target", {}) if route_step.get("target", {}) is Dictionary else {}
+		var route_goal: Array = route_step_target.get("route_target", []) if route_step_target.get("route_target", []) is Array else []
+		var target_position := Contract.target_position(target)
+		var expected_tile := Vector2i(
+			floori((target_position.x + 10.0) / ROUTE_TILE),
+			floori((target_position.y + 28.0) / ROUTE_TILE),
+		)
+		if (
+			route_action in [Contract.ACTION_MINE, Contract.ACTION_PLACE]
+			and route_action in legal
+			and str(route_step.get("goal", "")) == Contract.GOAL_DIG_ROUTE
+			and route_goal.size() >= 2
+			and int(route_goal[0]) == expected_tile.x
+			and int(route_goal[1]) == expected_tile.y
+		):
+			_follow_target_route_cooldown_until.erase(target_id)
+			action = Contract.normalize_decision(route_step)
+	_pending_follow_route_recovery.clear()
+	if not action.is_empty():
+		return action
+	if not target_id.is_empty():
+		_follow_target_route_cooldown_until[target_id] = int(observation.get("observed_at_msec", 0)) + FOLLOW_ROUTE_FAILURE_COOLDOWN_MSEC
+	return {}
 
 
 ## Stable identity of a recorded explore outcome. Real history entries always

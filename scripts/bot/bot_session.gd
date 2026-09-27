@@ -4173,6 +4173,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["craft_blocked_outputs"] = _active_craft_blocked_outputs(now_msec)
 	snapshot["food_eat_cooldown_until_msec"] = _food_eat_cooldown_until_msec
 	snapshot["terrain_tiles"] = _terrain_observation(snapshot["self"] as Dictionary)
+	snapshot["terrain_known_cells"] = _terrain_known_cell_window(snapshot["self"] as Dictionary)
 	snapshot["lava_retreat_required"] = _update_lava_retreat_state(snapshot["self"] as Dictionary)
 	snapshot["safe_exploration_waypoints"] = _safe_exploration_waypoints(snapshot["self"] as Dictionary)
 	# Station availability changes when the bot places a workbench/furnace or
@@ -4690,6 +4691,19 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 			"regenerates_on_mine": regenerates_on_mine,
 		})
 	return result
+
+
+## Compact authoritative coverage for the immediate movement/building area. An
+## absent tile in `terrain_tiles` is not automatically air; route stair placement
+## needs proof the candidate and its headroom were actually observed empty.
+func _terrain_known_cell_window(self_state: Dictionary) -> Dictionary:
+	var known_cells: Dictionary = {}
+	var origin := _support_tile_for_position(Contract.target_position(self_state))
+	for tile_y in range(origin.y - 4, origin.y + 3):
+		for tile_x in range(origin.x - 4, origin.x + 5):
+			if _terrain_cell_is_known(tile_x, tile_y):
+				known_cells["%d:%d" % [tile_x, tile_y]] = true
+	return known_cells
 
 
 func _visible_resources_from_terrain(self_state: Dictionary) -> Array:
