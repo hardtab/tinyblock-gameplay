@@ -84,6 +84,7 @@ var _left_emitted := false
 var _join_in_flight := false
 var _disconnect_requested := false
 var _network_signals_connected := false
+var _transport_reconnect_started_msec := -1
 var _snapshot_transfer_id := ""
 var _snapshot_expected_chunks := 0
 var _snapshot_chunks: Array[String] = []
@@ -306,6 +307,8 @@ func _connect_network_signals() -> void:
 		network_client.connect("disconnected", Callable(self, "_on_network_disconnected"))
 	if network_client.has_signal("message_received"):
 		network_client.connect("message_received", Callable(self, "_on_network_message"))
+	if network_client.has_signal("transport_changed"):
+		network_client.connect("transport_changed", Callable(self, "_on_network_transport_changed"))
 
 
 func join_session(record: Dictionary) -> void:
@@ -313,6 +316,7 @@ func join_session(record: Dictionary) -> void:
 		return
 	_left_emitted = false
 	_disconnect_requested = false
+	_transport_reconnect_started_msec = -1
 	sync_complete = false
 	empty_since_msec = -1
 	_empty_emitted = false
@@ -651,7 +655,6 @@ func _process(delta: float) -> void:
 		return
 	if state != STATE_PLAYING:
 		return
-	_request_missing_region_chunks(now_msec)
 	if _host_kill_leave_at_msec >= 0:
 		_set_desired_input(false, false, false)
 		_send_player_input_if_due(now_msec)
@@ -659,6 +662,13 @@ func _process(delta: float) -> void:
 		if now_msec >= _host_kill_leave_at_msec:
 			leave("host_kill_limit")
 		return
+	if _transport_reconnect_started_msec >= 0:
+		# The host cannot receive controls or return authoritative acknowledgements
+		# while the guest RTC channel is being renegotiated. Freeze bot decisions,
+		# predicted motion, and acknowledgement expiry until the transport recovers.
+		_set_desired_input(false, false, false)
+		return
+	_request_missing_region_chunks(now_msec)
 	_expire_craft_pending(now_msec)
 	_expire_stone_age_pending(now_msec)
 	_expire_achievement_goal_pending(now_msec)
@@ -2456,6 +2466,56 @@ func _on_network_disconnected(reason: String) -> void:
 	if _left_emitted or state == STATE_LEAVING or _disconnect_requested:
 		return
 	_emit_left("disconnected_%s" % reason)
+
+
+func _on_network_transport_changed(mode: String) -> void:
+	var now_msec := Time.get_ticks_msec()
+	if mode == "reconnecting":
+		if state != STATE_PLAYING or _transport_reconnect_started_msec >= 0:
+			return
+		_transport_reconnect_started_msec = now_msec
+		if behavior != null and behavior.executor != null:
+			behavior.executor.suspend(now_msec)
+		_set_desired_input(false, false, false)
+		structured_log.emit({"event": "transport_pause_started", "transport": mode, "world_id": world_id, "at_msec": now_msec})
+		return
+	if _transport_reconnect_started_msec < 0:
+		return
+	var paused_msec := maxi(0, now_msec - _transport_reconnect_started_msec)
+	_shift_transport_pause_deadlines(paused_msec)
+	if behavior != null and behavior.executor != null:
+		behavior.executor.resume(now_msec)
+	_transport_reconnect_started_msec = -1
+	if behavior != null:
+		behavior.request_decision(now_msec)
+	structured_log.emit({"event": "transport_pause_ended", "transport": mode, "pause_msec": paused_msec, "world_id": world_id, "at_msec": now_msec})
+
+
+func _shift_transport_pause_deadlines(paused_msec: int) -> void:
+	if paused_msec <= 0:
+		return
+	for raw_key in _pending_action_targets.keys():
+		var pending: Dictionary = _pending_action_targets.get(raw_key, {}) if _pending_action_targets.get(raw_key, {}) is Dictionary else {}
+		if int(pending.get("sent_at_msec", -1)) >= 0:
+			pending["sent_at_msec"] = int(pending["sent_at_msec"]) + paused_msec
+			_pending_action_targets[raw_key] = pending
+	if not _craft_pending_output.is_empty() and _craft_retry_after_msec >= 0:
+		_craft_retry_after_msec += paused_msec
+	var stone_pending: Dictionary = _stone_age_goal_state.get("pending", {}) if _stone_age_goal_state.get("pending", {}) is Dictionary else {}
+	if int(stone_pending.get("started_at_msec", -1)) >= 0:
+		stone_pending["started_at_msec"] = int(stone_pending["started_at_msec"]) + paused_msec
+		_stone_age_goal_state["pending"] = stone_pending
+	for raw_goal_id in _achievement_goal_states.keys():
+		var entry: Dictionary = _achievement_goal_states.get(raw_goal_id, {}) if _achievement_goal_states.get(raw_goal_id, {}) is Dictionary else {}
+		var pending: Dictionary = entry.get("pending", {}) if entry.get("pending", {}) is Dictionary else {}
+		if int(pending.get("started_at_msec", -1)) >= 0:
+			pending["started_at_msec"] = int(pending["started_at_msec"]) + paused_msec
+			entry["pending"] = pending
+			_achievement_goal_states[raw_goal_id] = entry
+	var placement: Dictionary = _build_project_state.get("pending_placement", {}) if _build_project_state.get("pending_placement", {}) is Dictionary else {}
+	if int(placement.get("at_msec", -1)) >= 0:
+		placement["at_msec"] = int(placement["at_msec"]) + paused_msec
+		_build_project_state["pending_placement"] = placement
 
 
 func _on_network_message(message: Dictionary) -> void:

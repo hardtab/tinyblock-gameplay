@@ -25,6 +25,7 @@ var _mine_next_progress_msec := -1
 var _mine_progress_stage := -1
 var _mine_final_sent := false
 var _busy := false
+var _suspended_at_msec := -1
 
 
 func configure(
@@ -45,6 +46,24 @@ func is_busy() -> bool:
 
 func current_action() -> String:
 	return str(current_decision.get("action", "")) if _busy else ""
+
+
+func suspend(now_msec: int) -> void:
+	if _busy and _suspended_at_msec < 0:
+		_suspended_at_msec = now_msec
+
+
+func resume(now_msec: int) -> void:
+	if _suspended_at_msec < 0:
+		return
+	var paused_msec := maxi(0, now_msec - _suspended_at_msec)
+	if action_started_msec >= 0:
+		action_started_msec += paused_msec
+	if action_deadline_msec >= 0:
+		action_deadline_msec += paused_msec
+	if _mine_next_progress_msec >= 0:
+		_mine_next_progress_msec += paused_msec
+	_suspended_at_msec = -1
 
 
 func start(raw_decision: Variant, observation: Dictionary, now_msec: int) -> bool:
@@ -105,7 +124,7 @@ func start(raw_decision: Variant, observation: Dictionary, now_msec: int) -> boo
 
 
 func tick(delta: float, observation: Dictionary, now_msec: int) -> void:
-	if not _busy:
+	if not _busy or _suspended_at_msec >= 0:
 		return
 	current_observation = observation.duplicate(true)
 	var action := str(current_decision.get("action", Contract.ACTION_WAIT))
@@ -137,6 +156,7 @@ func cancel(reason: String = "cancelled") -> void:
 	_mine_next_progress_msec = -1
 	_mine_progress_stage = -1
 	_mine_final_sent = false
+	_suspended_at_msec = -1
 
 
 func _send_network_action(action: String, decision: Dictionary) -> bool:
