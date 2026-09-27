@@ -571,14 +571,14 @@ func _dangerous_creature_threat(observation: Dictionary, threats: Array) -> Dict
 
 
 func _lava_threat(observation: Dictionary) -> Dictionary:
-	# Flee only when lava overlaps the avatar (or sits underfoot). Nearby pools
-	# beside chests / trees must not cancel death-cache recovery forever —
-	# ordinary MOVE_TO already refuses to step onto lava columns.
+	# Nearby lava by itself does not cancel normal goals. Once the session marks
+	# an actual contact, however, keep retreating until there is safe clearance.
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var px := float(self_state.get("x", 0.0))
 	var py := float(self_state.get("y", 0.0))
 	var width := maxf(1.0, float(self_state.get("w", 20.0)))
 	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var retreating := bool(observation.get("lava_retreat_required", false))
 	var left := floori(px / float(BlockDefs.TILE))
 	var right := floori((px + width - 0.001) / float(BlockDefs.TILE))
 	var top := floori(py / float(BlockDefs.TILE))
@@ -597,9 +597,14 @@ func _lava_threat(observation: Dictionary) -> Dictionary:
 		var tile_y := int(tile.get("y", 0))
 		var overlapping := tile_x >= left and tile_x <= right and tile_y >= top and tile_y <= bottom
 		var underfoot := tile_x >= left and tile_x <= right and tile_y >= support_y and tile_y <= support_y + 1
-		if not overlapping and not underfoot:
+		var tile_left := float(tile_x * BlockDefs.TILE)
+		var tile_top := float(tile_y * BlockDefs.TILE)
+		var dx := maxf(maxf(tile_left - (px + width), px - (tile_left + float(BlockDefs.TILE))), 0.0)
+		var dy := maxf(maxf(tile_top - (py + height), py - (tile_top + float(BlockDefs.TILE))), 0.0)
+		var clearance := Vector2(dx, dy).length()
+		if not overlapping and not underfoot and (not retreating or clearance > float(BlockDefs.TILE) * 3.0):
 			continue
-		var score := 0.0 if overlapping else 1.0
+		var score := clearance
 		if score >= best_score:
 			continue
 		var origin := Contract.target_position(self_state)
@@ -611,6 +616,7 @@ func _lava_threat(observation: Dictionary) -> Dictionary:
 			"position": [position.x, position.y],
 			"kind": "lava",
 			"distance": origin.distance_to(position),
+			"clearance": clearance,
 		}
 		best_score = score
 	return best

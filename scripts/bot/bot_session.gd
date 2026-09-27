@@ -140,6 +140,7 @@ var _support_place_attempted := false
 var _support_place_last_attempt_msec := -1
 var _was_in_harmful_fluid := false
 var _harmful_fluid_damage_cooldown := 0.0
+var _lava_retreat_active := false
 var _guest_defeat_pending := false
 var _guest_defeat_retry_after_msec := -1
 var _host_player_id := ""
@@ -352,6 +353,7 @@ func join_session(record: Dictionary) -> void:
 	_support_place_last_attempt_msec = -1
 	_was_in_harmful_fluid = false
 	_harmful_fluid_damage_cooldown = 0.0
+	_lava_retreat_active = false
 	_guest_defeat_pending = false
 	_guest_defeat_retry_after_msec = -1
 	_host_player_id = ""
@@ -739,12 +741,15 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	var origin := Contract.target_position(self_state)
 	var target := Contract.target_position(decision.get("target", {}))
+	var flee_target_x := target.x
 	var target_id := str(decision.get("target_id", ""))
 	var player_target := false
 	if target_id != "":
 		for raw_player in observation.get("players", []):
 			if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == target_id:
-				target = Contract.target_position(raw_player)
+				var player_state := raw_player as Dictionary
+				target = Contract.target_position(player_state)
+				flee_target_x = target.x + maxf(1.0, float(player_state.get("w", 20.0))) * 0.5
 				player_target = true
 				break
 	if action == Contract.ACTION_MOVE_TO and target_id.begins_with("tile:"):
@@ -779,7 +784,12 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		# its current position instead of navigating down a tree or ledge.
 		destination = Navigator.preferred_follow_target(target, origin, float(observation.get("preferred_player_distance", 84.0)))
 	elif action == Contract.ACTION_FLEE_FROM:
-		destination = Navigator.step_away_from(origin, Vector2(target.x, origin.y), 120.0)
+		# Actor positions and lava targets are centers in perception, while the
+		# movement origin is the avatar's top-left. Compare centers or a threat
+		# just to the right of the bot can incorrectly send it farther into lava.
+		var body_center := origin + Vector2(float(self_state.get("w", 20.0)) * 0.5, 0.0)
+		var away_center := Navigator.step_away_from(body_center, Vector2(flee_target_x, body_center.y), 120.0)
+		destination = away_center - Vector2(float(self_state.get("w", 20.0)) * 0.5, 0.0)
 	elif action == Contract.ACTION_MOVE_TO and _is_pvp_world():
 		# Preserve the enemy's vertical position in a duel. The previous generic
 		# movement branch flattened every destination to the bot's current Y, so a
@@ -804,7 +814,8 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# short-horizon route is allowed to invent jump arcs over unknown cells and
 	# makes the guest oscillate above the bridge instead of requesting its next
 	# support block.  The arena lane is flat, so keep this transition grounded.
-	var route_step := {} if _is_pvp_world() else _physics_route_step(origin, destination, target_id)
+	var emergency_lava_escape := action == Contract.ACTION_FLEE_FROM and _local_touches_harmful_fluid(self_state)
+	var route_step := {} if _is_pvp_world() or emergency_lava_escape else _physics_route_step(origin, destination, target_id)
 	if bool(route_step.get("unreachable", false)) and _host_rejected_transition_blocks_origin(_support_tile_for_position(origin)):
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
@@ -850,6 +861,17 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		hint = _pvp_jump_hint(origin, destination)
 	else:
 		hint = route_kind if route_kind in ["jump", "climb"] else _movement_hint(origin, destination)
+	if emergency_lava_escape:
+		# During direct lava contact, leave immediately on the horizontal axis.
+		# Starting a guessed jump/climb arc while embedded in fluid can keep the
+		# avatar in the pool long enough to die before the next policy update.
+		_jump_active = false
+		_climb_active = false
+		_active_air_transition.clear()
+		self_state["tree_ghost"] = false
+		self_state["climbing"] = false
+		self_state["climb_col"] = -1
+		hint = "walk"
 	if _climb_active or hint == "climb":
 		if not _climb_active:
 			_active_air_transition = {
@@ -1076,11 +1098,21 @@ func _world_position_for_support_tile(tile: Vector2i) -> Vector2:
 
 
 func _terrain_standable_tile(tile: Vector2i) -> bool:
-	return (
+	if not (
 		_terrain_solid_at(tile.x, tile.y)
 		and not _terrain_solid_at(tile.x, tile.y - 1)
 		and not _terrain_solid_at(tile.x, tile.y - 2)
-	)
+	):
+		return false
+	var body_left := (tile.x * BlockDefs.TILE)
+	var body_top := tile.y * BlockDefs.TILE - 28
+	var body_right := body_left + BlockDefs.TILE - 1
+	var body_bottom := tile.y * BlockDefs.TILE - 1
+	for body_y in range(floori(float(body_top) / float(BlockDefs.TILE)), floori(float(body_bottom) / float(BlockDefs.TILE)) + 1):
+		for body_x in range(floori(float(body_left) / float(BlockDefs.TILE)), floori(float(body_right) / float(BlockDefs.TILE)) + 1):
+			if _terrain_is_lava_at(body_x, body_y):
+				return false
+	return true
 
 
 func _terrain_climbable_tile(tile: Vector2i) -> bool:
@@ -1776,6 +1808,37 @@ func _local_touches_harmful_fluid(self_state: Dictionary) -> bool:
 			if bool(entry.get("fluid", false)) and float(entry.get("temperature", 0.0)) >= 0.8:
 				return true
 	return false
+
+
+func _update_lava_retreat_state(self_state: Dictionary) -> bool:
+	if _local_touches_harmful_fluid(self_state):
+		_lava_retreat_active = true
+	if not _lava_retreat_active:
+		return false
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var x := float(self_state.get("x", 0.0))
+	var y := float(self_state.get("y", 0.0))
+	var closest_clearance := INF
+	for key in _terrain_tiles:
+		var parts := str(key).split(":")
+		if parts.size() != 2:
+			continue
+		var tile_x := int(parts[0])
+		var tile_y := int(parts[1])
+		if not _terrain_is_lava_at(tile_x, tile_y):
+			continue
+		var tile_left := float(tile_x * BlockDefs.TILE)
+		var tile_top := float(tile_y * BlockDefs.TILE)
+		var dx := maxf(maxf(tile_left - (x + width), x - (tile_left + float(BlockDefs.TILE))), 0.0)
+		var dy := maxf(maxf(tile_top - (y + height), y - (tile_top + float(BlockDefs.TILE))), 0.0)
+		closest_clearance = minf(closest_clearance, Vector2(dx, dy).length())
+	# Keep survival ahead of crafting/following until the avatar has cleared the
+	# immediate hazard area. If the host no longer provides terrain, do not pin
+	# the bot in survival forever on stale data.
+	if is_inf(closest_clearance) or closest_clearance >= float(BlockDefs.TILE) * 2.0:
+		_lava_retreat_active = false
+	return _lava_retreat_active
 
 
 func _apply_local_harmful_fluid(self_state: Dictionary, delta: float) -> void:
@@ -3217,6 +3280,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["craft_blocked_outputs"] = _active_craft_blocked_outputs(now_msec)
 	snapshot["food_eat_cooldown_until_msec"] = _food_eat_cooldown_until_msec
 	snapshot["terrain_tiles"] = _terrain_observation(snapshot["self"] as Dictionary)
+	snapshot["lava_retreat_required"] = _update_lava_retreat_state(snapshot["self"] as Dictionary)
 	snapshot["safe_exploration_waypoints"] = _safe_exploration_waypoints(snapshot["self"] as Dictionary)
 	# Station availability changes when the bot places a workbench/furnace or
 	# walks out of its radius, so recipes cannot remain frozen at join time.
