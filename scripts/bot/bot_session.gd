@@ -823,12 +823,42 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		# its current position instead of navigating down a tree or ledge.
 		destination = Navigator.preferred_follow_target(target, origin, float(observation.get("preferred_player_distance", 84.0)))
 	elif action == Contract.ACTION_FLEE_FROM:
-		# Actor positions and lava targets are centers in perception, while the
-		# movement origin is the avatar's top-left. Compare centers or a threat
-		# just to the right of the bot can incorrectly send it farther into lava.
-		var body_center := origin + Vector2(float(self_state.get("w", 20.0)) * 0.5, 0.0)
-		var away_center := Navigator.step_away_from(body_center, Vector2(flee_target_x, body_center.y), 120.0)
-		destination = away_center - Vector2(float(self_state.get("w", 20.0)) * 0.5, 0.0)
+		# A straight-line escape vector can point through water, a ravine or an
+		# unsupported edge. Pick an actually reachable support tile that increases
+		# distance from the threat; the same physics route will execute that choice.
+		# Direct lava contact keeps its immediate horizontal escape path below.
+		if not _local_touches_harmful_fluid(self_state) and not _terrain_tiles.is_empty():
+			var body_center := origin + Vector2(
+				float(self_state.get("w", 20.0)) * 0.5,
+				float(self_state.get("h", 28.0)) * 0.5,
+			)
+			var threat_center := target + Vector2(
+				float(decision.get("target", {}).get("w", 20.0)) * 0.5,
+				float(decision.get("target", {}).get("h", 28.0)) * 0.5,
+			)
+			if player_target:
+				for raw_player in observation.get("players", []):
+					if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == target_id:
+						var player_state := raw_player as Dictionary
+						threat_center = target + Vector2(
+							float(player_state.get("w", 20.0)) * 0.5,
+							float(player_state.get("h", 28.0)) * 0.5,
+						)
+						break
+			var flee_waypoint := _safe_flee_waypoint(self_state, origin, threat_center)
+			if flee_waypoint.is_empty():
+				_set_desired_input(false, false, false)
+				_advance_local_physics(self_state, delta, false)
+				_world_snapshot["self"] = self_state
+				return {"done": true, "reason": "flee_no_safe_waypoint"}
+			destination = flee_waypoint.get("position", destination)
+		else:
+			# Actor positions and lava targets are centers in perception, while the
+			# movement origin is the avatar's top-left. Preserve the direct emergency
+			# step only when already touching harmful fluid or terrain is unavailable.
+			var body_center := origin + Vector2(float(self_state.get("w", 20.0)) * 0.5, 0.0)
+			var away_center := Navigator.step_away_from(body_center, Vector2(flee_target_x, body_center.y), 120.0)
+			destination = away_center - Vector2(float(self_state.get("w", 20.0)) * 0.5, 0.0)
 	elif action == Contract.ACTION_MOVE_TO:
 		# Explicit MOVE_TO targets already carry a validated standing Y: duel
 		# opponents who jumped onto a block, plus exploration/biome waypoints that
@@ -1181,6 +1211,57 @@ func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2) -> Dictionary
 		"position": best_position,
 		"support_tile": _support_tile_for_position(best_position),
 		"remaining_distance": best_distance,
+	}
+
+
+func _safe_flee_waypoint(self_state: Dictionary, origin: Vector2, threat: Vector2) -> Dictionary:
+	if _terrain_tiles.is_empty():
+		return {}
+	var origin_tile := _support_tile_for_position(origin)
+	var reachable := _physics_reachable_support_tiles(origin_tile)
+	if not reachable.has(origin_tile):
+		return {}
+	var origin_distance := origin.distance_to(threat)
+	var best_distance := origin_distance + float(BlockDefs.TILE) * 0.25
+	var best_position := Vector2.ZERO
+	var best_tile := origin_tile
+	var found_waypoint := false
+	for raw_tile in reachable.keys():
+		if typeof(raw_tile) != TYPE_VECTOR2I:
+			continue
+		var tile: Vector2i = raw_tile
+		if tile == origin_tile or not _terrain_standable_tile(tile):
+			continue
+		var position := _world_position_for_support_tile(tile)
+		var distance_from_threat := position.distance_to(threat)
+		if distance_from_threat <= best_distance:
+			continue
+		var route: Array[Dictionary] = Navigator.physics_route(
+			origin_tile,
+			tile,
+			Callable(self, "_terrain_standable_tile"),
+			Callable(self, "_terrain_climbable_tile"),
+			Navigator.MAX_PHYSICS_ROUTE_NODES,
+			Callable(self, "_physics_transition_allowed"),
+		)
+		if route.size() < 2:
+			continue
+		var first_edge := route[1] as Dictionary
+		var first_position := _world_position_for_support_tile(first_edge.get("tile", origin_tile))
+		if first_position.distance_to(threat) <= origin_distance + float(BlockDefs.TILE) * 0.25:
+			continue
+		if str(first_edge.get("kind", "")) == "jump" and not _jump_route_has_safe_landing(self_state, first_position):
+			continue
+		best_distance = distance_from_threat
+		best_position = position
+		best_tile = tile
+		found_waypoint = true
+	if not found_waypoint:
+		return {}
+	return {
+		"position": best_position,
+		"support_tile": best_tile,
+		"distance_from_threat": best_distance,
 	}
 
 

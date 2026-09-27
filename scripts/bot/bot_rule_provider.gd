@@ -30,6 +30,12 @@ var _last_explore_outcome_key := ""
 var _last_follow_target_id := ""
 var _last_follow_route_outcome_key := ""
 var _follow_target_route_cooldown_until: Dictionary = {}
+## A failed flee route must not pin survival policy to an impossible escape
+## waypoint forever. This short tactical retry window still lets combat/equipment
+## responses run and preserves pinned PvP/aggression targets.
+var _last_flee_target_id := ""
+var _last_flee_route_outcome_key := ""
+var _flee_target_route_cooldown_until: Dictionary = {}
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 ## Only chase a player once they are clearly farther than the preferred gap.
@@ -45,6 +51,11 @@ const FOLLOW_ROUTE_FAILURE_COOLDOWN_MSEC := 30_000
 const FOLLOW_ROUTE_FAILURE_REASONS := [
 	"blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable",
 	"pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable",
+]
+const FLEE_ROUTE_FAILURE_COOLDOWN_MSEC := 5_000
+const FLEE_ROUTE_FAILURE_REASONS := [
+	"blocked_obstacle", "edge_guard", "unsafe_jump_route", "unsafe_drop_route",
+	"route_unreachable", "flee_no_safe_waypoint", "timeout",
 ]
 const WANDER_RADIUS := 96.0
 const WANDER_COMMIT_MSEC := 1800
@@ -119,6 +130,9 @@ func reset() -> void:
 	_last_follow_target_id = ""
 	_last_follow_route_outcome_key = ""
 	_follow_target_route_cooldown_until.clear()
+	_last_flee_target_id = ""
+	_last_flee_route_outcome_key = ""
+	_flee_target_route_cooldown_until.clear()
 
 
 func decide(observation: Dictionary) -> Dictionary:
@@ -135,6 +149,7 @@ func decide(observation: Dictionary) -> Dictionary:
 	# Consume any fresh terminal route failure toward the last social/search
 	# follow target before choosing this tick's action.
 	_sync_follow_route_failures(observation)
+	_sync_flee_route_failures(observation)
 
 	# Immediate survival has priority over social or gathering behaviour.
 	var threats: Array = _as_array(observation.get("threats", []))
@@ -147,7 +162,12 @@ func decide(observation: Dictionary) -> Dictionary:
 	# so the bot does not keep mining/wandering while standing in a pool.
 	if not lava_threat.is_empty() and Contract.ACTION_FLEE_FROM in legal:
 		return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, lava_threat, 1400, 0.99)
-	if low_health and not creature_threat.is_empty() and Contract.ACTION_FLEE_FROM in legal:
+	if (
+		low_health
+		and not creature_threat.is_empty()
+		and Contract.ACTION_FLEE_FROM in legal
+		and not _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
+	):
 		return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, creature_threat, 1600, 0.96)
 
 	# Hostile creatures are an immediate survival concern even while the bot is
@@ -168,7 +188,10 @@ func decide(observation: Dictionary) -> Dictionary:
 			return _creature_bow_decision(observation, creature_threat)
 		if creature_distance <= float(observation.get("creature_attack_distance", 48.0)) and Contract.ACTION_ATTACK_CREATURE in legal and _is_melee_weapon(hand):
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_ATTACK_CREATURE, creature_threat, 500, 0.92)
-		if Contract.ACTION_FLEE_FROM in legal:
+		if (
+			Contract.ACTION_FLEE_FROM in legal
+			and not _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
+		):
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, creature_threat, 1200, 0.97)
 
 	# The safety policy writes an explicit, short-lived retaliation grant into
@@ -191,7 +214,12 @@ func decide(observation: Dictionary) -> Dictionary:
 		and Contract.ACTION_RETALIATE_ONCE in legal
 	):
 		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_RETALIATE_ONCE, {"id": attacker_id}, 700, 0.99)
-	if not attacker_target.is_empty() and attacker_id != aggressive_player_id and Contract.ACTION_FLEE_FROM in legal:
+	if (
+		not attacker_target.is_empty()
+		and attacker_id != aggressive_player_id
+		and Contract.ACTION_FLEE_FROM in legal
+		and not _flee_target_on_route_cooldown(attacker_id, now_msec)
+	):
 		# Outside PvP the safety contract allows one proportional response. Once it
 		# is consumed, keep the attacker as a survival focus and disengage instead of
 		# immediately switching to mining while the threat is still beside the bot.
@@ -560,6 +588,8 @@ func _decision(goal: String, action: String, target: Dictionary, commit_for_ms: 
 		"commit_for_ms": commit_for_ms,
 		"confidence": confidence,
 	}
+	if action == Contract.ACTION_FLEE_FROM:
+		_last_flee_target_id = str(decision.get("target_id", ""))
 	if target.has("block"):
 		decision["block"] = str(target.get("block", ""))
 	return Contract.normalize_decision(decision)
@@ -1069,6 +1099,47 @@ func _follow_target_blocked(observation: Dictionary, target_id: String, now_msec
 	if not _follow_route_failure_cooldowns_apply(observation):
 		return false
 	return _follow_target_on_route_cooldown(target_id, now_msec)
+
+
+func _flee_target_on_route_cooldown(target_id: String, now_msec: int) -> bool:
+	if target_id.is_empty():
+		return false
+	var until_msec := int(_flee_target_route_cooldown_until.get(target_id, 0))
+	return until_msec > 0 and now_msec < until_msec
+
+
+## Consume one terminal escape-route outcome. Keep the failed target out of the
+## flee branch briefly so policy can equip/attack or choose another activity;
+## never cool down a pinned duel/aggression target.
+func _sync_flee_route_failures(observation: Dictionary) -> void:
+	var target_id := _last_flee_target_id
+	if target_id.is_empty() or target_id in [
+		str(observation.get("aggressive_player_id", "")),
+		str(observation.get("enemy_player_id", "")),
+	]:
+		return
+	var history: Array = _as_array(observation.get("action_history", []))
+	for index in range(history.size() - 1, -1, -1):
+		if not history[index] is Dictionary:
+			continue
+		var entry := history[index] as Dictionary
+		if str(entry.get("phase", "")) not in ["finished", "failed"]:
+			continue
+		if str(entry.get("action", "")) != Contract.ACTION_FLEE_FROM:
+			continue
+		if str(entry.get("target_id", "")) != target_id:
+			continue
+		if str(entry.get("reason", "")) not in FLEE_ROUTE_FAILURE_REASONS:
+			continue
+		var outcome_key := "%s|%s|%d" % [
+			target_id, str(entry.get("reason", "")), int(entry.get("at_msec", -1)),
+		]
+		if outcome_key == _last_flee_route_outcome_key:
+			return
+		_last_flee_route_outcome_key = outcome_key
+		var now_msec := int(observation.get("observed_at_msec", 0))
+		_flee_target_route_cooldown_until[target_id] = now_msec + FLEE_ROUTE_FAILURE_COOLDOWN_MSEC
+		return
 
 
 ## Consume the newest terminal route failure toward the last issued social/search
