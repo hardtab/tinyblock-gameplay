@@ -1689,8 +1689,9 @@ func _jump_route_has_safe_landing(self_state: Dictionary, destination: Vector2) 
 		return false
 	var x := float(self_state.get("x", origin.x))
 	var y := float(self_state.get("y", origin.y))
-	var vx := direction * BlockDefs.MOVE
-	var vy := BlockDefs.JUMP
+	var fluid := _local_fluid_physics(x, y, width, height)
+	var vx := direction * (BlockDefs.MOVE * float(fluid.get("move_speed_multiplier", 1.0)))
+	var vy := BlockDefs.JUMP * float(fluid.get("jump_multiplier", 1.0))
 	for _frame in range(90):
 		var substeps := maxi(1, int(ceil(maxf(absf(vx), absf(vy)) / 6.0)))
 		var substep := 1.0 / float(substeps)
@@ -1708,10 +1709,39 @@ func _jump_route_has_safe_landing(self_state: Dictionary, destination: Vector2) 
 					return false
 				y = float(vertical_hit.get("by", y)) - height
 				return _support_tile_for_position(Vector2(x, y)) == landing_support
-		vy = minf(LOCAL_MAX_FALL_SPEED, vy + BlockDefs.GRAVITY)
+		# Re-evaluate the center-tile fluid each frame so an arc that enters or
+		# leaves water tracks the same speed/gravity the authoritative host uses.
+		fluid = _local_fluid_physics(x, y, width, height)
+		vx = direction * (BlockDefs.MOVE * float(fluid.get("move_speed_multiplier", 1.0)))
+		vy = minf(float(fluid.get("max_fall", LOCAL_MAX_FALL_SPEED)), vy + BlockDefs.GRAVITY * float(fluid.get("gravity_multiplier", 1.0)))
 		if y > origin.y + float(BlockDefs.TILE) * 4.0:
 			return false
 	return false
+
+
+## Mirrors WorldSim.move_player's center-tile fluid modifiers so the private
+## predictor and the route validator stay in lockstep with the authoritative
+## host. Returns an empty dictionary when the avatar's center tile is not a
+## fluid, which keeps land movement on the original constants.
+func _local_fluid_physics(x: float, y: float, width: float, height: float) -> Dictionary:
+	var center_x := floori((x + width * 0.5) / float(BlockDefs.TILE))
+	var center_y := floori((y + height * 0.5) / float(BlockDefs.TILE))
+	var name := _terrain_name_at(center_x, center_y).to_lower()
+	if name.is_empty():
+		return {}
+	var entry := _block_entry(name)
+	if not bool(entry.get("fluid", false)):
+		return {}
+	var in_water := name == "water"
+	var in_lava := name == "lava"
+	var viscosity := clampf(float(entry.get("viscosity", 0.08 if in_water else (0.92 if in_lava else 0.3))), 0.0, 1.0)
+	return {
+		"viscosity": viscosity,
+		"move_speed_multiplier": lerpf(0.62, 0.32, viscosity),
+		"gravity_multiplier": lerpf(0.32, 0.55, viscosity),
+		"jump_multiplier": lerpf(0.56, 0.44, viscosity),
+		"max_fall": lerpf(6.5, 4.5, viscosity),
+	}
 
 
 func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: bool) -> void:
@@ -1735,10 +1765,22 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 	var direction := (-1.0 if bool(_desired_input.get("left", false)) else (1.0 if bool(_desired_input.get("right", false)) else 0.0))
 	_update_local_tree_ghost(self_state, direction)
 	var ignore_trees := _local_ignores_trees(self_state)
-	var target_vx := direction * BlockDefs.MOVE
-	vx = lerpf(vx, target_vx, clampf(step, 0.0, 1.0)) if on_ground else target_vx
-	if jump_pressed and on_ground:
-		vy = BlockDefs.JUMP
+	var fluid := _local_fluid_physics(x, y, width, height)
+	var in_fluid := not fluid.is_empty()
+	var gravity := BlockDefs.GRAVITY * float(fluid.get("gravity_multiplier", 1.0))
+	var jump_power := BlockDefs.JUMP * float(fluid.get("jump_multiplier", 1.0))
+	var max_fall := float(fluid.get("max_fall", LOCAL_MAX_FALL_SPEED))
+	var target_vx := direction * (BlockDefs.MOVE * float(fluid.get("move_speed_multiplier", 1.0)))
+	if in_fluid:
+		# WorldSim drops friction in fluids and writes the target velocity
+		# directly; matching that keeps grounded-host reconciliation exact.
+		vx = target_vx
+	elif on_ground:
+		vx = lerpf(vx, target_vx, clampf(step, 0.0, 1.0))
+	else:
+		vx = target_vx
+	if jump_pressed and (on_ground or in_fluid):
+		vy = jump_power
 		on_ground = false
 	elif on_ground:
 		vy = 0.0
@@ -1746,7 +1788,7 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 		# Match WorldSim's terminal velocity. An incomplete support snapshot must
 		# never make the legacy predictor accelerate to enormous coordinates while
 		# it waits for the authoritative host to reconcile the player.
-		vy = minf(LOCAL_MAX_FALL_SPEED, vy + BlockDefs.GRAVITY * step)
+		vy = minf(max_fall, vy + gravity * step)
 
 	var substeps := maxi(1, int(ceil(maxf(absf(vx), absf(vy)) * step / 6.0)))
 	var substep := step / float(substeps)
