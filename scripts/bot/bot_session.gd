@@ -1274,9 +1274,15 @@ func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2, first_step_al
 
 func _safe_flee_first_step_filter(self_state: Dictionary, origin: Vector2, threat: Vector2) -> Callable:
 	var origin_distance := origin.distance_to(threat)
+	# The escape destination itself must move measurably away from the threat
+	# (enforced by _safe_flee_waypoint). The first step only has to avoid closing
+	# that gap, so a lateral or step-up move that later leads somewhere farther
+	# is allowed; requiring the first hop to already gain distance pruned whole
+	# escape branches and left the bot with no waypoint.
+	var max_closure := float(BlockDefs.TILE) * 0.5
 	return func(_from_tile: Vector2i, to_tile: Vector2i, kind: String) -> bool:
 		var first_position := _world_position_for_support_tile(to_tile)
-		if first_position.distance_to(threat) <= origin_distance + float(BlockDefs.TILE) * 0.25:
+		if first_position.distance_to(threat) < origin_distance - max_closure:
 			return false
 		return kind != "jump" or _jump_route_has_safe_landing(self_state, first_position)
 
@@ -1302,7 +1308,11 @@ func _safe_flee_waypoint(
 		first_step_allowed,
 	)
 	if not reachable_first_steps.has(origin_tile):
-		return {}
+		# The reachability search refuses to start when the tile under the bot is
+		# not itself "standable" (shallow water, foliage, missing replication).
+		# Fall back to a bounded one-step scan so a known reachable ledge beside
+		# the bot still counts as an escape.
+		return _safe_flee_step_escape(self_state, origin_tile, threat, origin_distance, first_step_allowed)
 	var best_distance := origin_distance + float(BlockDefs.TILE) * 0.25
 	var best_position := Vector2.ZERO
 	var best_tile := origin_tile
@@ -1318,22 +1328,68 @@ func _safe_flee_waypoint(
 		if distance_from_threat <= best_distance:
 			continue
 		var first_edge: Dictionary = reachable_first_steps[raw_tile]
-		var first_position := _world_position_for_support_tile(first_edge.get("tile", origin_tile))
-		if first_position.distance_to(threat) <= origin_distance + float(BlockDefs.TILE) * 0.25:
-			continue
-		if str(first_edge.get("kind", "")) == "jump" and not _jump_route_has_safe_landing(self_state, first_position):
+		# Distance closure is already enforced by first_step_allowed; only the
+		# simulated jump arc still needs an explicit check here.
+		if (
+			str(first_edge.get("kind", "walk")) == "jump"
+			and not _jump_route_has_safe_landing(self_state, _world_position_for_support_tile(first_edge.get("tile", origin_tile)))
+		):
 			continue
 		best_distance = distance_from_threat
 		best_position = position
 		best_tile = tile
 		found_waypoint = true
 	if not found_waypoint:
-		return {}
+		return _safe_flee_step_escape(self_state, origin_tile, threat, origin_distance, first_step_allowed)
 	return {
 		"position": best_position,
 		"support_tile": best_tile,
 		"distance_from_threat": best_distance,
 	}
+
+
+## Bounded one-step escape scan used when the reachability search cannot start or
+## found no branch. Each candidate support tile is the direct physics neighbour
+## of the origin (walk, one-block/gap jump, or verified drop), validated with the
+## exact transition rules the movement executor uses. This is what lets a bot in
+## shallow water beside a sand ledge step onto the ledge instead of standing
+## still, while every jump still passes the simulated landing filter.
+func _safe_flee_step_escape(
+	self_state: Dictionary,
+	origin_tile: Vector2i,
+	threat: Vector2,
+	origin_distance: float,
+	first_step_allowed: Callable,
+) -> Dictionary:
+	var best_distance := origin_distance + float(BlockDefs.TILE) * 0.25
+	var best: Dictionary = {}
+	for direction in [Vector2i.LEFT, Vector2i.RIGHT]:
+		var candidates: Array[Dictionary] = [{"tile": origin_tile + direction, "kind": "walk"}]
+		candidates.append({"tile": origin_tile + direction + Vector2i.UP, "kind": "jump"})
+		candidates.append({"tile": origin_tile + direction * 2, "kind": "jump"})
+		candidates.append({"tile": origin_tile + direction * 2 + Vector2i.UP, "kind": "jump"})
+		for drop_tiles in range(1, Navigator.MAX_VERIFIED_DROP_TILES + 1):
+			candidates.append({"tile": origin_tile + direction + Vector2i.DOWN * drop_tiles, "kind": "drop"})
+		for candidate in candidates:
+			var tile: Vector2i = candidate.get("tile", origin_tile)
+			var kind := str(candidate.get("kind", "walk"))
+			if tile == origin_tile or not _terrain_standable_tile(tile):
+				continue
+			if not _physics_transition_allowed(origin_tile, tile, kind):
+				continue
+			if first_step_allowed.is_valid() and not bool(first_step_allowed.call(origin_tile, tile, kind)):
+				continue
+			var position := _world_position_for_support_tile(tile)
+			var distance_from_threat := position.distance_to(threat)
+			if distance_from_threat <= best_distance:
+				continue
+			best_distance = distance_from_threat
+			best = {
+				"position": position,
+				"support_tile": tile,
+				"distance_from_threat": best_distance,
+			}
+	return best
 
 
 func _host_rejected_transition_blocks_origin(origin_tile: Vector2i) -> bool:
