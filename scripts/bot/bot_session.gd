@@ -1338,7 +1338,12 @@ func _safe_flee_waypoint(
 		# not itself "standable" (shallow water, foliage, missing replication).
 		# Fall back to a bounded one-step scan so a known reachable ledge beside
 		# the bot still counts as an escape.
-		return _safe_flee_step_escape(self_state, origin_tile, threat, origin_distance, first_step_allowed)
+		var step_escape := _safe_flee_step_escape(self_state, origin_tile, threat, origin_distance, first_step_allowed)
+		if not step_escape.is_empty():
+			return step_escape
+		# Tier 2: no strictly farther escape exists, so allow a same-distance
+		# reposition instead of standing still and re-entering WAIT.
+		return _safe_flee_reposition_waypoint(self_state, origin_tile, threat, origin_distance, first_step_allowed)
 	var best_distance := origin_distance + float(BlockDefs.TILE) * 0.25
 	var best_position := Vector2.ZERO
 	var best_tile := origin_tile
@@ -1366,7 +1371,15 @@ func _safe_flee_waypoint(
 		best_tile = tile
 		found_waypoint = true
 	if not found_waypoint:
-		return _safe_flee_step_escape(self_state, origin_tile, threat, origin_distance, first_step_allowed)
+		var step_escape := _safe_flee_step_escape(self_state, origin_tile, threat, origin_distance, first_step_allowed)
+		if not step_escape.is_empty():
+			return step_escape
+		# Tier 2: a strictly farther tile may be unreachable while a legitimate
+		# lateral/step-up reposition that keeps threat distance is. Return that so
+		# FLEE_FROM does not collapse into flee_no_safe_waypoint -> WAIT.
+		return _safe_flee_reposition_waypoint(
+			self_state, origin_tile, threat, origin_distance, first_step_allowed, reachable_first_steps
+		)
 	return {
 		"position": best_position,
 		"support_tile": best_tile,
@@ -1414,6 +1427,101 @@ func _safe_flee_step_escape(
 				"position": position,
 				"support_tile": tile,
 				"distance_from_threat": best_distance,
+			}
+	return best
+
+
+## Tier-2 escape fallback. The strict escape (and its one-step scan) only accepts
+## destinations measurably farther from the threat, so a cornered bot that has no
+## strictly farther reachable tile used to return nothing and collapse into
+## flee_no_safe_waypoint -> WAIT. When that happens, permit a host-known,
+## standable, physics-reachable destination whose distance to the hostile does
+## not decrease (<=1px closure). The destination still has to pass the exact same
+## first-edge guard, jump-landing simulation, hazard and rejected-transition
+## checks as the strict route, so this never turns into a closer, unknown-terrain
+## or unsafe-fall move. Results carry `reposition_only=true` for diagnostics.
+func _safe_flee_reposition_waypoint(
+	self_state: Dictionary,
+	origin_tile: Vector2i,
+	threat: Vector2,
+	origin_distance: float,
+	first_step_allowed: Callable,
+	reachable_first_steps: Dictionary = {},
+) -> Dictionary:
+	var min_distance := origin_distance - 1.0
+	var best_distance := -INF
+	var best: Dictionary = {}
+	if not reachable_first_steps.is_empty():
+		for raw_tile in reachable_first_steps.keys():
+			if typeof(raw_tile) != TYPE_VECTOR2I:
+				continue
+			var tile: Vector2i = raw_tile
+			if tile == origin_tile or not _terrain_standable_tile(tile):
+				continue
+			var position := _world_position_for_support_tile(tile)
+			var distance_from_threat := position.distance_to(threat)
+			if distance_from_threat < min_distance or distance_from_threat <= best_distance:
+				continue
+			var first_edge: Dictionary = reachable_first_steps[raw_tile]
+			if (
+				str(first_edge.get("kind", "walk")) == "jump"
+				and not _jump_route_has_safe_landing(self_state, _world_position_for_support_tile(first_edge.get("tile", origin_tile)))
+			):
+				continue
+			best_distance = distance_from_threat
+			best = {
+				"position": position,
+				"support_tile": tile,
+				"distance_from_threat": distance_from_threat,
+				"reposition_only": true,
+			}
+		if not best.is_empty():
+			return best
+	return _safe_flee_reposition_step(self_state, origin_tile, threat, origin_distance, first_step_allowed)
+
+
+## Direct-neighbour variant of the tier-2 fallback, used when the reachability
+## search cannot start from the bot's tile (shallow water, foliage, missing
+## replication). Mirrors _safe_flee_step_escape but accepts a non-decreasing
+## threat distance within 1px instead of requiring a measurable gain.
+func _safe_flee_reposition_step(
+	self_state: Dictionary,
+	origin_tile: Vector2i,
+	threat: Vector2,
+	origin_distance: float,
+	first_step_allowed: Callable,
+) -> Dictionary:
+	var min_distance := origin_distance - 1.0
+	var best_distance := -INF
+	var best: Dictionary = {}
+	for direction in [Vector2i.LEFT, Vector2i.RIGHT]:
+		var candidates: Array[Dictionary] = [{"tile": origin_tile + direction, "kind": "walk"}]
+		candidates.append({"tile": origin_tile + direction + Vector2i.UP, "kind": "jump"})
+		candidates.append({"tile": origin_tile + direction * 2, "kind": "jump"})
+		candidates.append({"tile": origin_tile + direction * 2 + Vector2i.UP, "kind": "jump"})
+		for drop_tiles in range(1, Navigator.MAX_VERIFIED_DROP_TILES + 1):
+			candidates.append({"tile": origin_tile + direction + Vector2i.DOWN * drop_tiles, "kind": "drop"})
+		for candidate in candidates:
+			var tile: Vector2i = candidate.get("tile", origin_tile)
+			var kind := str(candidate.get("kind", "walk"))
+			if tile == origin_tile or not _terrain_standable_tile(tile):
+				continue
+			if not _physics_transition_allowed(origin_tile, tile, kind):
+				continue
+			if first_step_allowed.is_valid() and not bool(first_step_allowed.call(origin_tile, tile, kind)):
+				continue
+			var position := _world_position_for_support_tile(tile)
+			if kind == "jump" and not _jump_route_has_safe_landing(self_state, position):
+				continue
+			var distance_from_threat := position.distance_to(threat)
+			if distance_from_threat < min_distance or distance_from_threat <= best_distance:
+				continue
+			best_distance = distance_from_threat
+			best = {
+				"position": position,
+				"support_tile": tile,
+				"distance_from_threat": distance_from_threat,
+				"reposition_only": true,
 			}
 	return best
 
