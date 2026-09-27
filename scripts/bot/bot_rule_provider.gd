@@ -39,6 +39,12 @@ var _flee_target_route_cooldown_until: Dictionary = {}
 var _last_aggressive_player_id := ""
 var _last_enemy_player_id := ""
 var _last_creature_threat_id := ""
+## Creature ids whose verified escape route already failed while the creature was
+## not actually attacking. Re-issuing FLEE_FROM every time the short retry
+## cooldown expired kept a hostile standing behind terrain in charge of the whole
+## decision loop, so an exhausted route now yields to ordinary goals until the
+## creature shows real aggression again (hit, provocation, or an attack).
+var _creature_route_exhausted: Dictionary = {}
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 ## Only chase a player once they are clearly farther than the preferred gap.
@@ -139,6 +145,7 @@ func reset() -> void:
 	_last_aggressive_player_id = ""
 	_last_enemy_player_id = ""
 	_last_creature_threat_id = ""
+	_creature_route_exhausted.clear()
 
 
 func decide(observation: Dictionary) -> Dictionary:
@@ -175,6 +182,7 @@ func decide(observation: Dictionary) -> Dictionary:
 		and not creature_threat.is_empty()
 		and Contract.ACTION_FLEE_FROM in legal
 		and not _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
+		and not _creature_flee_suppressed(creature_threat, observation)
 	):
 		return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, creature_threat, 1600, 0.96)
 
@@ -182,7 +190,10 @@ func decide(observation: Dictionary) -> Dictionary:
 	# still at full health.  The old policy only fled when health was already low
 	# and otherwise let crafting, following, or a mining tool win the decision;
 	# that made an attacking animal look harmless until the first hit landed.
-	if not creature_threat.is_empty():
+	if (
+		not creature_threat.is_empty()
+		and not _creature_flee_suppressed(creature_threat, observation)
+	):
 		var creature_distance := float(creature_threat.get("distance", 9999.0))
 		var combat_tool := _creature_combat_tool(observation)
 		if not combat_tool.is_empty() and Contract.ACTION_EQUIP in legal:
@@ -635,12 +646,20 @@ func _dangerous_creature_threat(observation: Dictionary, threats: Array) -> Dict
 	var best := {}
 	var best_distance := INF
 	var pinned := {}
+	var visible_ids := {}
 	for raw_threat in threats:
 		if not raw_threat is Dictionary:
 			continue
 		var threat := raw_threat as Dictionary
 		if not bool(threat.get("alive", true)) or int(threat.get("health", 1)) <= 0:
 			continue
+		var threat_id := str(threat.get("id", ""))
+		if not threat_id.is_empty():
+			visible_ids[threat_id] = true
+			if _creature_has_aggression_evidence(threat):
+				# A creature that hits, provokes or is actually attacking earns its
+				# full flee priority back, even if a previous escape route failed.
+				_creature_route_exhausted.erase(threat_id)
 		var distance := float(threat.get("distance", Contract.distance_between(self_state, threat)))
 		if distance > danger_radius:
 			continue
@@ -671,10 +690,56 @@ func _dangerous_creature_threat(observation: Dictionary, threats: Array) -> Dict
 			best_distance = distance
 		if str(threat.get("id", "")) == _last_creature_threat_id:
 			pinned = threat
+	# Creatures that left the observation no longer pin the policy, so drop their
+	# exhausted-route memory instead of leaking ids for the whole session.
+	for exhausted_id in _creature_route_exhausted.keys():
+		if not visible_ids.has(exhausted_id):
+			_creature_route_exhausted.erase(exhausted_id)
 	if not pinned.is_empty():
 		best = pinned
 	_last_creature_threat_id = str(best.get("id", ""))
 	return best
+
+
+## Distance at which a hostile creature is treated as an immediate, striking
+## threat rather than a distant one. Kept as one helper so the flee hold and the
+## failed-route suppression cannot drift apart.
+func _creature_immediate_distance(observation: Dictionary) -> float:
+	var attack_distance := maxf(24.0, float(observation.get("creature_attack_distance", 48.0)))
+	return maxf(72.0, attack_distance * 1.5)
+
+
+## Positive evidence that the creature is a current combat threat: it is
+## flag-attacking, was hit recently, or is provoked.
+func _creature_has_aggression_evidence(creature: Dictionary) -> bool:
+	if bool(creature.get("is_attacking", false)) or bool(creature.get("attacking", false)):
+		return true
+	return int(creature.get("attack_cooldown", 0)) > 0 or int(creature.get("provoked_ticks", 0)) > 0
+
+
+## Trust only an explicit "not attacking, no recent damage, not provoked"
+## creature observation. Missing state stays fail-closed: the bot keeps fleeing.
+func _creature_state_explicitly_calm(creature: Dictionary) -> bool:
+	if bool(creature.get("is_attacking", false)) or bool(creature.get("attacking", false)):
+		return false
+	if not creature.has("attack_cooldown") or not creature.has("provoked_ticks"):
+		return false
+	return int(creature.get("attack_cooldown", 0)) <= 0 and int(creature.get("provoked_ticks", 0)) <= 0
+
+
+## A creature whose verified escape route already failed stops re-issuing
+## FLEE_FROM once it is demonstrably calm and far enough that it is not about to
+## strike. Active attacks, recent damage, provocation, close imminent threats and
+## creatures whose state is unknown all keep the original flee priority.
+func _creature_flee_suppressed(creature: Dictionary, observation: Dictionary) -> bool:
+	var target_id := str(creature.get("id", ""))
+	if target_id.is_empty() or not bool(_creature_route_exhausted.get(target_id, false)):
+		return false
+	if _creature_has_aggression_evidence(creature):
+		return false
+	if float(creature.get("distance", INF)) <= _creature_immediate_distance(observation):
+		return false
+	return _creature_state_explicitly_calm(creature)
 
 
 func _creature_route_failure_still_requires_hold(creature: Dictionary, observation: Dictionary) -> bool:
@@ -682,9 +747,7 @@ func _creature_route_failure_still_requires_hold(creature: Dictionary, observati
 		return true
 	if int(creature.get("attack_cooldown", 0)) > 0 or int(creature.get("provoked_ticks", 0)) > 0:
 		return true
-	var attack_distance := maxf(24.0, float(observation.get("creature_attack_distance", 48.0)))
-	var immediate_distance := maxf(72.0, attack_distance * 1.5)
-	return float(creature.get("distance", INF)) <= immediate_distance
+	return float(creature.get("distance", INF)) <= _creature_immediate_distance(observation)
 
 
 func _creature_approach_target(observation: Dictionary, creature: Dictionary) -> Dictionary:
@@ -1187,6 +1250,12 @@ func _arm_flee_target_route_cooldown(target_id: String, reason: String, at_msec:
 		return
 	_last_flee_route_outcome_key = outcome_key
 	_flee_target_route_cooldown_until[target_id] = at_msec + FLEE_ROUTE_FAILURE_COOLDOWN_MSEC
+	# Remember that this creature has no verified escape route. The bounded
+	# cooldown alone only postponed the next identical FLEE_FROM, so a distant
+	# hostile that was neither attacking nor provoked kept reclaiming the
+	# decision loop on every expiry.
+	if not _last_creature_threat_id.is_empty() and target_id == _last_creature_threat_id:
+		_creature_route_exhausted[target_id] = true
 
 
 ## Consume one terminal escape-route outcome. Keep the failed target out of the
