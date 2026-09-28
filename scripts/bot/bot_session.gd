@@ -1908,6 +1908,12 @@ func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) ->
 		tile + Vector2i.LEFT * 2 + Vector2i.DOWN,
 		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN,
 	]
+	# Some authoritative tiles are replaced atomically and explicitly preserve
+	# support when mined. In that case the tile itself is a safe standing node:
+	# excluding it makes a regenerating block beneath/under the avatar look
+	# unreachable even when the host has confirmed the mining capability.
+	if bool(target.get("preserves_support_on_mine", false)):
+		candidates.push_front(tile)
 	var best_position := {}
 	var best_cost := INF
 	for candidate in candidates:
@@ -4809,6 +4815,11 @@ func _resource_has_reachable_stand_tile(resource: Dictionary, reachable_support_
 		tile + Vector2i.LEFT * 2 + Vector2i.DOWN,
 		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN,
 	]
+	# Keep reachability proof aligned with _reachable_stand_position_for_block:
+	# the target tile may be the safe support node only when its authoritative
+	# capability says mining replaces it without removing support.
+	if bool(resource.get("preserves_support_on_mine", false)):
+		candidates.push_front(tile)
 	for candidate in candidates:
 		if reachable_support_tiles.has(candidate):
 			return true
