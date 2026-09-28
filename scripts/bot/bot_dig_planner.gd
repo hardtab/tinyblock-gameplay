@@ -30,6 +30,15 @@ static func next_step(observation: Dictionary, explicit_route_target: Dictionary
 	if terrain.is_empty():
 		return {}
 	var origin := _support_tile(observation.get("self", {}))
+	# A climbing/ghosted avatar can end up with its body inside wood or leaves.
+	# Route searches then have no usable origin, while the ordinary gatherer
+	# rejects the same block as unapproachable. Clear only the occupied body cell,
+	# never the support beneath the feet; _mine_step retains tier, protection and
+	# retry guards, and the host remains authoritative for the actual mine.
+	if bool((observation.get("self", {}) as Dictionary).get("on_ground", false)) and _solid(terrain, origin.x, origin.y - 1):
+		var occupied_clear := _mine_step(origin.x, origin.y - 1, origin, origin, observation)
+		if not occupied_clear.is_empty():
+			return occupied_clear
 	var target := _target_tile(observation, origin, explicit_route_target)
 	if target == _invalid_tile() or origin.distance_to(target) > MAX_TARGET_DISTANCE_TILES:
 		return {}
