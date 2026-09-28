@@ -1062,6 +1062,8 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var needs_wood := _needs_wood_progression(inventory) or _needs_workbench_material(observation)
 	var needs_leaves := _needs_leaf_progression(inventory)
 	var needs_cobblestone := _needs_cobblestone_progression(observation)
+	var stone_age_goal: Dictionary = observation.get("stone_age_goal", {}) if observation.get("stone_age_goal", {}) is Dictionary else {}
+	var seeking_stone_age_cobble := needs_cobblestone and str(stone_age_goal.get("stage", "")) == "mine_cobblestone"
 	var filler_count := _count_named(inventory, FILLER_BLOCK_NAMES)
 	var recent_build_cells := _recent_build_cells(observation)
 	var occupied := _terrain_occupied_map(observation)
@@ -1125,6 +1127,12 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 		]:
 			continue
 		if block_name in FILLER_BLOCK_NAMES and filler_count >= MAX_FILLER_RESERVE and not regenerates_on_mine:
+			continue
+		# While a stone/furnace progression needs cobblestone, generic GATHER
+		# must not substitute arbitrary terrain removal for a route to stone.
+		# Explicit dig/descent plans can still clear these cells after proving a
+		# usable way out, and regenerative sources remain valid.
+		if seeking_stone_age_cobble and block_name in FILLER_BLOCK_NAMES and not regenerates_on_mine and not bool(resource.get("dig_route", false)):
 			continue
 		# In a fresh Procedural world the nearest grass/dirt/sand is often the
 		# block under or beside the bot. Mining it opens a useless surface pit
