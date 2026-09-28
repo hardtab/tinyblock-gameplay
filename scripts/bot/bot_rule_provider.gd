@@ -941,6 +941,8 @@ func _priority_loot_cache(observation: Dictionary) -> Dictionary:
 	var best_distance := INF
 	var own_death_cache := {}
 	var own_death_cache_distance := INF
+	var blocked: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	var now_msec := int(observation.get("observed_at_msec", 0))
 	var own_player_id := str(observation.get("own_player_id", ""))
 	var mode := str(observation.get("world_mode", "")).strip_edges().to_lower()
 	var back_for_it_open := (
@@ -957,6 +959,8 @@ func _priority_loot_cache(observation: Dictionary) -> Dictionary:
 		var container := raw_container as Dictionary
 		var kind := str(container.get("kind", ""))
 		if kind != "death_cache" and kind != "one_use_cache" and not bool(container.get("death_cache", false)) and not bool(container.get("one_use_cache", false)):
+			continue
+		if int(blocked.get(str(container.get("id", "")), 0)) > now_msec:
 			continue
 		var distance := float(container.get("distance", Contract.distance_between(observation.get("self", {}), container)))
 		if distance < best_distance:
