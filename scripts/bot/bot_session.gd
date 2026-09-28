@@ -5526,6 +5526,25 @@ func _visible_containers_from_snapshot(snapshot: Dictionary, self_state: Diction
 		return containers
 	var origin := Contract.target_position(self_state)
 	var max_distance := maxf(observation_radius, CHEST_OBSERVATION_RADIUS) + float(BlockDefs.TILE)
+	if _stone_age_gathering_wood():
+		# A generated chest can be the only attainable bootstrap supply in a
+		# treeless biome. When the wide wood scan finds no approachable log,
+		# inspect chests over that same already-known area before choosing an
+		# arbitrary exploration heading. This does not reveal unstreamed chunks.
+		var has_accessible_wood := false
+		var resources: Array = snapshot.get("visible_resources", []) if snapshot.get("visible_resources", []) is Array else []
+		for raw_resource in resources:
+			if not raw_resource is Dictionary:
+				continue
+			var resource := raw_resource as Dictionary
+			if (
+				_is_starter_wood_log_name(str(resource.get("block_name", "")))
+				and (bool(resource.get("reachable", false)) or bool(resource.get("approachable", false)))
+			):
+				has_accessible_wood = true
+				break
+		if not has_accessible_wood:
+			max_distance = maxf(max_distance, STARTER_TOOLING_RESOURCE_SCAN_RADIUS + float(BlockDefs.TILE))
 	for raw_entry in raw_containers:
 		if not raw_entry is Dictionary:
 			continue

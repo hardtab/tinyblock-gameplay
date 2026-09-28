@@ -22,6 +22,12 @@ var _same_explore_frontier_failures := 0
 var _last_explore_left_failure_msec := -1
 var _last_explore_right_failure_msec := -1
 var _explore_suspended_until_msec := -1
+## Long-range exploration sweeps outward from the bot's first authoritative
+## position. Each completed leg reaches one additional band before reversing,
+## so useful short movement steps cannot pin the bot to one heading forever.
+var _explore_sweep_anchor_x := INF
+var _explore_sweep_reach_tiles := 48
+var _last_explore_was_long_range := false
 ## Identity of the finished/failed explore outcome already applied to the
 ## heading. The action history keeps terminal entries for the whole bounded
 ## window, so without this the same stale outcome was re-evaluated on every
@@ -78,6 +84,7 @@ const FLEE_ROUTE_FAILURE_REASONS := [
 const WANDER_RADIUS := 96.0
 const WANDER_COMMIT_MSEC := 1800
 const EXPLORE_RADIUS := 384.0
+const EXPLORE_SWEEP_REACH_INCREMENT_TILES := 48
 const EXPLORE_COMMIT_MSEC := 4200
 const EXPLORE_MAX_ROUTE_STEPS := 4
 const EXPLORE_MAX_DESCENT_PX := ROUTE_TILE * 2.0
@@ -149,6 +156,9 @@ func reset() -> void:
 	_last_explore_left_failure_msec = -1
 	_last_explore_right_failure_msec = -1
 	_explore_suspended_until_msec = -1
+	_explore_sweep_anchor_x = INF
+	_explore_sweep_reach_tiles = EXPLORE_SWEEP_REACH_INCREMENT_TILES
+	_last_explore_was_long_range = false
 	_last_explore_outcome_key = ""
 	_last_follow_target_id = ""
 	_last_follow_route_outcome_key = ""
@@ -1212,6 +1222,7 @@ func _consecutive_action_streak(observation: Dictionary, action: String) -> int:
 func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_RADIUS) -> Dictionary:
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var origin := Contract.target_position(self_state)
+	var is_long_range_explore := max_distance >= EXPLORE_RADIUS
 	var now_msec := int(observation.get("observed_at_msec", 0))
 	var history: Array = _as_array(observation.get("action_history", []))
 	for index in range(history.size() - 1, -1, -1):
@@ -1229,6 +1240,7 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 			var outcome_key := _explore_outcome_key(entry)
 			if outcome_key != _last_explore_outcome_key:
 				_last_explore_outcome_key = outcome_key
+				var completed_leg_direction := _explore_direction
 				if (
 					not _last_explore_target_id.is_empty()
 					and target_id == _last_explore_target_id
@@ -1262,6 +1274,21 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 					else:
 						_same_explore_frontier_failures = 0
 						_last_failed_explore_frontier = ""
+						# Route-failure flips above remain local recovery behavior. A
+						# successful long-range excursion reverses only after the
+						# authoritative player position reaches this leg's expanding
+						# boundary; merely issuing a distant target never advances it.
+						if (
+							_last_explore_was_long_range
+							and phase == "finished"
+							and not is_inf(_explore_sweep_anchor_x)
+							and completed_leg_direction != 0
+						):
+							var sweep_progress := (origin.x - _explore_sweep_anchor_x) * float(completed_leg_direction)
+							var leg_reach_px := float(_explore_sweep_reach_tiles) * ROUTE_TILE
+							if sweep_progress >= leg_reach_px:
+								_explore_direction = -completed_leg_direction
+								_explore_sweep_reach_tiles += EXPLORE_SWEEP_REACH_INCREMENT_TILES
 		break
 	if _explore_suspended_until_msec >= 0:
 		if now_msec < _explore_suspended_until_msec:
@@ -1316,6 +1343,14 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 		# uncountable and allow the same failed frontier to be chosen forever.
 		return {}
 	_explore_direction = selected_direction
+	if is_long_range_explore:
+		if is_inf(_explore_sweep_anchor_x):
+			_explore_sweep_anchor_x = origin.x
+			_explore_sweep_reach_tiles = EXPLORE_SWEEP_REACH_INCREMENT_TILES
+		_last_explore_was_long_range = true
+	else:
+		# The nearby WANDER fallback is deliberately outside the expanding sweep.
+		_last_explore_was_long_range = false
 	var label := "left" if _explore_direction < 0 else "right"
 	var target_id := "explore:%s" % label
 	_last_explore_origin_x = origin.x
