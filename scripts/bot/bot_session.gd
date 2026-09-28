@@ -121,6 +121,8 @@ var _blocked_action_targets: Dictionary = {}
 var _protected_build_cells: Dictionary = {}
 var _opened_generated_chest_cells: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
+var _jump_landing_cache: Dictionary = {}
+var _terrain_revision := 0
 var _last_flee_route_diagnostic_msec := -1
 var _last_pursuit_route_diagnostic_msec := -1
 ## Fully replicated procedural chunks prove that omitted cells are air. Static
@@ -143,6 +145,7 @@ var _physics_route_target := Vector2i(2147483647, 2147483647)
 var _physics_route_target_id := ""
 var _physics_route_replan_msec := -1
 var _physics_route_first_step_guarded := false
+var _physics_route_later_step_guarded := false
 var _host_rejected_transitions: Dictionary = {}
 var _active_air_transition: Dictionary = {}
 var _host_rejected_transition_from := Vector2i(2147483647, 2147483647)
@@ -366,6 +369,7 @@ func join_session(record: Dictionary) -> void:
 	_opened_generated_chest_cells.clear()
 	_action_loop_blocked_until.clear()
 	_terrain_tiles.clear()
+	_invalidate_jump_landing_cache()
 	_terrain_known_chunks.clear()
 	_terrain_observed_cells.clear()
 	_descent_snapshot_complete = false
@@ -375,6 +379,7 @@ func join_session(record: Dictionary) -> void:
 	_physics_route_target = Vector2i(2147483647, 2147483647)
 	_physics_route_target_id = ""
 	_physics_route_first_step_guarded = false
+	_physics_route_later_step_guarded = false
 	_physics_route_replan_msec = -1
 	_host_rejected_transitions.clear()
 	_active_air_transition.clear()
@@ -1274,6 +1279,9 @@ func _physics_route_step(
 	if _terrain_tiles.is_empty():
 		return {}
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	if not first_step_allowed.is_valid():
+		first_step_allowed = _safe_jump_first_step_filter(self_state)
+	var later_step_allowed := _safe_jump_later_step_filter(self_state)
 	var origin_tile := _route_origin_support_tile(
 		origin,
 		self_state,
@@ -1314,6 +1322,7 @@ func _physics_route_step(
 		or _physics_route_target != target_tile
 		or _physics_route_target_id != target_id
 		or _physics_route_first_step_guarded != first_step_allowed.is_valid()
+		or not _physics_route_later_step_guarded
 		or _physics_route_replan_msec < 0
 		or now >= _physics_route_replan_msec
 	)
@@ -1326,10 +1335,12 @@ func _physics_route_step(
 			Navigator.MAX_PHYSICS_ROUTE_NODES,
 			Callable(self, "_physics_transition_allowed"),
 			first_step_allowed,
+			later_step_allowed,
 		)
 		_physics_route_target = target_tile
 		_physics_route_target_id = target_id
 		_physics_route_first_step_guarded = first_step_allowed.is_valid()
+		_physics_route_later_step_guarded = later_step_allowed.is_valid()
 		_physics_route_replan_msec = now + (250 if first_step_allowed.is_valid() else 450)
 	if _physics_route.is_empty() and origin_tile != target_tile:
 		return {"unreachable": true}
@@ -1401,11 +1412,53 @@ func _safe_jump_first_step_filter(self_state: Dictionary) -> Callable:
 		return _jump_route_has_safe_landing(self_state, _world_position_for_support_tile(to_tile))
 
 
+func _safe_jump_later_step_filter(template_state: Dictionary) -> Callable:
+	# Later edges are evaluated from a hypothetical, canonical grounded pose at
+	# their source support tile. The first edge continues to use the real host
+	# pose through _safe_jump_first_step_filter because its velocity, fluids, and
+	# small ground-snap offset can change the actual landing arc.
+	return func(from_tile: Vector2i, to_tile: Vector2i, kind: String) -> bool:
+		if kind != "jump":
+			return true
+		var cache_key := "%d|%.1f|%.1f|%d:%d>%d:%d" % [
+			_terrain_revision,
+			float(template_state.get("w", 20.0)),
+			float(template_state.get("h", 28.0)),
+			from_tile.x,
+			from_tile.y,
+			to_tile.x,
+			to_tile.y,
+		]
+		if _jump_landing_cache.has(cache_key):
+			return bool(_jump_landing_cache[cache_key])
+		var hypothetical_state := template_state.duplicate(true)
+		var source_position := _world_position_for_support_tile(from_tile)
+		hypothetical_state["x"] = source_position.x
+		hypothetical_state["y"] = source_position.y
+		hypothetical_state["vx"] = 0.0
+		hypothetical_state["vy"] = 0.0
+		hypothetical_state["on_ground"] = true
+		var safe := _jump_route_has_safe_landing(
+			hypothetical_state,
+			_world_position_for_support_tile(to_tile),
+		)
+		if _jump_landing_cache.size() >= 2048:
+			_jump_landing_cache.clear()
+		_jump_landing_cache[cache_key] = safe
+		return safe
+
+
+func _invalidate_jump_landing_cache() -> void:
+	_terrain_revision += 1
+	_jump_landing_cache.clear()
+
+
 func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2, first_step_allowed: Callable = Callable()) -> Dictionary:
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	var origin_tile: Vector2i = _route_origin_support_tile(origin, self_state)
 	if not first_step_allowed.is_valid():
 		first_step_allowed = _safe_jump_first_step_filter(self_state)
+	var later_step_allowed := _safe_jump_later_step_filter(self_state)
 	if _terrain_tiles.is_empty():
 		_emit_pursuit_route_unavailable(origin_tile, "terrain_empty", first_step_allowed, {})
 		return {}
@@ -1416,6 +1469,7 @@ func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2, first_step_al
 		Navigator.MAX_PHYSICS_ROUTE_NODES,
 		Callable(self, "_physics_transition_allowed"),
 		first_step_allowed,
+		later_step_allowed,
 	)
 	if not reachable_first_steps.has(origin_tile):
 		var origin_recovery_steps := _grounded_origin_walk_steps(origin, self_state, first_step_allowed)
@@ -1594,6 +1648,7 @@ func _safe_flee_waypoint(
 	var origin_distance := origin.distance_to(threat)
 	if not first_step_allowed.is_valid():
 		first_step_allowed = _safe_flee_first_step_filter(self_state, origin, threat)
+	var later_step_allowed := _safe_jump_later_step_filter(self_state)
 	var reachable_first_steps := Navigator.physics_reachable_first_steps(
 		origin_tile,
 		Callable(self, "_terrain_standable_tile"),
@@ -1601,6 +1656,7 @@ func _safe_flee_waypoint(
 		Navigator.MAX_PHYSICS_ROUTE_NODES,
 		Callable(self, "_physics_transition_allowed"),
 		first_step_allowed,
+		later_step_allowed,
 	)
 	if not reachable_first_steps.has(origin_tile):
 		# The reachability search refuses to start when the tile under the bot is
@@ -2041,6 +2097,9 @@ func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) ->
 		origin,
 		_world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {},
 	)
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	var first_step_allowed := _safe_jump_first_step_filter(self_state)
+	var later_step_allowed := _safe_jump_later_step_filter(self_state)
 	var candidates: Array[Vector2i] = [
 		tile + Vector2i.LEFT,
 		tile + Vector2i.RIGHT,
@@ -2069,6 +2128,8 @@ func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) ->
 			Callable(self, "_terrain_climbable_tile"),
 			Navigator.MAX_PHYSICS_ROUTE_NODES,
 			Callable(self, "_physics_transition_allowed"),
+			first_step_allowed,
+			later_step_allowed,
 		)
 		if route.is_empty() or Vector2i((route.back() as Dictionary).get("tile", origin_support)) != candidate:
 			continue
@@ -2234,6 +2295,7 @@ func _terrain_climbable_tile(tile: Vector2i) -> bool:
 
 func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 	_terrain_tiles.clear()
+	_invalidate_jump_landing_cache()
 	_terrain_observed_cells.clear()
 	_support_preserving_mine_tiles.clear()
 	_safe_exploration_waypoint_cache.clear()
@@ -2272,6 +2334,8 @@ func _seed_tree_growth_resources(raw_growth: Variant) -> void:
 	# keep the known trunk/foliage cells visible so the bot can climb them.
 	if not raw_growth is Array:
 		return
+	if not (raw_growth as Array).is_empty():
+		_invalidate_jump_landing_cache()
 	for raw_entry in raw_growth:
 		if not raw_entry is Dictionary:
 			continue
@@ -2290,6 +2354,8 @@ func _seed_tree_growth_resources(raw_growth: Variant) -> void:
 
 func _apply_plant_batch(payload: Dictionary) -> void:
 	var plants: Array = payload.get("plants", []) if payload.get("plants", []) is Array else []
+	if not plants.is_empty():
+		_invalidate_jump_landing_cache()
 	for raw_plant in plants:
 		if raw_plant is Dictionary:
 			_ingest_plant_entry(raw_plant as Dictionary)
@@ -2524,6 +2590,7 @@ func _merge_streamed_chunk_terrain(state: Dictionary) -> bool:
 	snapshot_plants = snapshot_plants.filter(func(plant: Variant): return not plant is Dictionary or floori(float(int((plant as Dictionary).get("x", (plant as Dictionary).get("anchor_x", WorldSim.COORD_LIMIT)))) / float(WorldSim.CHUNK_WIDTH)) != chunk_x)
 	snapshot_plants.append_array(plant_entries)
 	_world_snapshot["plant_growth"] = snapshot_plants
+	_invalidate_jump_landing_cache()
 	_safe_exploration_waypoint_cache.clear()
 	_safe_exploration_waypoint_cache_checked_msec = -1
 	_physics_route.clear()
@@ -2591,12 +2658,14 @@ func _seed_duel_fallback_terrain() -> void:
 			var key := "%d:%d" % [tile_x, 8]
 			if not _terrain_tiles.has(key):
 				_terrain_tiles[key] = "grass"
+	_invalidate_jump_landing_cache()
 	_physics_route_replan_msec = 0
 
 
 func _apply_tile_batch(payload: Dictionary) -> void:
 	var tiles: Array = payload.get("tiles", []) if payload.get("tiles", []) is Array else []
 	if not tiles.is_empty():
+		_invalidate_jump_landing_cache()
 		_safe_exploration_waypoint_cache_checked_msec = -1
 	for raw_tile in tiles:
 		if not raw_tile is Dictionary:
@@ -4799,6 +4868,7 @@ func _annotate_active_build_project_route(observation: Dictionary, now_msec: int
 		var cache_key := "%s|%s|%s|%s|%d:%d>%d:%d" % [world_id, session_id, str(project.get("id", "")), target_id, origin_tile.x, origin_tile.y, target_tile.x, target_tile.y]
 		if cache_key != _build_project_route_cache_key or _build_project_route_checked_msec < 0 or now - _build_project_route_checked_msec >= BUILD_PROJECT_ROUTE_REPLAN_MSEC:
 			var first_step_allowed := _safe_jump_first_step_filter(self_state)
+			var later_step_allowed := _safe_jump_later_step_filter(self_state)
 			var route := Navigator.physics_route(
 				origin_tile,
 				target_tile,
@@ -4807,6 +4877,7 @@ func _annotate_active_build_project_route(observation: Dictionary, now_msec: int
 				Navigator.MAX_PHYSICS_ROUTE_NODES,
 				Callable(self, "_physics_transition_allowed"),
 				first_step_allowed,
+				later_step_allowed,
 			)
 			_build_project_route_reachable = not route.is_empty() and Vector2i((route.back() as Dictionary).get("tile", origin_tile)) == target_tile
 			_build_project_route_cache_key = cache_key
@@ -4844,6 +4915,7 @@ func _reachable_world_underfoot_waypoints(snapshot: Dictionary) -> Array[Diction
 		if not _terrain_standable_tile(target_tile):
 			continue
 		var first_step_allowed := _safe_jump_first_step_filter(self_state)
+		var later_step_allowed := _safe_jump_later_step_filter(self_state)
 		var route := Navigator.physics_route(
 			origin_tile,
 			target_tile,
@@ -4852,6 +4924,7 @@ func _reachable_world_underfoot_waypoints(snapshot: Dictionary) -> Array[Diction
 			Navigator.MAX_PHYSICS_ROUTE_NODES,
 			Callable(self, "_physics_transition_allowed"),
 			first_step_allowed,
+			later_step_allowed,
 		)
 		if route.is_empty() or Vector2i((route.back() as Dictionary).get("tile", origin_tile)) != target_tile:
 			continue
@@ -4875,6 +4948,7 @@ func _safe_exploration_waypoints(self_state: Dictionary) -> Array[Dictionary]:
 	var origin := Contract.target_position(self_state)
 	var origin_tile := _route_origin_support_tile(origin, self_state)
 	var first_step_allowed := _safe_jump_first_step_filter(self_state)
+	var later_step_allowed := _safe_jump_later_step_filter(self_state)
 	var state_signature := "%.1f:%.1f:%.1f:%.1f" % [
 		float(self_state.get("x", origin.x)),
 		float(self_state.get("y", origin.y)),
@@ -4896,6 +4970,7 @@ func _safe_exploration_waypoints(self_state: Dictionary) -> Array[Dictionary]:
 		Navigator.MAX_PHYSICS_ROUTE_NODES,
 		Callable(self, "_physics_transition_allowed"),
 		first_step_allowed,
+		later_step_allowed,
 	)
 	var result: Array[Dictionary] = []
 	var max_horizontal_tiles := ceili(STARTER_TOOLING_RESOURCE_SCAN_RADIUS / float(BlockDefs.TILE))
@@ -5046,6 +5121,9 @@ func _physics_reachable_support_tiles(origin_tile: Vector2i, first_step_allowed:
 	# same graph, including temporary transitions rejected by the authoritative
 	# host and first jump arcs the local physics adapter cannot safely execute.
 	# Otherwise policy advertises a target that the executor immediately refuses.
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	if not first_step_allowed.is_valid():
+		first_step_allowed = _safe_jump_first_step_filter(self_state)
 	return Navigator.physics_reachable_tiles(
 		origin_tile,
 		Callable(self, "_terrain_standable_tile"),
@@ -5053,6 +5131,7 @@ func _physics_reachable_support_tiles(origin_tile: Vector2i, first_step_allowed:
 		Navigator.MAX_PHYSICS_ROUTE_NODES,
 		Callable(self, "_physics_transition_allowed"),
 		first_step_allowed,
+		_safe_jump_later_step_filter(self_state),
 	)
 
 
