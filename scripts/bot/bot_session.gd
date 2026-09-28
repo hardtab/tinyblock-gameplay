@@ -61,6 +61,7 @@ var _live_challenge_best_distance := 0
 ## authoritative initial/player-inventory snapshots or action acknowledgements.
 var _stone_age_goal_state: Dictionary = {}
 var _stone_age_authoritative_inventory: Dictionary = {}
+var _host_tree_inventory_names: Dictionary = {}
 var _stone_age_authoritative_equipment := {"hand": "", "feet": ""}
 ## Goal-level retries for achievement strategies other than Stone Age. State is
 ## deliberately scoped to one world; a new world never inherits old attempts.
@@ -430,6 +431,7 @@ func join_session(record: Dictionary) -> void:
 	_build_project_route_checked_msec = -1
 	_build_project_route_reachable = false
 	_stone_age_authoritative_inventory.clear()
+	_host_tree_inventory_names.clear()
 	_stone_age_authoritative_equipment = {"hand": "", "feet": ""}
 	_craft_pending_output = ""
 	_craft_retry_after_msec = -1
@@ -4003,11 +4005,33 @@ func _inventory_summary_from_player_state(player_state: Dictionary) -> Dictionar
 		if amount <= 0:
 			continue
 		var key := str(raw_key)
-		var name := _block_name_for_content_id(key)
+		var name := _canonical_inventory_name(key)
 		if name.is_empty():
 			name = key
 		if not name.is_empty():
-			result[name] = amount
+			result[name] = int(result.get(name, 0)) + amount
+	return result
+
+
+func _canonical_inventory_name(key: String) -> String:
+	# Older Android hosts serialize system-tree blocks with the pre-1.4.5
+	# generated hash name. Retain that wire name for inventory snapshots, but
+	# use the stable tree name in all bot goals and recipe decisions.
+	for content_id in BlockDefs.CORE_TREE_CONTENT_IDS:
+		var canonical := str(content_id).trim_prefix("core.")
+		if key == "generated_%s" % str(content_id).sha256_text().substr(0, 12):
+			_host_tree_inventory_names[canonical] = key
+			return canonical
+	var resolved := _block_name_for_content_id(key)
+	return resolved if not resolved.is_empty() else key
+
+
+func _host_inventory_wire_names(inventory: Dictionary) -> Dictionary:
+	var result := {}
+	for raw_name in inventory:
+		var name := str(raw_name)
+		var wire_name := str(_host_tree_inventory_names.get(name, name))
+		result[wire_name] = int(result.get(wire_name, 0)) + int(inventory[raw_name])
 	return result
 
 
@@ -4463,6 +4487,7 @@ func _send_inventory_snapshot() -> void:
 	if network_client == null or not network_client.has_method("send_command"):
 		return
 	var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+	var wire_inventory := _host_inventory_wire_names(inventory)
 	# Hosts reject guest snapshots whose host revision does not match the last
 	# acknowledged inventory_host_revision. Sending 0 forever made every post-mine
 	# craft/eat snapshot bounce, leaving the bot stuck retrying CRAFT planks.
@@ -4470,10 +4495,10 @@ func _send_inventory_snapshot() -> void:
 	network_client.call("send_command", "inventory_snapshot", {
 		"inventory_host_revision": _inventory_host_revision,
 		"inventory_client_revision": _inventory_client_revision,
-		"inventory": inventory.duplicate(true),
+		"inventory": wire_inventory,
 		"item_durability": {},
 		"footwear_wear_distance": 0.0,
-		"inventory_order": inventory.keys(),
+		"inventory_order": wire_inventory.keys(),
 		"hotbar_slots": ["", "", "", "", "", ""],
 		"equipment_slots": _equipment_slots.duplicate(true),
 		"active_hotbar_slot": 0,
@@ -4525,9 +4550,7 @@ func _apply_inventory_snapshot(payload: Dictionary) -> void:
 	var normalized := {}
 	for raw_key in inventory.keys():
 		var key := str(raw_key)
-		var name := key if not _block_entry(key).is_empty() else _block_name_for_content_id(key)
-		if name.is_empty():
-			name = key
+		var name := _canonical_inventory_name(key)
 		var amount := int(inventory.get(raw_key, 0))
 		if amount <= 0:
 			continue
