@@ -6,7 +6,9 @@ const BlockDefs = preload("res://gameplay/scripts/block_defs.gd")
 
 const DEFAULT_RADIUS := 256.0
 const DEFAULT_MAX_EVENTS := 12
-const REACHABLE_DISTANCE := float(BlockDefs.TILE) * 2.5
+## Keep direct block interactions in sync with WorldSim.player_near(), which
+## measures from the avatar centre to the block centre using a 4.5-tile radius.
+const HOST_MINE_REACH := float(BlockDefs.TILE) * 4.5
 const SAFE_SUPPORT_MINE_DROP_TILES := 8
 
 
@@ -20,10 +22,10 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 	var threats := _normalize_entities(snapshot.get("threats", snapshot.get("creatures", [])), "", self_position, radius, true)
 	var resources := _normalize_entities(snapshot.get("visible_resources", snapshot.get("resources", [])), "", self_position, radius, false)
 	for resource in resources:
-		# Recalculate reachability from the current self position. Snapshot tiles are
-		# built once and would otherwise keep a stale reachable=true after the bot
-		# walks or falls away from the block.
-		resource["reachable"] = float(resource.get("distance", 9999.0)) <= REACHABLE_DISTANCE
+		# Recalculate reachability with the host's exact center-to-center geometry.
+		# Snapshot resource distances start at the avatar's top-left and the old
+		# 2.5-tile cutoff made blocks mineable by the host appear out of reach here.
+		resource["reachable"] = _within_host_mine_reach(self_state, resource)
 	players.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.get("distance", 9999.0)) < float(b.get("distance", 9999.0)))
 	threats.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.get("distance", 9999.0)) < float(b.get("distance", 9999.0)))
 	resources.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.get("distance", 9999.0)) < float(b.get("distance", 9999.0)))
@@ -36,7 +38,7 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 		regenerating_block["position"] = [source_position.x, source_position.y]
 		regenerating_block["relative_position"] = [source_position.x - self_position.x, source_position.y - self_position.y]
 		regenerating_block["distance"] = self_position.distance_to(source_position)
-		regenerating_block["reachable"] = float(regenerating_block["distance"]) <= REACHABLE_DISTANCE
+		regenerating_block["reachable"] = _within_host_mine_reach(self_state, regenerating_block)
 	var observation := {
 		"observed_at_msec": now_msec,
 		"self": self_state,
@@ -74,6 +76,15 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 			if not aggressor_visible:
 				observation["aggressive_player_id"] = ""
 	return observation
+
+
+static func _within_host_mine_reach(self_state: Dictionary, resource: Dictionary) -> bool:
+	var player_position := Contract.target_position(self_state)
+	var player_center := player_position + Vector2(
+		float(self_state.get("w", 20.0)) * 0.5,
+		float(self_state.get("h", 28.0)) * 0.5,
+	)
+	return player_center.distance_to(Contract.target_position(resource)) < HOST_MINE_REACH
 
 
 static func count_live_humans(roster: Variant, own_player_id: String, excluded_ids: Array = [], dedicated_server: bool = false) -> int:
