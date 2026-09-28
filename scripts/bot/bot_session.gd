@@ -66,6 +66,11 @@ var _stone_age_authoritative_equipment := {"hand": "", "feet": ""}
 ## Goal-level retries for achievement strategies other than Stone Age. State is
 ## deliberately scoped to one world; a new world never inherits old attempts.
 var _achievement_goal_states: Dictionary = {}
+## Achievement ids that were already unlocked when this world's goal states
+## were first synced. Persisted credit is baseline, not in-session progress, so
+## these never emit goal_completed; that event stays reserved for real unlocks
+## the bot observes while it is playing.
+var _achievement_goal_unlocked_baseline: Dictionary = {}
 ## A route-backed construction is a small persistent project: keep the same
 ## observed destination across placement steps and finish only when it becomes
 ## reachable according to the next authoritative observation.
@@ -442,6 +447,7 @@ func join_session(record: Dictionary) -> void:
 	)
 	_stone_age_goal_state.clear()
 	_achievement_goal_states.clear()
+	_achievement_goal_unlocked_baseline.clear()
 	_build_project_state.clear()
 	_build_project_route_cache_key = ""
 	_build_project_route_checked_msec = -1
@@ -6990,12 +6996,22 @@ func _sync_achievement_goal_states(achievements: Dictionary, mode: String, now_m
 	var state_world_mode := str(_achievement_goal_states.get("_world_mode", ""))
 	if not state_world_id.is_empty() and (state_world_id != world_id or state_world_mode != mode):
 		_achievement_goal_states.clear()
+		_achievement_goal_unlocked_baseline.clear()
 	if world_id.is_empty():
 		_achievement_goal_states.clear()
+		_achievement_goal_unlocked_baseline.clear()
 		return
 	_achievement_goal_states["_world_id"] = world_id
 	_achievement_goal_states["_world_mode"] = mode
 	var unlocked: Array = achievements.get("unlocked", []) if achievements.get("unlocked", []) is Array else []
+	# Snapshot the persisted unlock set exactly once per world. A goal that is
+	# already unlocked here is baseline credit; only ids missing from this
+	# snapshot can report goal_completed during the session.
+	if str(_achievement_goal_unlocked_baseline.get("_world_id", "")) != world_id:
+		_achievement_goal_unlocked_baseline.clear()
+		_achievement_goal_unlocked_baseline["_world_id"] = world_id
+		for raw_unlocked_goal in unlocked:
+			_achievement_goal_unlocked_baseline[str(raw_unlocked_goal)] = true
 	var open_by_id: Dictionary = {}
 	for raw_goal in achievements.get("open", []) if achievements.get("open", []) is Array else []:
 		if not raw_goal is Dictionary:
@@ -7017,7 +7033,8 @@ func _sync_achievement_goal_states(achievements: Dictionary, mode: String, now_m
 			entry["world_mode"] = mode
 			_achievement_goal_states[goal_id] = entry
 			if not was_completed:
-				structured_log.emit({"event": "goal_completed", "goal": goal_id, "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
+				if not _achievement_goal_unlocked_baseline.has(goal_id):
+					structured_log.emit({"event": "goal_completed", "goal": goal_id, "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
 			continue
 		if not _achievement_goal_mode_allowed(goal_id, mode):
 			if not entry.is_empty():
