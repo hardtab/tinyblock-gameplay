@@ -147,6 +147,8 @@ static func mine_target_is_safe(observation: Dictionary, target: Dictionary) -> 
 		return true
 	if _is_descent_return_support(observation, target):
 		return false
+	if mine_target_opens_harmful_fluid_path(observation, target):
+		return false
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	if self_state.is_empty():
 		return false
@@ -180,6 +182,59 @@ static func mine_target_is_safe(observation: Dictionary, target: Dictionary) -> 
 		if landing_cell.is_empty():
 			continue
 		return _safe_solid_terrain(landing_cell)
+	return false
+
+
+## Mining is unsafe when it opens an adjacent hot-fluid source into the bot's
+## immediate body/support area. This is derived from observed fluid properties
+## and geometry, so it applies across world modes and custom hot fluids.
+static func mine_target_opens_harmful_fluid_path(observation: Dictionary, target: Dictionary) -> bool:
+	if not target.has("x") or not target.has("y"):
+		return false
+	var target_x := int(target.get("x", 2147483647))
+	var target_y := int(target.get("y", 2147483647))
+	if target_x == 2147483647 or target_y == 2147483647:
+		return false
+	var terrain := _terrain_cell_map(observation.get("terrain_tiles", []))
+	var target_cell: Dictionary = terrain.get(Vector2i(target_x, target_y), {}) if terrain.get(Vector2i(target_x, target_y), {}) is Dictionary else {}
+	if target_cell.is_empty() or not bool(target_cell.get("solid", false)):
+		return false
+	# Trust support-preservation only when it is present in the observed terrain,
+	# not merely on a proposed action.
+	if bool(target_cell.get("preserves_support_on_mine", false)):
+		return false
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if self_state.is_empty():
+		return false
+	var tile_size := float(BlockDefs.TILE)
+	var x := float(self_state.get("x", 0.0))
+	var y := float(self_state.get("y", 0.0))
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var body_left := floori(x / tile_size)
+	var body_right := floori((x + width - 0.001) / tile_size)
+	var body_top := floori(y / tile_size)
+	var support_y := floori((y + height + 0.01) / tile_size)
+	# A nearby opening is only a concern when fluid can plausibly reach the
+	# avatar's body or feet. The small bounded neighborhood follows a short local
+	# spill; distant fluids are left to ordinary routing and observation updates.
+	if (
+		target_x < body_left - 3
+		or target_x > body_right + 3
+		or target_y < body_top - 2
+		or target_y > support_y + 2
+	):
+		return false
+	var source_offsets: Array[Vector2i] = [Vector2i(0, -1), Vector2i(-1, 0), Vector2i(1, 0)]
+	for offset in source_offsets:
+		var source: Dictionary = terrain.get(Vector2i(target_x + offset.x, target_y + offset.y), {}) if terrain.get(Vector2i(target_x + offset.x, target_y + offset.y), {}) is Dictionary else {}
+		if not _is_harmful_fluid_cell(source):
+			continue
+		# A direct vertical spill or a same-level side spill can occupy the newly
+		# opened tile. Reject only when that spill is also near the bot's body or
+		# support row, where it can turn this mining action into self-damage.
+		if target_y >= body_top - 1 and target_y <= support_y + 1:
+			return true
 	return false
 
 
@@ -235,8 +290,21 @@ static func _terrain_cell_map(raw_terrain: Variant) -> Dictionary:
 			"name": block_name,
 			"solid": bool(tile.get("solid", not hazardous_fluid)),
 			"fluid": bool(tile.get("fluid", hazardous_fluid)),
+			"temperature": float(tile.get("temperature", 0.0)),
+			"harmful_fluid": bool(tile.get("harmful_fluid", false)),
+			"preserves_support_on_mine": bool(tile.get("preserves_support_on_mine", false)),
 		}
 	return terrain
+
+
+static func _is_harmful_fluid_cell(cell: Dictionary) -> bool:
+	var name := str(cell.get("name", "")).to_lower()
+	return (
+		bool(cell.get("harmful_fluid", false))
+		or name == "lava"
+		or name.ends_with(".lava")
+		or (bool(cell.get("fluid", false)) and float(cell.get("temperature", 0.0)) >= 0.8)
+	)
 
 
 static func _safe_solid_terrain(cell: Variant) -> bool:

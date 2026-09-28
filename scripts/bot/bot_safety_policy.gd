@@ -137,6 +137,8 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 				return _rejected(decision, "combat_target_has_priority")
 			if _descent_support_is_protected(observation, mine_target):
 				return _rejected(decision, "descent_return_support_protected")
+			if Perception.mine_target_opens_harmful_fluid_path(observation, mine_target):
+				return _rejected(decision, "mine_target_harmful_fluid_breach")
 			if bool(decision.get("descent_clear", false)) and not _valid_descent_clear(decision, observation):
 				return _rejected(decision, "descent_clear_target_mismatch")
 			if not Perception.mine_target_is_safe(observation, mine_target):

@@ -167,6 +167,7 @@ var _harmful_fluid_damage_cooldown := 0.0
 var _lava_retreat_active := false
 var _guest_defeat_pending := false
 var _guest_defeat_retry_after_msec := -1
+var _guest_defeat_sent_revision := -1
 var _host_player_id := ""
 var _aggressive_player_id := ""
 var _last_player_damage_attacker_id := ""
@@ -244,6 +245,7 @@ const BUILD_PROJECT_RETRY_MSEC := 30_000
 const BUILD_PROJECT_ROUTE_REPLAN_MSEC := 500
 const ACTION_RETRY_BLOCK_MSEC := 8_000
 const MINE_REJECTION_RETRY_MSEC := 60_000
+const HARMFUL_FLUID_MINE_RETRY_MSEC := 300_000
 const STATION_ROUTE_RETRY_BLOCK_MSEC := 30_000
 const CONTAINER_RETRY_BLOCK_MSEC := 30_000
 const UNSAFE_ROUTE_RETRY_BLOCK_MSEC := 30_000
@@ -401,6 +403,7 @@ func join_session(record: Dictionary) -> void:
 	_lava_retreat_active = false
 	_guest_defeat_pending = false
 	_guest_defeat_retry_after_msec = -1
+	_guest_defeat_sent_revision = -1
 	_host_player_id = ""
 	_aggressive_player_id = ""
 	_last_player_damage_attacker_id = ""
@@ -828,6 +831,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	var flee_target_x := target.x
 	var target_id := str(decision.get("target_id", ""))
 	var player_target := false
+	var emergency_fluid_escape_jump := false
 	if target_id != "":
 		for raw_player in observation.get("players", []):
 			if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == target_id:
@@ -926,8 +930,16 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		# A straight-line escape vector can point through water, a ravine or an
 		# unsupported edge. Pick an actually reachable support tile that increases
 		# distance from the threat; the same physics route will execute that choice.
-		# Direct lava contact keeps its immediate horizontal escape path below.
-		if not _local_touches_harmful_fluid(self_state) and not _terrain_tiles.is_empty():
+		if _local_touches_harmful_fluid(self_state):
+			var fluid_escape := _safe_harmful_fluid_escape_waypoint(self_state, origin, target)
+			if fluid_escape.is_empty():
+				_set_desired_input(false, false, false)
+				_advance_local_physics(self_state, delta, false)
+				_world_snapshot["self"] = self_state
+				return {"done": true, "reason": "flee_no_dry_fluid_landing"}
+			destination = fluid_escape.get("position", target)
+			emergency_fluid_escape_jump = true
+		elif not _terrain_tiles.is_empty():
 			var body_center := origin + Vector2(
 				float(self_state.get("w", 20.0)) * 0.5,
 				float(self_state.get("h", 28.0)) * 0.5,
@@ -962,12 +974,13 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 				physics_first_step_guard = _safe_flee_emergency_step_filter(self_state, origin, threat_center)
 			destination = flee_waypoint.get("position", destination)
 		else:
-			# Actor positions and lava targets are centers in perception, while the
-			# movement origin is the avatar's top-left. Preserve the direct emergency
-			# step only when already touching harmful fluid or terrain is unavailable.
+			# With no terrain snapshot there is no landing to verify. Let physics
+			# resolve the current pose instead of steering blindly toward an unknown
+			# horizontal tile.
 			var body_center := origin + Vector2(float(self_state.get("w", 20.0)) * 0.5, 0.0)
-			var away_center := Navigator.step_away_from(body_center, Vector2(flee_target_x, body_center.y), 120.0)
-			destination = away_center - Vector2(float(self_state.get("w", 20.0)) * 0.5, 0.0)
+			if not _local_touches_harmful_fluid(self_state):
+				var away_center := Navigator.step_away_from(body_center, Vector2(flee_target_x, body_center.y), 120.0)
+				destination = away_center - Vector2(float(self_state.get("w", 20.0)) * 0.5, 0.0)
 	elif action == Contract.ACTION_MOVE_TO:
 		# Explicit MOVE_TO targets already carry a validated standing Y: duel
 		# opponents who jumped onto a block, plus exploration/biome waypoints that
@@ -1122,9 +1135,8 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 			# the local one-block pit heuristic turn the descent into a jump.
 			hint = "walk"
 	if emergency_lava_escape:
-		# During direct lava contact, leave immediately on the horizontal axis.
-		# Starting a guessed jump/climb arc while embedded in fluid can keep the
-		# avatar in the pool long enough to die before the next policy update.
+		# Direct contact uses a landing proven dry by local terrain and a simulated
+		# jump arc. Reset any stale transition, then hold the jump toward that tile.
 		_jump_active = false
 		_jump_started_msec = -1
 		_climb_active = false
@@ -1132,7 +1144,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		self_state["tree_ghost"] = false
 		self_state["climbing"] = false
 		self_state["climb_col"] = -1
-		hint = "walk"
+		hint = "jump" if emergency_fluid_escape_jump else "walk"
 	# A local obstacle hint is only a one-column cue; it must not turn the full
 	# player/resource destination into one large speculative jump. Route jumps
 	# have already been checked above. Direct hints use the same landing proof,
@@ -1148,7 +1160,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 			_advance_local_physics(self_state, delta, false)
 			_world_snapshot["self"] = self_state
 			return {"done": true, "reason": "unsafe_jump_route"}
-		if not _is_pvp_world() and not _jump_route_has_safe_landing(self_state, destination):
+		if not _is_pvp_world() and not _jump_route_has_safe_landing(self_state, destination, emergency_fluid_escape_jump):
 			# Preserve the normal obstacle detector for nearby walls. The original
 			# hint is only one column wide; never turn it into a jump to a distant
 			# target, but let horizontal collision handling choose blocked_obstacle.
@@ -1731,6 +1743,65 @@ func _safe_flee_waypoint(
 		"support_tile": best_tile,
 		"distance_from_threat": best_distance,
 	}
+
+
+## Emergency escape from a fluid the avatar is already touching. The old direct
+## horizontal command could steer deeper into a pool or off the island. Require
+## a locally observed dry support and a simulated jump arc that clears the
+## starting hazard before considering the route executable.
+func _safe_harmful_fluid_escape_waypoint(self_state: Dictionary, origin: Vector2, threat: Vector2) -> Dictionary:
+	if _terrain_tiles.is_empty():
+		return {}
+	var origin_tile := _route_origin_support_tile(origin, self_state)
+	var best: Dictionary = {}
+	var best_score := -INF
+	var candidates: Array[Vector2i] = []
+	for direction in [-1, 1]:
+		candidates.append(origin_tile + Vector2i(direction, 0))
+		candidates.append(origin_tile + Vector2i(direction * 2, 0))
+		candidates.append(origin_tile + Vector2i(direction, -1))
+		candidates.append(origin_tile + Vector2i(direction * 2, -1))
+	for landing_tile in candidates:
+		if not _terrain_standable_tile(landing_tile):
+			continue
+		if not _physics_transition_allowed(origin_tile, landing_tile, "jump"):
+			continue
+		var landing := _world_position_for_support_tile(landing_tile)
+		if not _jump_route_has_safe_landing(self_state, landing, true):
+			continue
+		var hazard_clearance := _nearest_harmful_fluid_clearance(landing, self_state)
+		var threat_clearance := landing.distance_to(threat)
+		var score := hazard_clearance * 2.0 + threat_clearance * 0.1
+		if score <= best_score:
+			continue
+		best_score = score
+		best = {
+			"position": landing,
+			"support_tile": landing_tile,
+			"distance_from_threat": threat_clearance,
+			"emergency_fluid_escape": true,
+		}
+	return best
+
+
+func _nearest_harmful_fluid_clearance(position: Vector2, self_state: Dictionary) -> float:
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var nearest := INF
+	for key in _terrain_tiles:
+		var parts := str(key).split(":")
+		if parts.size() != 2:
+			continue
+		var tile_x := int(parts[0])
+		var tile_y := int(parts[1])
+		if not _terrain_is_lava_at(tile_x, tile_y):
+			continue
+		var tile_left := float(tile_x * BlockDefs.TILE)
+		var tile_top := float(tile_y * BlockDefs.TILE)
+		var dx := maxf(maxf(tile_left - (position.x + width), position.x - (tile_left + float(BlockDefs.TILE))), 0.0)
+		var dy := maxf(maxf(tile_top - (position.y + height), position.y - (tile_top + float(BlockDefs.TILE))), 0.0)
+		nearest = minf(nearest, Vector2(dx, dy).length())
+	return nearest
 
 
 ## Tier 3 for a hostile creature only: if every safe escape and non-closing
@@ -2890,7 +2961,11 @@ func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> D
 	return {"done": landed and absf(destination.x - next_x) <= 8.0, "reason": "jump_step"}
 
 
-func _jump_route_has_safe_landing(self_state: Dictionary, destination: Vector2) -> bool:
+func _jump_route_has_safe_landing(
+	self_state: Dictionary,
+	destination: Vector2,
+	allow_starting_hazard_escape: bool = false,
+) -> bool:
 	var origin := Contract.target_position(self_state)
 	var origin_support := _route_origin_support_tile(origin, self_state)
 	var landing_support := _support_tile_for_position(destination)
@@ -2910,6 +2985,7 @@ func _jump_route_has_safe_landing(self_state: Dictionary, destination: Vector2) 
 		return false
 	var x := float(self_state.get("x", origin.x))
 	var y := float(self_state.get("y", origin.y))
+	var cleared_starting_hazard := not _position_touches_harmful_fluid(x, y, width, height)
 	var fluid := _local_fluid_physics(x, y, width, height)
 	var vx := direction * (BlockDefs.MOVE * float(fluid.get("move_speed_multiplier", 1.0)))
 	var vy := BlockDefs.JUMP * float(fluid.get("jump_multiplier", 1.0))
@@ -2948,7 +3024,15 @@ func _jump_route_has_safe_landing(self_state: Dictionary, destination: Vector2) 
 				if vy < 0.0:
 					return false
 				y = float(vertical_hit.get("by", y)) - height
+				if _position_touches_harmful_fluid(x, y, width, height) and (not allow_starting_hazard_escape or cleared_starting_hazard):
+					return false
 				return _support_tile_for_position(Vector2(x, y)) == landing_support
+			var touches_hazard := _position_touches_harmful_fluid(x, y, width, height)
+			if touches_hazard:
+				if not allow_starting_hazard_escape or cleared_starting_hazard:
+					return false
+			else:
+				cleared_starting_hazard = true
 		# Re-evaluate the center-tile fluid each frame so an arc that enters or
 		# leaves water tracks the same speed/gravity the authoritative host uses.
 		fluid = _local_fluid_physics(x, y, width, height)
@@ -3106,10 +3190,19 @@ func _advance_local_physics_if_needed(delta: float) -> void:
 func _local_touches_harmful_fluid(self_state: Dictionary) -> bool:
 	var width := maxf(1.0, float(self_state.get("w", 20.0)))
 	var height := maxf(1.0, float(self_state.get("h", 28.0)))
-	var left := floori(float(self_state.get("x", 0.0)) / float(BlockDefs.TILE))
-	var right := floori((float(self_state.get("x", 0.0)) + width - 0.001) / float(BlockDefs.TILE))
-	var top := floori(float(self_state.get("y", 0.0)) / float(BlockDefs.TILE))
-	var bottom := floori((float(self_state.get("y", 0.0)) + height - 0.001) / float(BlockDefs.TILE))
+	return _position_touches_harmful_fluid(
+		float(self_state.get("x", 0.0)),
+		float(self_state.get("y", 0.0)),
+		width,
+		height,
+	)
+
+
+func _position_touches_harmful_fluid(x: float, y: float, width: float, height: float) -> bool:
+	var left := floori(x / float(BlockDefs.TILE))
+	var right := floori((x + width - 0.001) / float(BlockDefs.TILE))
+	var top := floori(y / float(BlockDefs.TILE))
+	var bottom := floori((y + height - 0.001) / float(BlockDefs.TILE))
 	for tile_y in range(top, bottom + 1):
 		for tile_x in range(left, right + 1):
 			var name := _terrain_name_at(tile_x, tile_y).to_lower()
@@ -3159,9 +3252,11 @@ func _apply_local_harmful_fluid(self_state: Dictionary, delta: float) -> void:
 		var health := maxi(0, int(self_state.get("health", 10)) - 1)
 		self_state["health"] = health
 		_harmful_fluid_damage_cooldown = HARMFUL_FLUID_DAMAGE_INTERVAL
-		if health <= 0:
+		if health <= 0 and not _guest_defeat_pending:
 			# Environmental deaths break a consecutive player-kill streak. Do not
-			# attribute a recent, non-lethal player hit to the lava respawn.
+			# attribute a recent, non-lethal player hit to the lava respawn. The
+			# host can echo the same dead pose before respawning; claim this local
+			# death only once for that life.
 			_last_player_damage_attacker_id = ""
 			_last_player_damage_msec = -1
 			_guest_defeat_pending = true
@@ -3182,13 +3277,20 @@ func _send_guest_defeat_if_due(now_msec: int) -> void:
 	if network_client == null or not network_client.has_method("send_command"):
 		return
 	var local: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
-	network_client.call("send_command", "player_defeated", {
-		"respawn_revision": int(local.get("respawn_revision", 0)),
-	})
-	_guest_defeat_retry_after_msec = now_msec + GUEST_DEFEAT_RETRY_MSEC
+	var respawn_revision := int(local.get("respawn_revision", 0))
+	if respawn_revision == _guest_defeat_sent_revision:
+		return
+	var sent := bool(network_client.call("send_command", "player_defeated", {
+		"respawn_revision": respawn_revision,
+	}))
+	if not sent:
+		_guest_defeat_retry_after_msec = now_msec + GUEST_DEFEAT_RETRY_MSEC
+		return
+	_guest_defeat_sent_revision = respawn_revision
+	_guest_defeat_retry_after_msec = -1
 	structured_log.emit({
 		"event": "guest_defeat_requested",
-		"respawn_revision": int(local.get("respawn_revision", 0)),
+		"respawn_revision": respawn_revision,
 		"at_msec": now_msec,
 	})
 
@@ -3204,6 +3306,8 @@ func _record_recent_player_damage(payload: Dictionary, now_msec: int) -> void:
 
 
 func _handle_confirmed_respawn(now_msec: int) -> void:
+	_guest_defeat_sent_revision = -1
+	_guest_defeat_retry_after_msec = -1
 	# The action that was running before death targets the old life/position. In
 	# particular, a long MOVE_TO can otherwise survive every respawn and keep the
 	# bot walking back into the same danger instead of re-evaluating survival.
@@ -5102,7 +5206,6 @@ func _descent_terrain_map() -> Dictionary:
 			"block_name": block_name,
 			"solid": bool(block.get("solid", false)),
 			"fluid": bool(block.get("fluid", false)),
-			"temperature": float(block.get("temperature", 0.0)),
 			"falls_when_unsupported": bool(block.get("falls_when_unsupported", false)),
 			"hazard": bool(block.get("hazard", false)),
 			"hazardous": bool(block.get("hazardous", false)),
@@ -5395,6 +5498,8 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 			"block_name": block_name,
 			"solid": bool(block.get("solid", false)),
 			"fluid": bool(block.get("fluid", false)),
+			"temperature": float(block.get("temperature", 0.0)),
+			"harmful_fluid": bool(block.get("fluid", false)) and float(block.get("temperature", 0.0)) >= 0.8,
 			"harvest_tier": _block_harvest_tier(block),
 			"hardness": float(block.get("hardness", 0.0)),
 			"preserves_support_on_mine": bool(_support_preserving_mine_tiles.get(key, false)) or regenerates_on_mine,
@@ -5864,10 +5969,29 @@ func _stone_age_note_no_action(decision: Dictionary, now_msec: int) -> void:
 
 
 func _on_decision_rejected(decision: Dictionary, reason: String) -> void:
+	if reason == "mine_target_harmful_fluid_breach":
+		_block_harmful_fluid_mine_target(decision)
 	_record_action_history("rejected", decision, reason)
 	_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
 	_achievement_goal_note_failure(decision, reason, Time.get_ticks_msec())
 	decision_logged.emit({"event": "decision_rejected", "decision": decision.duplicate(true), "reason": reason, "at_msec": Time.get_ticks_msec()})
+
+
+func _block_harmful_fluid_mine_target(decision: Dictionary) -> void:
+	if str(decision.get("action", "")) != Contract.ACTION_MINE:
+		return
+	var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+	if not target.has("x") or not target.has("y"):
+		return
+	var target_id := "tile:%d:%d" % [int(target.get("x", 0)), int(target.get("y", 0))]
+	var now_msec := Time.get_ticks_msec()
+	_blocked_action_targets[target_id] = now_msec + HARMFUL_FLUID_MINE_RETRY_MSEC
+	structured_log.emit({
+		"event": "harmful_fluid_mine_cooled_down",
+		"blocked_until_msec": int(_blocked_action_targets[target_id]),
+		"world_id": world_id,
+		"at_msec": now_msec,
+	})
 
 
 func _on_decision_started(decision: Dictionary) -> void:
@@ -6104,6 +6228,8 @@ func _complete_build_project(project_id: String, now_msec: int) -> void:
 
 func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 	_clear_aborted_movement_transition_if_needed(decision, reason)
+	if reason == "mine_target_became_unsafe":
+		_block_harmful_fluid_mine_target(decision)
 	if bool(decision.get("descent_transition", false)) and reason not in ["movement_step"]:
 		_descent_planner.cancel_intended_transition()
 	var target_id := str(decision.get("target_id", ""))
