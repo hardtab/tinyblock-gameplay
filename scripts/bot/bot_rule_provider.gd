@@ -2470,21 +2470,13 @@ func _mid_tier_tool_progression_action(observation: Dictionary, legal: PackedStr
 	# No resource has a safe, physics-proven approach yet. Explore only through
 	# the same short, connected support waypoints used by ordinary exploration;
 	# this goal never invents a mine target or digs a generic pit while searching.
+	# If there is no frontier, let the rest of the policy use currently available
+	# work instead of serially waiting on every unattainable tool recipe.
 	if Contract.ACTION_MOVE_TO not in legal:
-		if Contract.ACTION_WAIT not in legal:
-			return {}
-		var cannot_explore := _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_WAIT, {}, 900, 0.35)
-		var bounded_wait := _tag_mid_tier_tool_action(cannot_explore, selected_output, missing_item, true)
-		bounded_wait["mid_tier_tool_no_frontier"] = true
-		return Contract.normalize_decision(bounded_wait)
+		return {}
 	var frontier := _exploration_target(observation)
 	if frontier.is_empty():
-		if Contract.ACTION_WAIT not in legal:
-			return {}
-		var no_frontier_wait := _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_WAIT, {}, 900, 0.35)
-		var bounded_wait := _tag_mid_tier_tool_action(no_frontier_wait, selected_output, missing_item, true)
-		bounded_wait["mid_tier_tool_no_frontier"] = true
-		return Contract.normalize_decision(bounded_wait)
+		return {}
 	var search_action := _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, frontier, EXPLORE_COMMIT_MSEC, 0.72)
 	return _tag_mid_tier_tool_action(search_action, selected_output, missing_item, true)
 
