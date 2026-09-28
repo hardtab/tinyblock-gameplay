@@ -111,7 +111,7 @@ static func _target_tile(observation: Dictionary, origin: Vector2i, explicit_rou
 
 
 static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, observation: Dictionary) -> Dictionary:
-	if not _can_clear_route_block(observation, x, y):
+	if _retry_cooldown_active(observation, x, y) or not _can_clear_route_block(observation, x, y):
 		return {}
 	if _is_protected_build_cell(observation, x, y):
 		# Never excavate a cell the session deliberately constructed.  Without this
@@ -142,6 +142,12 @@ static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, obser
 		"commit_for_ms": 1200,
 		"confidence": 0.74,
 	}
+
+
+static func _retry_cooldown_active(observation: Dictionary, x: int, y: int) -> bool:
+	var blocked_targets: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	var now_msec := int(observation.get("observed_at_msec", Time.get_ticks_msec()))
+	return int(blocked_targets.get("tile:%d:%d" % [x, y], 0)) > now_msec
 
 
 static func _is_protected_build_cell(observation: Dictionary, x: int, y: int) -> bool:

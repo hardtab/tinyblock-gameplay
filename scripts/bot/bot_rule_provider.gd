@@ -2294,6 +2294,8 @@ func _descent_clear_target(observation: Dictionary, descent_plan: Dictionary) ->
 		return {}
 	var tile_x := int((raw_tile as Array)[0])
 	var tile_y := int((raw_tile as Array)[1])
+	if _tile_retry_cooldown_active(observation, tile_x, tile_y):
+		return {}
 	for raw_terrain in _as_array(observation.get("terrain_tiles", [])):
 		if not raw_terrain is Dictionary:
 			continue
@@ -2313,6 +2315,13 @@ func _descent_clear_target(observation: Dictionary, descent_plan: Dictionary) ->
 		target["dig_route"] = true
 		return target
 	return {}
+
+
+func _tile_retry_cooldown_active(observation: Dictionary, tile_x: int, tile_y: int) -> bool:
+	var blocked_targets: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	var target_id := "tile:%d:%d" % [tile_x, tile_y]
+	var now_msec := int(observation.get("observed_at_msec", Time.get_ticks_msec()))
+	return int(blocked_targets.get(target_id, 0)) > now_msec
 
 
 func _is_dig_route_tool(item_name: String) -> bool:
