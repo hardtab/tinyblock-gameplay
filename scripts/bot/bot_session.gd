@@ -152,6 +152,7 @@ var _jump_active := false
 var _jump_velocity := 0.0
 var _jump_ground_y := 0.0
 var _jump_start_x := 0.0
+var _jump_started_msec := -1
 var _climb_active := false
 var _climb_column := 0
 var _climb_time_left_msec := 0
@@ -213,6 +214,7 @@ const MAX_AUTHORITATIVE_MOTION_DIVERGENCE := BlockDefs.TILE * 3.0
 ## a smaller window misclassified that network lag as a rejected jump and
 ## blacklisted an otherwise usable edge for eight seconds.
 const HOST_GROUNDED_AIR_REJECTION_TOLERANCE := maxf(BlockDefs.TILE * 1.25, absf(BlockDefs.JUMP))
+const HOST_JUMP_ECHO_GRACE_MSEC := 900
 const HOST_REJECTED_TRANSITION_COOLDOWN_MSEC := 8_000
 const TREE_CLIMB_SPEED := -3.2
 const FLEE_EMERGENCY_MAX_CLOSURE := BlockDefs.TILE * 1.25
@@ -382,6 +384,7 @@ func join_session(record: Dictionary) -> void:
 	_jump_velocity = 0.0
 	_jump_ground_y = 0.0
 	_jump_start_x = 0.0
+	_jump_started_msec = -1
 	_climb_active = false
 	_climb_column = 0
 	_climb_time_left_msec = 0
@@ -879,6 +882,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	if action == Contract.ACTION_LOOK_AT:
 		_set_desired_input(false, false, false)
 		_jump_active = false
+		_jump_started_msec = -1
 		_climb_active = false
 		_advance_local_physics(self_state, delta, false)
 		if target.x != origin.x:
@@ -982,6 +986,21 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		var jump_direction := signf(jump_destination.x - origin.x)
 		_set_desired_input(jump_direction < 0.0, jump_direction > 0.0, true)
 		return _jump_step(self_state, jump_destination, delta)
+	# A host correction or an earlier action timeout can leave the real avatar
+	# between supports without an active jump. Ground routes have no valid origin
+	# there. Resolve gravity before replanning, rather than declaring a verified
+	# exploration destination unreachable merely because this frame is airborne.
+	# Do not invent horizontal steering over an unverified gap.
+	if (
+		not _climb_active
+		and not bool(self_state.get("on_ground", false))
+		and not _local_pose_has_support(self_state)
+		and _active_verified_drop_step(origin, self_state).is_empty()
+	):
+		_set_desired_input(false, false, false)
+		_advance_local_physics(self_state, delta, false)
+		_world_snapshot["self"] = self_state
+		return {"done": false, "reason": "airborne_settling"}
 	# In a duel, never let the short-horizon jump planner consume an input at
 	# the island lip.  The bridge planner needs the bot grounded at the edge;
 	# checking only after route/jump selection lets one speculative jump start an
@@ -1095,6 +1114,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		# Starting a guessed jump/climb arc while embedded in fluid can keep the
 		# avatar in the pool long enough to die before the next policy update.
 		_jump_active = false
+		_jump_started_msec = -1
 		_climb_active = false
 		_active_air_transition.clear()
 		self_state["tree_ghost"] = false
@@ -1151,6 +1171,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		}
 		_jump_active = true
 		_jump_start_x = float(self_state.get("x", origin.x))
+		_jump_started_msec = Time.get_ticks_msec()
 	if _jump_active:
 		_set_desired_input(signf(destination.x - origin.x) < 0.0, signf(destination.x - origin.x) > 0.0, true)
 		return _jump_step(self_state, destination, delta)
@@ -2736,6 +2757,7 @@ func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> D
 	if not _jump_active:
 		_jump_active = true
 		_jump_start_x = origin.x
+		_jump_started_msec = Time.get_ticks_msec()
 	var direction := signf(destination.x - origin.x)
 	# Preserve the actual jump/hold controls, but release horizontal steering once
 	# the requested landing column is reached. Holding left/right for the entire
@@ -2748,6 +2770,7 @@ func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> D
 	var landed := was_airborne and bool(self_state.get("on_ground", false))
 	if landed:
 		_jump_active = false
+		_jump_started_msec = -1
 	var next_x := float(self_state.get("x", origin.x))
 	_world_snapshot["self"] = self_state
 	if landed and absf(next_x - _jump_start_x) < 4.0 and absf(destination.x - next_x) > 8.0:
@@ -4050,6 +4073,29 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 					and local_position.distance_to(host_position) > MAX_AUTHORITATIVE_MOTION_DIVERGENCE
 			)
 			var host_grounded := entry.has("on_ground") and bool(entry.get("on_ground", false))
+			# Roster snapshots can echo the grounded takeoff pose after a jump has
+			# already started locally. Air beneath a rising avatar is expected, not
+			# proof of a floating predictor. Wait one bounded jump/snapshot window
+			# before treating that *takeoff* echo as a rejected transition; a host
+			# pose on the actual landing tile is still reconciled immediately.
+			var fresh_takeoff_echo := false
+			if host_grounded and _jump_active and _jump_started_msec >= 0 and not _active_air_transition.is_empty():
+				var jump_age := Time.get_ticks_msec() - _jump_started_msec
+				var takeoff_tile: Vector2i = _active_air_transition.get("from", Vector2i(2147483647, 2147483647))
+				if takeoff_tile.x != 2147483647 and jump_age >= 0 and jump_age < HOST_JUMP_ECHO_GRACE_MSEC:
+					var echo_tile := _support_tile_for_position(host_position)
+					var takeoff_y := float(takeoff_tile.y * BlockDefs.TILE) - float(local_state.get("h", 28.0))
+					fresh_takeoff_echo = (
+						abs(echo_tile.x - takeoff_tile.x) <= 1
+						and echo_tile.y == takeoff_tile.y
+						and not bool(local_state.get("on_ground", false))
+						and local_position.y < takeoff_y - 1.0
+						and local_position.y >= takeoff_y - float(BlockDefs.TILE) * 4.0
+						and absf(local_position.x - _jump_start_x) <= float(BlockDefs.TILE) * 3.0
+						and local_position.distance_to(host_position) <= float(BlockDefs.TILE) * 5.0
+					)
+			if fresh_takeoff_echo:
+				motion_diverged = false
 			# The private jump/climb predictor can be left hovering over a cell the
 			# authoritative terrain proves has nothing to stand on - its support was
 			# mined away, or the host never reproduced the landing. The grounded
@@ -4071,6 +4117,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 				host_support_reseat = (
 					local_support_verdict == "unsupported"
 					and host_support_verdict == "supported"
+					and not fresh_takeoff_echo
 					# A one-cell support-row change is a normal jump/step transition;
 					# only reseat when the predictor is more than one cell off.
 					and support_tile_separation > 1
@@ -4080,7 +4127,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 			# reconciliation, not a rejected transition/cooldown. Live Android
 			# snapshots showed this echo just 3.7 px beyond the old distance cutoff.
 			var host_confirmed_near_landing := false
-			if host_grounded and entry.has("x") and entry.has("y") and _jump_active and not _active_air_transition.is_empty():
+			if host_grounded and not fresh_takeoff_echo and entry.has("x") and entry.has("y") and _jump_active and not _active_air_transition.is_empty():
 				var landing_tile: Vector2i = _active_air_transition.get("to", Vector2i(2147483647, 2147483647))
 				if landing_tile.x != 2147483647:
 					var host_tile := _support_tile_for_position(host_position)
@@ -4100,7 +4147,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 			# When terrain proves the local predicted support is absent and the host
 			# pose is on support, this is a stale local arc, not evidence that the
 			# intended edge was rejected. Reseat without poisoning the transition.
-			var host_rejected_air_motion := host_grounded and not host_support_reseat and (
+			var host_rejected_air_motion := host_grounded and not host_support_reseat and not fresh_takeoff_echo and (
 				not host_confirmed_near_landing
 				and local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
 				and (
@@ -4140,6 +4187,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 						})
 				_active_air_transition.clear()
 				_jump_active = false
+				_jump_started_msec = -1
 				_climb_active = false
 				_physics_route.clear()
 				_physics_route_replan_msec = 0
@@ -4167,6 +4215,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 				_harmful_fluid_damage_cooldown = 0.0
 				_guest_defeat_pending = false
 				_jump_active = false
+				_jump_started_msec = -1
 				_climb_active = false
 			for field in ["x", "y", "facing", "vx", "vy", "on_ground", "health", "nourishment", "respawn_revision", "tree_ghost", "climbing", "climb_col"]:
 				if not entry.has(field):
@@ -5912,6 +5961,7 @@ func _clear_aborted_movement_transition_if_needed(decision: Dictionary, reason: 
 	# the next target; ordinary physics still resolves the current airborne pose.
 	_active_air_transition.clear()
 	_jump_active = false
+	_jump_started_msec = -1
 	_jump_velocity = 0.0
 	_jump_ground_y = 0.0
 	_jump_start_x = 0.0
