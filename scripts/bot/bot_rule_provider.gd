@@ -70,7 +70,7 @@ const SOCIAL_FOLLOW_START_SLACK := 48.0
 const FOLLOW_ROUTE_FAILURE_COOLDOWN_MSEC := 30_000
 const FOLLOW_ROUTE_FAILURE_REASONS := [
 	"blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable",
-	"pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable",
+	"pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable", "lava_guard",
 ]
 const FOLLOW_ROUTE_RECOVERY_REASONS := [
 	"blocked_obstacle", "unsafe_jump_route", "route_unreachable",

@@ -6078,20 +6078,20 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 		_descent_planner.cancel_intended_transition()
 	var target_id := str(decision.get("target_id", ""))
 	_note_flee_route_failure(decision, reason)
-	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "timeout"] and target_id.begins_with("tile:"):
+	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "lava_guard", "timeout"] and target_id.begins_with("tile:"):
 		var retry_delay := UNSAFE_ROUTE_RETRY_BLOCK_MSEC if reason in ["unsafe_jump_route", "route_unreachable"] else ACTION_RETRY_BLOCK_MSEC
 		_blocked_action_targets[target_id] = Time.get_ticks_msec() + retry_delay
 	if (
 		str(decision.get("action", "")) in [Contract.ACTION_MOVE_TO, Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW]
 		and reason in [
 			"blocked_obstacle", "edge_guard", "unsafe_jump_route", "unsafe_drop_route",
-			"route_unreachable", "pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable", "timeout",
+			"route_unreachable", "pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable", "lava_guard", "timeout",
 		]
 		and (target_id.begins_with("station:") or target_id.begins_with("container:"))
 	):
 		var route_retry_delay := CONTAINER_RETRY_BLOCK_MSEC if target_id.begins_with("container:") else STATION_ROUTE_RETRY_BLOCK_MSEC
 		_blocked_action_targets[target_id] = Time.get_ticks_msec() + route_retry_delay
-	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable", "timeout", "mine_ack_timeout"]:
+	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "lava_guard", "pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable", "timeout", "mine_ack_timeout"]:
 		_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
 		_achievement_goal_note_failure(decision, reason, Time.get_ticks_msec())
 	_record_action_history("finished", decision, reason)
