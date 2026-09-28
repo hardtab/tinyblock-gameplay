@@ -235,6 +235,8 @@ const BUILD_PROJECT_MAX_FAILURES := 3
 const BUILD_PROJECT_RETRY_MSEC := 30_000
 const BUILD_PROJECT_ROUTE_REPLAN_MSEC := 500
 const ACTION_RETRY_BLOCK_MSEC := 8_000
+const MINE_REJECTION_RETRY_MSEC := 60_000
+const STATION_ROUTE_RETRY_BLOCK_MSEC := 30_000
 const UNSAFE_ROUTE_RETRY_BLOCK_MSEC := 30_000
 const EMOJI_EVENT_TTL_MSEC := 8_000
 const SUPPORT_PLACE_COOLDOWN_MSEC := 650
@@ -4680,7 +4682,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	observation["challenge_best_distance"] = int(mode_progress.get("challenge_best_distance", 0))
 	# Placement retries recorded on the host rejection/timeout paths are only
 	# useful to policy if the cooled tiles travel with the observation.
-	observation["blocked_action_targets"] = _active_blocked_action_tiles(now_msec)
+	observation["blocked_action_targets"] = _active_blocked_action_targets(now_msec)
 	observation["stone_age_goal"] = _stone_age_goal_state.duplicate(true)
 	observation["achievement_goal_states"] = _achievement_goal_states.duplicate(true)
 	observation["build_project_state"] = _build_project_state.duplicate(true)
@@ -4947,21 +4949,21 @@ func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
 	return filtered
 
 
-func _active_blocked_action_tiles(now_msec: int) -> Dictionary:
-	# Placement retries live in _blocked_action_targets as "tile:x:y" entries.
-	# Policy needs the surviving cooldowns so it can stop re-selecting a cell the
-	# host already rejected or that never produced a placement acknowledgement.
-	var tiles: Dictionary = {}
+func _active_blocked_action_targets(now_msec: int) -> Dictionary:
+	# Tile actions and station routes keep exact target IDs in this map. Expose
+	# only those policy-relevant keys, so the provider can choose another station
+	# after a blocked route without leaking unrelated cooldown state.
+	var targets: Dictionary = {}
 	for raw_key in _blocked_action_targets.keys():
 		var key := str(raw_key)
-		if not key.begins_with("tile:"):
+		if not key.begins_with("tile:") and not key.begins_with("station:"):
 			continue
 		var blocked_until := int(_blocked_action_targets[raw_key])
 		if blocked_until <= now_msec:
 			_blocked_action_targets.erase(raw_key)
 			continue
-		tiles[key] = blocked_until
-	return tiles
+		targets[key] = blocked_until
+	return targets
 
 
 func _physics_reachable_support_tiles(origin_tile: Vector2i, first_step_allowed: Callable = Callable()) -> Dictionary:
@@ -5831,6 +5833,12 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "timeout"] and target_id.begins_with("tile:"):
 		var retry_delay := UNSAFE_ROUTE_RETRY_BLOCK_MSEC if reason in ["unsafe_jump_route", "route_unreachable"] else ACTION_RETRY_BLOCK_MSEC
 		_blocked_action_targets[target_id] = Time.get_ticks_msec() + retry_delay
+	if (
+		str(decision.get("action", "")) in [Contract.ACTION_MOVE_TO, Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW]
+		and reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "timeout"]
+		and target_id.begins_with("station:")
+	):
+		_blocked_action_targets[target_id] = Time.get_ticks_msec() + STATION_ROUTE_RETRY_BLOCK_MSEC
 	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable", "timeout", "mine_ack_timeout"]:
 		_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
 		_achievement_goal_note_failure(decision, reason, Time.get_ticks_msec())
@@ -5961,10 +5969,22 @@ func _item_nourishment_value(block_name: String) -> int:
 
 func _handle_action_result(payload: Dictionary) -> void:
 	var action := str(payload.get("action", ""))
+	var target_id := str(payload.get("target_id", ""))
+	if target_id.is_empty() and action == "mine_block" and payload.has("x") and payload.has("y"):
+		target_id = "tile:%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
 	_record_action_history("result", {
 		"action": action,
-		"target_id": str(payload.get("target_id", "")),
+		"target_id": target_id,
 	}, "accepted" if bool(payload.get("accepted", false)) else "rejected")
+	if action == "mine_block" and payload.has("block_id"):
+		# The host's action acknowledgement carries the authoritative post-action
+		# tile state. Apply it even on rejection: a block may already have changed
+		# while the bot's region/tile update was in flight, and retaining the stale
+		# local block makes policy retry the same impossible mine after cooldown.
+		_apply_tile_batch({"tiles": [payload]})
+		var plant_state: Variant = payload.get("plant", null)
+		if plant_state is Dictionary:
+			_ingest_plant_entry(plant_state as Dictionary)
 	if action == "equip_item":
 		var pending_equip: Dictionary = _pending_action_targets.get("equip", {}) if _pending_action_targets.get("equip", {}) is Dictionary else {}
 		_pending_action_targets.erase("equip")
@@ -6038,7 +6058,8 @@ func _handle_action_result(payload: Dictionary) -> void:
 		return
 	if not bool(payload.get("accepted", false)):
 		var rejected_key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
-		_blocked_action_targets["tile:%s" % rejected_key] = Time.get_ticks_msec() + ACTION_RETRY_BLOCK_MSEC
+		var retry_delay := MINE_REJECTION_RETRY_MSEC if action == "mine_block" else ACTION_RETRY_BLOCK_MSEC
+		_blocked_action_targets["tile:%s" % rejected_key] = Time.get_ticks_msec() + retry_delay
 		var rejected_target: Dictionary = _pending_action_targets.get(rejected_key, {}) if _pending_action_targets.get(rejected_key, {}) is Dictionary else {}
 		_stone_age_fail_pending(str(rejected_target.get("stone_age_stage", "")), "action_rejected", Time.get_ticks_msec())
 		_pending_action_targets.erase(rejected_key)

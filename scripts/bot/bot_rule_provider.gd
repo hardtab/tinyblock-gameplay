@@ -1519,6 +1519,8 @@ func _station_place_target(observation: Dictionary, station_name: String) -> Dic
 func _nearest_station_target(observation: Dictionary, station_name: String) -> Dictionary:
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var self_position := Contract.target_position(self_state)
+	var now_msec := int(observation.get("observed_at_msec", 0))
+	var blocked_targets: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
 	var best := {}
 	var best_distance := INF
 	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
@@ -1528,15 +1530,20 @@ func _nearest_station_target(observation: Dictionary, station_name: String) -> D
 		var block_name := str(tile.get("block_name", ""))
 		if str(_block_entry(block_name).get("station", "")) != station_name:
 			continue
-		var position := Vector2((float(tile.get("x", 0)) + 0.5) * 32.0, (float(tile.get("y", 0)) + 0.5) * 32.0)
+		var tile_x := int(tile.get("x", 0))
+		var tile_y := int(tile.get("y", 0))
+		var target_id := "station:%s:%d:%d" % [station_name, tile_x, tile_y]
+		if int(blocked_targets.get(target_id, 0)) > now_msec:
+			continue
+		var position := Vector2((float(tile_x) + 0.5) * 32.0, (float(tile_y) + 0.5) * 32.0)
 		var distance := self_position.distance_to(position)
 		if distance >= best_distance:
 			continue
 		best_distance = distance
 		best = {
-			"id": "station:%s:%d:%d" % [station_name, int(tile.get("x", 0)), int(tile.get("y", 0))],
-			"x": int(tile.get("x", 0)),
-			"y": int(tile.get("y", 0)),
+			"id": target_id,
+			"x": tile_x,
+			"y": tile_y,
 			"position": [position.x, position.y],
 			"distance": distance,
 		}
