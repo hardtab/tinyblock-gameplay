@@ -47,12 +47,11 @@ static func next_step(observation: Dictionary, explicit_route_target: Dictionary
 			return _place_step(next_x, origin.y - 1, origin, target, observation, terrain)
 		if _solid(terrain, next_x, origin.y - 2):
 			return _mine_step(next_x, origin.y - 2, origin, target, observation)
-		# The step-up cell is solid and its headroom is already clear, yet a live
-		# journal shows this lateral solid blocking the bot's only candidate
-		# jump. A block with no floor beneath it cannot be climbed as a step, so
-		# treat it as a corridor obstacle and clear it through the same
-		# protected/return-support/harvest-tier gates as any other route mine.
-		if not _solid(terrain, next_x, origin.y):
+		# A floor-backed step is only usable when the jump arc has headroom above
+		# the bot's starting column. A low ceiling there makes the avatar hit its
+		# head before it can move over the step. Clear the lateral block instead;
+		# all normal protected-cell and harvest-tier gates still apply.
+		if not _solid(terrain, next_x, origin.y) or _solid(terrain, origin.x, origin.y - 3):
 			return _mine_step(next_x, origin.y - 1, origin, target, observation)
 		return {}
 	# Clear the two-cell player corridor before trying to walk through a wall.
