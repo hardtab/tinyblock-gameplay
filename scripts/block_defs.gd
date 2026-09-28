@@ -8,6 +8,11 @@ const WORLD_W := 50
 const WORLD_H := 28
 const MAX_FLUID_LEVEL := 8
 const DROP_SEARCH := 4
+const CORE_TREE_CONTENT_IDS := [
+	"core.palm_wood", "core.palm_leaves",
+	"core.pine_wood", "core.pine_needles",
+	"core.weeping_wood", "core.weeping_leaves",
+]
 
 const BEVEL_LEFT := 1
 const BEVEL_TOP := 2
@@ -565,6 +570,33 @@ func _ready() -> void:
 		entry["content_id"] = str(entry.get("content_id", "core.%s" % block_name))
 		block_by_id[BLOCKS[block_name]["id"]] = entry
 		block_name_by_content_id[entry["content_id"]] = block_name
+	ensure_core_tree_blocks()
+
+
+func _core_tree_block_definition(content_id: String, name: String, description: String, pattern: String, palette: Array, tags: Array, hardness: float, flammability: float) -> Dictionary:
+	return {
+		"content_id": content_id, "definition_hash": "system", "schema_version": "1.3", "ruleset_version": "system", "kind": "block", "catalog_revision": 0,
+		"display": {"name": {"en": name}, "description": {"en": description}},
+		"visual": {"pattern": pattern, "palette": palette},
+		"material": {"phase": "solid", "hardness": hardness, "viscosity": 0.0, "elasticity": 0.08, "flammability": flammability, "temperature": 0.0},
+		"surface": {"movement_speed_multiplier": 0.82 if "foliage" in tags else 1.0, "friction": 0.78, "bounce": 0.05},
+		"physics": {"falls_when_unsupported": false, "settles_diagonally": false},
+		"origin": {"type": "natural", "categories": ["flora"]},
+		"tags": ["organic", "plant", "natural"] + tags,
+		"components": {"solid": true}, "mechanics": [], "balance": {"hardness": hardness * 24.0}, "provenance": {"type": "system"},
+	}
+
+
+func ensure_core_tree_blocks() -> void:
+	for definition in [
+		_core_tree_block_definition("core.palm_wood", "Palm Wood", "Warm fibrous trunk wood marked by pale horizontal bands.", "stripes", ["#a96935", "#d69a51", "#744222", "#edbd70"], ["wood", "trunk", "palm"], 0.42, 0.82),
+		_core_tree_block_definition("core.palm_leaves", "Palm Fronds", "Broad sunlit fronds from the crown of a palm.", "organic", ["#4f8f32", "#86c44a", "#2e641f", "#b5dc62"], ["leaves", "foliage", "palm"], 0.14, 0.95),
+		_core_tree_block_definition("core.pine_wood", "Pine Wood", "Reddish resinous timber with dense layered rings.", "layers", ["#754326", "#a96735", "#4c2c1b", "#cf8b49"], ["wood", "trunk", "pine"], 0.5, 0.88),
+		_core_tree_block_definition("core.pine_needles", "Pine Needles", "Dense blue-green evergreen needles.", "scales", ["#214f3c", "#39785a", "#143329", "#65a478"], ["leaves", "foliage", "needles", "pine"], 0.18, 0.82),
+		_core_tree_block_definition("core.weeping_wood", "Weeping Wood", "Cool gray-brown wood traced by winding grain.", "veins", ["#665548", "#8b7764", "#40372f", "#aa9580"], ["wood", "trunk", "weeping"], 0.44, 0.86),
+		_core_tree_block_definition("core.weeping_leaves", "Weeping Leaves", "Long soft foliage that hangs in cool green curtains.", "organic", ["#28715a", "#4fa27a", "#17493b", "#7cc79c"], ["leaves", "foliage", "weeping"], 0.13, 0.96),
+	]:
+		register_generated_block(definition)
 
 
 func content_id_for_name(block_name: String) -> String:
@@ -596,7 +628,9 @@ func register_generated_block(definition: Dictionary) -> String:
 		if existing.get("generated", false):
 			replacement_id = int(existing.get("id", -1))
 	var digest := content_id.sha256_text().substr(0, 12)
-	var block_name := "generated_%s" % digest
+	# These six system blocks have stable gameplay names. A hash-only name made
+	# clients render them, but bot resource/climb rules could not recognize wood.
+	var block_name := content_id.trim_prefix("core.") if content_id in CORE_TREE_CONTENT_IDS else "generated_%s" % digest
 	var registered_name := ""
 	if str(definition.get("kind", "block")) == "plant":
 		registered_name = _register_generated_plant(block_name, content_id, definition)
