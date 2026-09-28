@@ -15,6 +15,13 @@ var _plant_step := 0
 var _last_plant_msec := -1
 var _explore_direction := 0
 var _last_explore_origin_x := INF
+var _last_explore_origin_y := INF
+## Sign of (frontier.y - origin.y) for the issued exploration leg: -1 for a
+## climb, +1 for a descent, 0 when level. Multiplying it by the observed y delta
+## converts any movement into "toward the chosen frontier" vertical progress, so
+## a staircase leg that barely moves horizontally is not scored as a stall while
+## falling away from the frontier still is.
+var _last_explore_vertical_toward := 0.0
 var _last_explore_target_id := ""
 var _last_explore_support_tile: Array = []
 var _last_failed_explore_frontier := ""
@@ -155,6 +162,8 @@ func reset() -> void:
 	_last_plant_msec = -1
 	_explore_direction = 0
 	_last_explore_origin_x = INF
+	_last_explore_origin_y = INF
+	_last_explore_vertical_toward = 0.0
 	_last_explore_target_id = ""
 	_last_explore_support_tile.clear()
 	_last_failed_explore_frontier = ""
@@ -1321,6 +1330,14 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 					# detour or host reconciliation in the opposite direction
 					# must not keep an unsuccessful heading alive.
 					var progress := (origin.x - _last_explore_origin_x) * float(_explore_direction)
+					# A staircase/climb leg can consume the whole movement window
+					# while barely changing x, so score vertical travel toward the
+					# chosen frontier as well. Falling the same distance away from
+					# the frontier yields a negative value and still reads as a
+					# stalled window.
+					var vertical_progress := 0.0
+					if not is_inf(_last_explore_origin_y):
+						vertical_progress = (origin.y - _last_explore_origin_y) * _last_explore_vertical_toward
 					var route_failed := reason in [
 						"blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "lava_guard",
 					]
@@ -1329,7 +1346,7 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 					# heading when the bot moved; rotate only when a bounded
 					# movement window stalled. Explicit route/obstacle failures
 					# always make the opposite side worth probing.
-					if route_failed or progress < MIN_EXPLORE_PROGRESS_PX:
+					if route_failed or (progress < MIN_EXPLORE_PROGRESS_PX and vertical_progress < MIN_EXPLORE_PROGRESS_PX):
 						var failed_frontier := "%s:%s" % [target_id, str(_last_explore_support_tile)]
 						_same_explore_frontier_failures = _same_explore_frontier_failures + 1 if failed_frontier == _last_failed_explore_frontier else 1
 						_last_failed_explore_frontier = failed_frontier
@@ -1424,6 +1441,8 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 	var label := "left" if _explore_direction < 0 else "right"
 	var target_id := "explore:%s" % label
 	_last_explore_origin_x = origin.x
+	_last_explore_origin_y = origin.y
+	_last_explore_vertical_toward = signf(target_position.y - origin.y)
 	_last_explore_target_id = target_id
 	_last_explore_support_tile = target_support_tile.duplicate()
 	return {
