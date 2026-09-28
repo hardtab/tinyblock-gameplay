@@ -1699,8 +1699,15 @@ func _advance_one_block() -> void:
 
 
 func _ensure_one_block() -> void:
-	if world_mode == WORLD_MODE_ONE_BLOCK and block_id(one_block_position.x, one_block_position.y) == 0:
+	if world_mode != WORLD_MODE_ONE_BLOCK:
+		return
+	var source_block := get_block(one_block_position.x, one_block_position.y)
+	if int(source_block.get("id", 0)) == 0:
 		_spawn_next_one_block(false)
+	elif not bool(source_block.get("solid", false)):
+		# A pre-fix save can contain a source ice tile that climate melted into
+		# water. Restore the renewable support without advancing mined progress.
+		set_block(one_block_position.x, one_block_position.y, int(BlockDefs.BLOCKS.stone.id))
 
 
 func ingest_catalog(definitions: Array, revision: int) -> int:
@@ -7652,6 +7659,11 @@ func _temperature_candidate(block_name: String, should_freeze: bool) -> Variant:
 	var eligible: Array[Vector2i] = []
 	var areas := _fluid_simulation_areas()
 	for pos: Vector2i in positions:
+		# Climate must not turn a renewable support into a fluid while a player
+		# stands on it. Its advertised mine-preserves-support capability applies
+		# to environmental updates as well as the atomic mining replacement.
+		if mine_preserves_support(pos.x, pos.y):
+			continue
 		# Melted hopper water is the opened timer. Keep it from refreezing inside
 		# geometry that ecology classifies as a cold cavern.
 		if block_name == "water" and should_freeze and _is_challenge_granular_plug(pos):
