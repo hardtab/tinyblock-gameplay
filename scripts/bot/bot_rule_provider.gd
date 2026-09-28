@@ -88,6 +88,15 @@ const FLEE_ROUTE_FAILURE_REASONS := [
 	"blocked_obstacle", "edge_guard", "unsafe_jump_route", "unsafe_drop_route",
 	"route_unreachable", "flee_no_safe_waypoint", "timeout",
 ]
+## Subset of the retry-window reasons that prove the escape route itself is
+## unusable. A bounded flee that merely ran out of its commitment window
+## ("timeout") only earns the short retry cooldown: treating it as a permanent
+## no-route verdict let the bot ignore a hostile creature that was still inside
+## its danger radius and walk back into it.
+const FLEE_ROUTE_EXHAUSTING_REASONS := [
+	"blocked_obstacle", "edge_guard", "unsafe_jump_route", "unsafe_drop_route",
+	"route_unreachable", "flee_no_safe_waypoint",
+]
 const WANDER_RADIUS := 96.0
 const WANDER_COMMIT_MSEC := 1800
 const EXPLORE_RADIUS := 384.0
@@ -230,10 +239,11 @@ func decide(observation: Dictionary) -> Dictionary:
 	# still at full health.  The old policy only fled when health was already low
 	# and otherwise let crafting, following, or a mining tool win the decision;
 	# that made an attacking animal look harmless until the first hit landed.
-	if (
-		not creature_threat.is_empty()
-		and not _creature_flee_suppressed(creature_threat, observation)
-	):
+	# Suppressing the *flee* must not suppress the whole survival branch: a
+	# creature whose escape route already failed still has to be equipped
+	# against, attacked in reach, or held, so this block stays reachable and only
+	# the FLEE_FROM emission below consults `_creature_flee_suppressed`.
+	if not creature_threat.is_empty():
 		var creature_distance := float(creature_threat.get("distance", 9999.0))
 		var combat_tool := _creature_combat_tool(observation)
 		if not combat_tool.is_empty() and Contract.ACTION_EQUIP in legal:
@@ -250,6 +260,7 @@ func decide(observation: Dictionary) -> Dictionary:
 		if (
 			Contract.ACTION_FLEE_FROM in legal
 			and not _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
+			and not _creature_flee_suppressed(creature_threat, observation)
 		):
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, creature_threat, 1200, 0.97)
 		if (
@@ -713,6 +724,13 @@ func _as_array(value: Variant) -> Array:
 	return value as Array if value is Array else []
 
 
+## Public view of the same danger filter the decision loop uses, so the
+## behaviour layer can decide whether an in-flight travel commitment has to
+## yield to a hostile that is already actionable in the current observation.
+func dangerous_hostile_threat(observation: Dictionary) -> Dictionary:
+	return _dangerous_creature_threat(observation, _as_array(observation.get("threats", [])))
+
+
 func _dangerous_creature_threat(observation: Dictionary, threats: Array) -> Dictionary:
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var danger_radius := float(observation.get("creature_danger_distance", CREATURE_DANGER_RADIUS))
@@ -792,12 +810,33 @@ func _creature_has_aggression_evidence(creature: Dictionary) -> bool:
 
 ## Trust only an explicit "not attacking, no recent damage, not provoked"
 ## creature observation. Missing state stays fail-closed: the bot keeps fleeing.
+## An always-on aggressor inside its awareness radius is never calm: a zero
+## attack cooldown only means it is between swings, not that it stopped hunting
+## (live regression: the bot crafted beside such a creature until it died).
 func _creature_state_explicitly_calm(creature: Dictionary) -> bool:
 	if bool(creature.get("is_attacking", false)) or bool(creature.get("attacking", false)):
 		return false
 	if not creature.has("attack_cooldown") or not creature.has("provoked_ticks"):
 		return false
-	return int(creature.get("attack_cooldown", 0)) <= 0 and int(creature.get("provoked_ticks", 0)) <= 0
+	if int(creature.get("attack_cooldown", 0)) > 0 or int(creature.get("provoked_ticks", 0)) > 0:
+		return false
+	var profile := _creature_profile(creature)
+	if _creature_aggression_is_always_on(profile):
+		if not creature.has("distance"):
+			return false
+		var awareness_px := clampf(float(profile.get("awareness_blocks", 7.0)), 1.0, 16.0) * ROUTE_TILE
+		if float(creature.get("distance", INF)) <= awareness_px:
+			return false
+	return true
+
+
+## Mirrors the danger filter's active-attack rule: an always-on trigger makes a
+## creature dangerous as soon as it is aware of the bot, and an aggressive
+## creature with no trigger behaves the same way.
+func _creature_aggression_is_always_on(profile: Dictionary) -> bool:
+	var temperament := str(profile.get("temperament", "passive")).to_lower()
+	var attack_trigger := str(profile.get("attack_trigger", "never")).to_lower()
+	return attack_trigger == "always" or (temperament == "aggressive" and attack_trigger == "never")
 
 
 ## A creature whose verified escape route already failed stops re-issuing
@@ -1525,7 +1564,13 @@ func _arm_flee_target_route_cooldown(target_id: String, reason: String, at_msec:
 	# cooldown alone only postponed the next identical FLEE_FROM, so a distant
 	# hostile that was neither attacking nor provoked kept reclaiming the
 	# decision loop on every expiry.
-	if not _last_creature_threat_id.is_empty() and target_id == _last_creature_threat_id:
+	# Only an explicit blocked/no-route verdict may do that: a flee that expired
+	# on its own timer says nothing about whether a route exists.
+	if (
+		reason in FLEE_ROUTE_EXHAUSTING_REASONS
+		and not _last_creature_threat_id.is_empty()
+		and target_id == _last_creature_threat_id
+	):
 		_creature_route_exhausted[target_id] = true
 
 

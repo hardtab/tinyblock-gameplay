@@ -18,6 +18,13 @@ const REJECTION_RETRY_MSEC := 350
 const AGGRESSIVE_PLAYER_DECISION_INTERVAL_MSEC := 450
 const AGGRESSIVE_PLAYER_COMMIT_SCALE := 0.5
 const AGGRESSIVE_PLAYER_COMMIT_MIN_MSEC := 250
+## A travel leg can hold the decision loop for several seconds. When a dangerous
+## creature is already inside striking reach, that commitment must yield once so
+## the next decision can defend instead of walking beside the hostile until the
+## leg expires. The cooldown keeps the cancel from thrashing when the provider
+## legitimately re-issues travel.
+const HOSTILE_PREEMPT_COOLDOWN_MSEC := 900
+const HOSTILE_PREEMPT_MIN_COMMIT_MSEC := 1_200
 const AGGRESSIVE_PLAYER_ACTIONS: PackedStringArray = [
 	Contract.ACTION_MOVE_NEAR_PLAYER,
 	Contract.ACTION_MOVE_TO,
@@ -35,6 +42,7 @@ var executor: BotExecutor
 var decision_interval_msec := DEFAULT_DECISION_INTERVAL_MSEC
 var _next_decision_msec := 0
 var _last_goal := ""
+var _hostile_preempt_until_msec := 0
 
 
 func _init(
@@ -58,6 +66,7 @@ func reset(now_msec: int = 0) -> void:
 		provider.call("reset")
 	_last_goal = ""
 	_next_decision_msec = now_msec
+	_hostile_preempt_until_msec = 0
 
 
 func tick(observation: Dictionary, delta: float, now_msec: int) -> void:
@@ -73,6 +82,12 @@ func tick(observation: Dictionary, delta: float, now_msec: int) -> void:
 	# target; ordinary resource gathering is always interrupted.
 	if _combat_should_preempt_mining(observation):
 		executor.cancel("combat_preempted")
+	if _hostile_creature_should_preempt_travel(observation, now_msec):
+		executor.cancel("hostile_creature_preempted")
+		# Cancelling must actually re-open the decision loop this tick: the leg
+		# may have started well before the regular decision interval expires, and
+		# an idle executor would otherwise wait it out beside the hostile.
+		_next_decision_msec = now_msec
 	executor.tick(delta, observation, now_msec)
 	if executor.is_busy() or now_msec < _next_decision_msec:
 		return
@@ -123,6 +138,39 @@ func _combat_should_preempt_mining(observation: Dictionary) -> bool:
 	if bool(target.get("combat_route", false)):
 		return false
 	return _player_combat_focus_active(observation)
+
+
+## A long ordinary travel leg must not hide a hostile that is already in strike
+## range: without this the bot only re-evaluates safety when the leg expires,
+## which is how it can be chipped to death while walking beside a creature.
+## Combat approaches, dig routes and short commitments are excluded, and the
+## decision has to contain an actionable dangerous creature inside
+## `creature_attack_distance`, so ordinary exploration and distant wildlife never
+## interrupt travel.
+func _hostile_creature_should_preempt_travel(observation: Dictionary, now_msec: int) -> bool:
+	if executor == null or executor.current_action() != Contract.ACTION_MOVE_TO:
+		return false
+	if now_msec < _hostile_preempt_until_msec:
+		return false
+	var current: Dictionary = executor.current_decision if executor.current_decision is Dictionary else {}
+	if int(current.get("commit_for_ms", 0)) < HOSTILE_PREEMPT_MIN_COMMIT_MSEC:
+		return false
+	var target: Dictionary = current.get("target", {}) if current.get("target", {}) is Dictionary else {}
+	if (
+		bool(target.get("combat_route", false))
+		or bool(target.get("combat_approach", false))
+		or bool(target.get("dig_route", false))
+	):
+		return false
+	if provider == null or not provider.has_method("dangerous_hostile_threat"):
+		return false
+	var creature: Dictionary = provider.call("dangerous_hostile_threat", observation)
+	if creature.is_empty():
+		return false
+	if float(creature.get("distance", INF)) > float(observation.get("creature_attack_distance", 48.0)):
+		return false
+	_hostile_preempt_until_msec = now_msec + HOSTILE_PREEMPT_COOLDOWN_MSEC
+	return true
 
 
 func _player_combat_focus_active(observation: Dictionary) -> bool:
