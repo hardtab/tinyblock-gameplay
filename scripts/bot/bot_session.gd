@@ -2609,6 +2609,7 @@ func _apply_completed_region_transfer(payload: Dictionary) -> void:
 			"event": "region_transfer_applied",
 			"chunk_x": chunk_x,
 			"terrain_tiles": region_tiles.size(),
+			"container_count": (region_state.get("containers", []) as Array).size() if region_state.get("containers", []) is Array else 0,
 			"at_msec": Time.get_ticks_msec(),
 		})
 		behavior.request_decision(Time.get_ticks_msec())
@@ -2696,6 +2697,30 @@ func _merge_streamed_chunk_terrain(state: Dictionary) -> bool:
 		):
 			return false
 		resolved_tiles.append({"x": tile_x, "y": tile_y, "block_name": block_name, "content_id": str(tile.get("content_id", ""))})
+	# Containers ride on the same authoritative chunk payload. Validate them
+	# before any mutation so a malformed coordinate cannot corrupt the cached
+	# container index; an absent field means "not streamed" and leaves the
+	# existing cache untouched, while an explicit array (even empty) replaces
+	# the whole chunk.
+	var has_container_payload := state.has("containers")
+	var raw_container_entries: Variant = state.get("containers", [])
+	var incoming_containers: Array = []
+	if has_container_payload:
+		if not raw_container_entries is Array:
+			return false
+		incoming_containers = raw_container_entries
+		for raw_container in incoming_containers:
+			if not raw_container is Dictionary:
+				return false
+			var container_entry := raw_container as Dictionary
+			var container_x := int(container_entry.get("x", WorldSim.COORD_LIMIT + 1))
+			var container_y := int(container_entry.get("y", WorldSim.COORD_LIMIT + 1))
+			if (
+				absi(container_x) > WorldSim.COORD_LIMIT
+				or absi(container_y) > WorldSim.COORD_LIMIT
+				or floori(float(container_x) / float(WorldSim.CHUNK_WIDTH)) != chunk_x
+			):
+				return false
 	# The chunk transfer is a complete authoritative view of this generated
 	# region, unlike sparse tile_batch deltas. Replace cached cells within its
 	# horizontal bounds so old/absent cells cannot survive a procedural update.
@@ -2722,12 +2747,52 @@ func _merge_streamed_chunk_terrain(state: Dictionary) -> bool:
 	snapshot_plants = snapshot_plants.filter(func(plant: Variant): return not plant is Dictionary or floori(float(int((plant as Dictionary).get("x", (plant as Dictionary).get("anchor_x", WorldSim.COORD_LIMIT)))) / float(WorldSim.CHUNK_WIDTH)) != chunk_x)
 	snapshot_plants.append_array(plant_entries)
 	_world_snapshot["plant_growth"] = snapshot_plants
+	if has_container_payload:
+		_merge_streamed_chunk_containers(chunk_x, incoming_containers)
 	_invalidate_jump_landing_cache()
 	_safe_exploration_waypoint_cache.clear()
 	_safe_exploration_waypoint_cache_checked_msec = -1
 	_physics_route.clear()
 	_physics_route_replan_msec = 0
 	return true
+
+
+## A streamed chunk transfer is a complete authoritative view of its generated
+## region, so it must replace the cached container entries inside that chunk.
+## Without this an ordinary generated structure chest that arrives only through
+## chunk streaming stays invisible, and a chest the host removed (looted/erased)
+## or re-emitted would linger or duplicate as a stale entry.
+func _merge_streamed_chunk_containers(chunk_x: int, raw_containers: Array) -> void:
+	var incoming: Array = raw_containers
+	var kept: Array = []
+	var existing: Variant = _world_snapshot.get("containers", [])
+	if existing is Array:
+		var existing_entries: Array = existing
+		for raw_entry in existing_entries:
+			if not raw_entry is Dictionary:
+				continue
+			var entry := raw_entry as Dictionary
+			var entry_x := int(entry.get("x", WorldSim.COORD_LIMIT))
+			if floori(float(entry_x) / float(WorldSim.CHUNK_WIDTH)) == chunk_x:
+				continue
+			kept.append(entry)
+	var merged: Array = kept
+	for raw_entry in incoming:
+		if not raw_entry is Dictionary:
+			continue
+		var entry := raw_entry as Dictionary
+		var tile_x := int(entry.get("x", WorldSim.COORD_LIMIT))
+		if floori(float(tile_x) / float(WorldSim.CHUNK_WIDTH)) != chunk_x:
+			continue
+		merged.append({"x": tile_x, "y": int(entry.get("y", 0)), "data": _container_entry_data(entry)})
+	_world_snapshot["containers"] = merged
+	if not incoming.is_empty():
+		structured_log.emit({
+			"event": "region_containers_merged",
+			"chunk_x": chunk_x,
+			"container_count": merged.size(),
+			"at_msec": Time.get_ticks_msec(),
+		})
 
 
 func _erase_chunk_index_keys(index: Dictionary, chunk_x: int) -> void:
@@ -4103,6 +4168,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_descent_planner.observe_initial_snapshot(descent_initial_self_state, _descent_terrain_map(), _descent_coverage())
 	_sync_stone_age_goal(_achievement_observation(), Time.get_ticks_msec())
 	var initial_support := _support_tile_for_position(Contract.target_position(local_state))
+	var initial_visible_containers: Array = _world_snapshot.get("visible_containers", []) if _world_snapshot.get("visible_containers", []) is Array else []
 	structured_log.emit({
 		"event": "snapshot_ready",
 		"x": float(local_state.get("x", 0.0)),
@@ -4112,6 +4178,8 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		"support_y": initial_support.y,
 		"support_block": _terrain_name_at(initial_support.x, initial_support.y),
 		"terrain_tile_count": _terrain_tiles.size(),
+		"visible_container_count": initial_visible_containers.size(),
+		"generated_chest_count": _generated_chest_count(initial_visible_containers),
 		"spawn_support_recovered": spawn_support_recovered,
 		"at_msec": Time.get_ticks_msec(),
 	})
@@ -5823,10 +5891,7 @@ func _visible_containers_from_snapshot(snapshot: Dictionary, self_state: Diction
 				break
 		if not has_accessible_wood:
 			max_distance = maxf(max_distance, STARTER_TOOLING_RESOURCE_SCAN_RADIUS + float(BlockDefs.TILE))
-	for raw_entry in raw_containers:
-		if not raw_entry is Dictionary:
-			continue
-		var entry := raw_entry as Dictionary
+	for entry in _normalized_container_entries(raw_containers):
 		var data: Dictionary = entry.get("data", {}) if entry.get("data", {}) is Dictionary else {}
 		var tile_x := int(entry.get("x", 0))
 		var tile_y := int(entry.get("y", 0))
@@ -5858,6 +5923,58 @@ func _visible_containers_from_snapshot(snapshot: Dictionary, self_state: Diction
 		if containers.size() >= 32:
 			break
 	return containers
+
+
+## Hosts serialize containers in two shapes. A full save snapshot
+## (`WorldSim.serialize_state`) writes the container fields flat on the entry
+## (`contents`, `loot_key`, `loot_generated`, `death_cache`, ...), while live
+## tile batches and streamed chunk transfers nest the same fields under `data`.
+## Some payloads also wrap a nested `containers` array (a chunk entry carrying
+## its own region). Normalize every shape into `{x, y, data}` so an ordinary
+## generated structure chest is never mistaken for an opened empty chest.
+func _normalized_container_entries(raw_containers: Array) -> Array:
+	var entries: Array = []
+	for raw_entry in raw_containers:
+		if not raw_entry is Dictionary:
+			continue
+		var entry := raw_entry as Dictionary
+		var nested: Variant = entry.get("containers", null)
+		if nested is Array:
+			entries.append_array(_normalized_container_entries(nested))
+			continue
+		var data: Dictionary = _container_entry_data(entry)
+		entries.append({
+			"x": int(entry.get("x", 0)),
+			"y": int(entry.get("y", 0)),
+			"data": data,
+		})
+	return entries
+
+
+## Prefer a nested `data` payload whenever the entry carries one (live tile
+## batches and streamed chunk transfers), otherwise fall back to the flat host
+## snapshot fields on the entry itself.
+func _container_entry_data(entry: Dictionary) -> Dictionary:
+	if entry.has("data") and entry.get("data", null) is Dictionary:
+		return (entry.get("data", {}) as Dictionary).duplicate(true)
+	if _looks_like_flat_container_entry(entry):
+		return entry.duplicate(true)
+	return {}
+
+
+func _looks_like_flat_container_entry(entry: Dictionary) -> bool:
+	for key in ["contents", "loot_key", "death_cache", "one_use_cache", "loot_generated", "owner_player_id"]:
+		if entry.has(key):
+			return true
+	return false
+
+
+func _generated_chest_count(containers: Array) -> int:
+	var count := 0
+	for raw_container in containers:
+		if raw_container is Dictionary and bool((raw_container as Dictionary).get("generated", false)):
+			count += 1
+	return count
 
 
 func _duel_fallback_container(self_state: Dictionary) -> Dictionary:
