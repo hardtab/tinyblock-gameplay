@@ -1015,6 +1015,13 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 				self_state, origin, threat_center, physics_first_step_guard, allow_emergency_closing_step
 			)
 			if flee_waypoint.is_empty():
+				# A falling avatar has no standable origin for the ground-route search.
+				# This is a transient physics state, not proof that escape is impossible.
+				if _should_settle_airborne(self_state, origin):
+					_set_desired_input(false, false, false)
+					_advance_local_physics(self_state, delta, false)
+					_world_snapshot["self"] = self_state
+					return {"done": false, "reason": "airborne_settling"}
 				_set_desired_input(false, false, false)
 				_advance_local_physics(self_state, delta, false)
 				_world_snapshot["self"] = self_state
