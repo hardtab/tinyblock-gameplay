@@ -60,6 +60,19 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 	for key in ["self_defense", "social_emoji", "social_target_id", "preferred_player_distance", "creature_attack_distance", "bow_attack_distance", "pvp_world", "duel_started", "enemy_player_id", "aggressive_player_id", "pvp_chest_opened", "world_mode", "recipes", "achievements", "biome_waypoints", "safe_exploration_waypoints", "equipment_slots", "terrain_known_cells", "craft_pending_output", "craft_retry_after_msec", "craft_blocked_outputs", "food_eat_cooldown_until_msec", "action_loop_blocked", "protected_build_cells", "descent_plan", "verified_safe_exit", "descent_protected_supports"]:
 		if snapshot.has(key):
 			observation[key] = snapshot[key]
+	# A killer remains remembered by BotSession for this world, but is only an
+	# active combat focus while alive and in perception. Otherwise a vanished
+	# player makes the provider choose SELF_DEFENSE/WAIT on every tick forever.
+	if not bool(observation.get("pvp_world", false)):
+		var aggressor_id := str(observation.get("aggressive_player_id", ""))
+		if not aggressor_id.is_empty():
+			var aggressor_visible := false
+			for player in players:
+				if str(player.get("id", "")) == aggressor_id and bool(player.get("alive", true)):
+					aggressor_visible = true
+					break
+			if not aggressor_visible:
+				observation["aggressive_player_id"] = ""
 	return observation
 
 
