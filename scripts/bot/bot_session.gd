@@ -253,6 +253,12 @@ const MINE_REJECTION_RETRY_MSEC := 60_000
 const HARMFUL_FLUID_MINE_RETRY_MSEC := 300_000
 const STATION_ROUTE_RETRY_BLOCK_MSEC := 30_000
 const CONTAINER_RETRY_BLOCK_MSEC := 30_000
+# Movement-route failures toward a chest are usually transient: the origin is
+# mid-air for one frame, or the first step is momentarily blocked and the route
+# is recomputed every tick. Cooling the chest for the full terminal window hid
+# reachable chests. Only a genuine OPEN_CONTAINER terminal failure (an
+# ack-timeout or host rejection) keeps CONTAINER_RETRY_BLOCK_MSEC.
+const CONTAINER_MOVE_RETRY_BLOCK_MSEC := 1_500
 const UNSAFE_ROUTE_RETRY_BLOCK_MSEC := 30_000
 const EMOJI_EVENT_TTL_MSEC := 8_000
 const SUPPORT_PLACE_COOLDOWN_MSEC := 650
@@ -846,6 +852,19 @@ func _send_player_input_if_due(now_msec: int) -> void:
 	})
 
 
+func _should_settle_airborne(self_state: Dictionary, origin: Vector2) -> bool:
+	# A host correction or an earlier action timeout can leave the real avatar
+	# between supports without an active jump. Ground routes have no valid origin
+	# there, so movement branches must resolve gravity before replanning instead
+	# of declaring a valid destination unreachable on a transient airborne frame.
+	return (
+		not _climb_active
+		and not bool(self_state.get("on_ground", false))
+		and not _local_pose_has_support(self_state)
+		and _active_verified_drop_step(origin, self_state).is_empty()
+	)
+
+
 func _default_movement_step(action: String, decision: Dictionary, observation: Dictionary, delta: float) -> Dictionary:
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	var origin := Contract.target_position(self_state)
@@ -895,6 +914,16 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		if origin.distance_to(target) <= float(BlockDefs.TILE) * 4.5:
 			_set_desired_input(false, false, false)
 			return {"done": true, "reason": "already_at_target"}
+		# The generic airborne settling guard below runs *after* this branch, so
+		# a transient airborne origin (host correction or a previous action
+		# timeout) would make container routing report route_unreachable and then
+		# cool the chest for the full container retry window. Settle gravity
+		# first and let the same route be replanned on the next tick.
+		if _should_settle_airborne(self_state, origin):
+			_set_desired_input(false, false, false)
+			_advance_local_physics(self_state, delta, false)
+			_world_snapshot["self"] = self_state
+			return {"done": false, "reason": "airborne_settling"}
 		var container_stand := _reachable_stand_position_for_block(origin, decision_target)
 		if not container_stand.is_empty():
 			target = Contract.target_position(container_stand)
@@ -1039,12 +1068,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# there. Resolve gravity before replanning, rather than declaring a verified
 	# exploration destination unreachable merely because this frame is airborne.
 	# Do not invent horizontal steering over an unverified gap.
-	if (
-		not _climb_active
-		and not bool(self_state.get("on_ground", false))
-		and not _local_pose_has_support(self_state)
-		and _active_verified_drop_step(origin, self_state).is_empty()
-	):
+	if _should_settle_airborne(self_state, origin):
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
 		_world_snapshot["self"] = self_state
@@ -6464,7 +6488,15 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 		]
 		and (target_id.begins_with("station:") or target_id.begins_with("container:"))
 	):
-		var route_retry_delay := CONTAINER_RETRY_BLOCK_MSEC if target_id.begins_with("container:") else STATION_ROUTE_RETRY_BLOCK_MSEC
+		# A movement-route failure toward a chest is normally transient (a
+		# mid-air settling origin or a momentarily blocked first step) and the
+		# route is replanned on the next tick, so it must not cool the chest for
+		# the full terminal window. A genuine hazard refusal (lava) keeps the
+		# long cool-down; terminal OPEN_CONTAINER failures keep
+		# CONTAINER_RETRY_BLOCK_MSEC through their own ack-timeout/rejection paths.
+		var route_retry_delay := STATION_ROUTE_RETRY_BLOCK_MSEC
+		if target_id.begins_with("container:"):
+			route_retry_delay = CONTAINER_RETRY_BLOCK_MSEC if reason == "lava_guard" else CONTAINER_MOVE_RETRY_BLOCK_MSEC
 		_blocked_action_targets[target_id] = Time.get_ticks_msec() + route_retry_delay
 	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "lava_guard", "pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable", "timeout", "mine_ack_timeout"]:
 		_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
