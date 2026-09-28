@@ -182,6 +182,11 @@ var _pvp_enemy_last_seen_msec := -1
 var _duel_started := false
 var _pvp_chest_opened := false
 var _last_duel_ready_msec := -1
+## Authoritative end-of-match control from the host. Once set, combat
+## decisions and commands stop for the rest of the session so the bot cannot
+## keep shooting or chasing a resolved duel.
+var _duel_result_received := false
+var _duel_result: Dictionary = {}
 var _craft_pending_output := ""
 var _craft_retry_after_msec := -1
 ## output_name -> blocked_until_msec. Timed so a missed craft_recipe ack
@@ -418,6 +423,8 @@ func join_session(record: Dictionary) -> void:
 	_duel_started = false
 	_pvp_chest_opened = false
 	_last_duel_ready_msec = -1
+	_duel_result_received = false
+	_duel_result.clear()
 	_session_world_mode = str(record.get("world_mode", record.get("mode", ""))).to_lower()
 	_descent_planner.reset_session()
 	_descent_planner.begin_session(
@@ -617,6 +624,10 @@ func handle_message(message: Dictionary) -> void:
 	if message_type == "duel_start":
 		_record_event("duel_start", payload)
 		_duel_started = true
+		# A rematch in the same session is a fresh match: clear the terminal
+		# result so the bot can fight again instead of staying frozen.
+		_duel_result_received = false
+		_duel_result.clear()
 		# The host can open the lobby with a generic world snapshot and only then
 		# switch the simulation to the duel ruleset. Promote that transition here
 		# so the bot does not spend the match mining or wandering before it pins
@@ -627,6 +638,9 @@ func handle_message(message: Dictionary) -> void:
 		if _pvp_enemy_player_id.is_empty() and not _roster.is_empty():
 			_pvp_enemy_player_id = str(_roster.keys()[0])
 		behavior.request_decision(Time.get_ticks_msec())
+		return
+	if message_type == "duel_result":
+		_handle_duel_result(payload)
 		return
 	if message_type == "action_result":
 		_handle_action_result(payload)
@@ -732,6 +746,15 @@ func _process(delta: float) -> void:
 		_check_empty_world_grace(now_msec)
 		return
 	_guest_defeat_pending = false
+	if _duel_result_received:
+		# The host declared the outcome, so no further combat decisions or
+		# movement commands should fire. Keep publishing input/snapshot so the
+		# host still sees a stationary bot instead of a stale combat pose.
+		_set_desired_input(false, false, false)
+		_send_player_input_if_due(now_msec)
+		_send_player_snapshot_if_due(now_msec)
+		_check_empty_world_grace(now_msec)
+		return
 	var observation := _build_observation(now_msec)
 	if _is_pvp_world() and not _duel_started and now_msec - _last_duel_ready_msec >= 1000:
 		_send_duel_ready(now_msec)
@@ -3408,6 +3431,85 @@ static func death_reaction_emoji(killer_id: String, host_player_id: String, host
 	if killer_id == host_player_id and not host_player_id.is_empty():
 		return HOST_KILL_EMOJIS[clampi(host_kill_streak - 1, 0, HOST_KILL_EMOJIS.size() - 1)]
 	return "😡"
+
+
+## Terminal `duel_result` handling. The host owns the outcome, so the bot only
+## records it, cancels anything still in flight, and stops issuing combat
+## decisions for the resolved match.
+func _handle_duel_result(payload: Dictionary) -> void:
+	if _duel_result_received:
+		return
+	# A stray or spoofed control packet must not end combat in a world the bot
+	# is not actually fighting in.
+	if not _is_pvp_world() and not _duel_started:
+		_record_event("duel_result_ignored", {"reason": "non_pvp_world"})
+		return
+	var payload_world_id := str(payload.get("world_id", ""))
+	if not payload_world_id.is_empty() and not world_id.is_empty() and payload_world_id != world_id:
+		_record_event("duel_result_ignored", {
+			"reason": "world_mismatch",
+			"world_id": payload_world_id,
+		})
+		return
+	var now_msec := Time.get_ticks_msec()
+	var winner_id := str(payload.get("winner_player_id", ""))
+	var loser_id := str(payload.get("loser_player_id", ""))
+	var bot_won := not winner_id.is_empty() and winner_id == own_player_id
+	_duel_result_received = true
+	_duel_result = {
+		"winner_player_id": winner_id,
+		"loser_player_id": loser_id,
+		"bot_won": bot_won,
+		"received_at_msec": now_msec,
+	}
+	_record_event("duel_result", _duel_result.duplicate(true))
+	structured_log.emit({
+		"event": "duel_result",
+		"winner_player_id": winner_id,
+		"loser_player_id": loser_id,
+		"bot_won": bot_won,
+		"at_msec": now_msec,
+	})
+	_stop_duel_combat(now_msec)
+	_send_duel_result_emoji(bot_won, now_msec)
+
+
+func _stop_duel_combat(now_msec: int) -> void:
+	if behavior != null and behavior.executor != null and behavior.executor.is_busy():
+		var interrupted_decision: Dictionary = behavior.executor.current_decision.duplicate(true)
+		behavior.executor.cancel("duel_result")
+		structured_log.emit({
+			"event": "duel_result_action_cancelled",
+			"action": str(interrupted_decision.get("action", "")),
+			"goal": str(interrupted_decision.get("goal", "")),
+			"at_msec": now_msec,
+		})
+	_set_desired_input(false, false, false)
+	structured_log.emit({
+		"event": "duel_combat_stopped",
+		"bot_won": bool(_duel_result.get("bot_won", false)),
+		"at_msec": now_msec,
+	})
+
+
+func _send_duel_result_emoji(bot_won: bool, now_msec: int) -> void:
+	var sanitized := EmojiReactions.sanitize("🎉" if bot_won else "😭")
+	if sanitized.is_empty():
+		return
+	if not _social.emoji_can_send(_last_emoji_sent_msec, now_msec, sanitized, _previous_emoji, _social_last_sent_msec):
+		return
+	if network_client != null and network_client.has_method("send_command"):
+		network_client.call("send_command", "emoji_reaction", {"emoji": sanitized})
+	_last_emoji_sent_msec = now_msec
+	_social_last_sent_msec = now_msec
+	_previous_emoji = sanitized
+	_clear_social_emoji_queue()
+	structured_log.emit({
+		"event": "duel_result_emoji_sent",
+		"emoji": sanitized,
+		"bot_won": bot_won,
+		"at_msec": now_msec,
+	})
 
 
 func _eject_local_self_from_solid(self_state: Dictionary) -> void:
