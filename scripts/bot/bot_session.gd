@@ -1002,6 +1002,13 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		_advance_local_physics(self_state, delta, false)
 		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "already_at_target"}
+	# When fleeing, complete an already-launched jump toward its verified landing
+	# before planning a fresh ground route. FLEE_FROM used to search from
+	# the unsupported mid-jump pose first, settle in place, and time out beside
+	# the hostile without ever reaching this jump continuation.
+	var active_landing: Variant = _active_air_transition.get("to")
+	if action == Contract.ACTION_FLEE_FROM and _jump_active and typeof(active_landing) == TYPE_VECTOR2I:
+		return _jump_step(self_state, _world_position_for_support_tile(active_landing), delta)
 
 	var destination := target
 	if action in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW]:
