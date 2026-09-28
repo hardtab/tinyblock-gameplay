@@ -422,6 +422,17 @@ func decide(observation: Dictionary) -> Dictionary:
 		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.88)
 	if not aggressive_player_id.is_empty():
 		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.88)
+	# Ordinary generated chests are a clear, finite world activity. Check them
+	# before progression/mining so the bot does not repeatedly pass a visible
+	# cache while harvesting whichever block happens to score first.
+	var world_chest_action := _world_chest_action(observation, legal)
+	if not world_chest_action.is_empty():
+		return world_chest_action
+	# After taking the contents of a generated chest, pick up the chest itself
+	# when it is safely reachable. Player-placed chests are intentionally excluded.
+	var opened_chest_action := _opened_generated_chest_action(observation, legal)
+	if not opened_chest_action.is_empty():
+		return opened_chest_action
 	# A previously failed ordinary follow may have a safe one-step route fix. Run
 	# that target-pinned repair after all survival/combat decisions but before
 	# progression can fall through to another action or re-issue the failed move.
@@ -946,6 +957,65 @@ func _first_dictionary(values: Array) -> Dictionary:
 	for value in values:
 		if value is Dictionary:
 			return value as Dictionary
+	return {}
+
+
+func _world_chest_action(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
+	if bool(observation.get("pvp_world", false)):
+		return {}
+	var best := {}
+	var best_distance := INF
+	var blocked: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	var now_msec := int(observation.get("observed_at_msec", 0))
+	for raw_container in _as_array(observation.get("visible_containers", [])):
+		if not raw_container is Dictionary:
+			continue
+		var container := raw_container as Dictionary
+		if str(container.get("kind", "")) != "chest":
+			continue
+		if int(blocked.get(str(container.get("id", "")), 0)) > now_msec:
+			continue
+		var distance := float(container.get("distance", Contract.distance_between(observation.get("self", {}), container)))
+		if distance < best_distance:
+			best = container
+			best_distance = distance
+	if best.is_empty():
+		return {}
+	if bool(best.get("reachable", false)) and Contract.ACTION_OPEN_CONTAINER in legal:
+		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_OPEN_CONTAINER, best, 900, 0.84)
+	if Contract.ACTION_MOVE_TO in legal:
+		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, best, 1800, 0.82)
+	return {}
+
+
+func _opened_generated_chest_action(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
+	if bool(observation.get("pvp_world", false)):
+		return {}
+	var opened: Dictionary = observation.get("opened_generated_chest_cells", {}) if observation.get("opened_generated_chest_cells", {}) is Dictionary else {}
+	var best := {}
+	var best_distance := INF
+	for raw_resource in _as_array(observation.get("visible_resources", [])):
+		if not raw_resource is Dictionary:
+			continue
+		var resource := raw_resource as Dictionary
+		if str(resource.get("block_name", "")).to_lower() != "chest":
+			continue
+		var key := "%d:%d" % [int(resource.get("x", 2147483647)), int(resource.get("y", 2147483647))]
+		if not bool(opened.get(key, false)) or _tile_retry_cooldown_active(observation, int(resource.get("x", 0)), int(resource.get("y", 0))):
+			continue
+		if not Perception.mine_target_is_safe(observation, resource) or not _resource_has_proven_approach(resource, observation):
+			continue
+		var distance := float(resource.get("distance", 9999.0))
+		if distance > 288.0 or distance >= best_distance:
+			continue
+		best = resource
+		best_distance = distance
+	if best.is_empty():
+		return {}
+	if bool(best.get("reachable", false)) and Contract.ACTION_MINE in legal:
+		return _decision(Contract.GOAL_GATHER, Contract.ACTION_MINE, best, 2200, 0.84)
+	if Contract.ACTION_MOVE_TO in legal:
+		return _decision(Contract.GOAL_GATHER, Contract.ACTION_MOVE_TO, best, 2200, 0.78)
 	return {}
 
 

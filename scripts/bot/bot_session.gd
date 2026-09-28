@@ -42,6 +42,7 @@ const SNAPSHOT_RETRY_INTERVAL_MSEC := 6_000
 const SNAPSHOT_RETRY_LIMIT := 3
 const DEFAULT_EMPTY_GRACE_MSEC := 30_000
 const DEFAULT_OBSERVATION_RADIUS := 256.0
+const CHEST_OBSERVATION_RADIUS := 512.0
 const STARTER_TOOLING_RESOURCE_SCAN_RADIUS := 1536.0
 
 var backend: Object
@@ -118,6 +119,7 @@ var _equipment_slots := {"hand": "", "feet": ""}
 var _pending_action_targets: Dictionary = {}
 var _blocked_action_targets: Dictionary = {}
 var _protected_build_cells: Dictionary = {}
+var _opened_generated_chest_cells: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
 var _last_flee_route_diagnostic_msec := -1
 var _last_pursuit_route_diagnostic_msec := -1
@@ -237,6 +239,7 @@ const BUILD_PROJECT_ROUTE_REPLAN_MSEC := 500
 const ACTION_RETRY_BLOCK_MSEC := 8_000
 const MINE_REJECTION_RETRY_MSEC := 60_000
 const STATION_ROUTE_RETRY_BLOCK_MSEC := 30_000
+const CONTAINER_RETRY_BLOCK_MSEC := 30_000
 const UNSAFE_ROUTE_RETRY_BLOCK_MSEC := 30_000
 const EMOJI_EVENT_TTL_MSEC := 8_000
 const SUPPORT_PLACE_COOLDOWN_MSEC := 650
@@ -358,6 +361,7 @@ func join_session(record: Dictionary) -> void:
 	_pending_action_targets.clear()
 	_blocked_action_targets.clear()
 	_protected_build_cells.clear()
+	_opened_generated_chest_cells.clear()
 	_action_loop_blocked_until.clear()
 	_terrain_tiles.clear()
 	_terrain_known_chunks.clear()
@@ -847,8 +851,24 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 			var approach_gap := clampf(float(decision_target.get("combat_approach_gap", 32.0)), 16.0, 48.0)
 			target = Vector2(live_threat_position.x + approach_side * approach_gap, live_threat_position.y)
 			break
+	if action == Contract.ACTION_MOVE_TO and target_id.begins_with("container:"):
+		# Containers are solid blocks. Route to a supported interaction position,
+		# then use a proven intermediate waypoint when the chest is farther than
+		# the bounded route graph can solve in one action.
+		if origin.distance_to(target) <= float(BlockDefs.TILE) * 4.5:
+			_set_desired_input(false, false, false)
+			return {"done": true, "reason": "already_at_target"}
+		var container_stand := _reachable_stand_position_for_block(origin, decision_target)
+		if not container_stand.is_empty():
+			target = Contract.target_position(container_stand)
+		else:
+			var container_waypoint := _safe_pursuit_waypoint(origin, target, _safe_jump_first_step_filter(self_state))
+			if container_waypoint.is_empty():
+				_set_desired_input(false, false, false)
+				return {"done": true, "reason": "route_unreachable"}
+			target = Contract.target_position(container_waypoint)
 	if action == Contract.ACTION_MOVE_TO and target_id.begins_with("tile:"):
-		var stand_position := _reachable_stand_position_for_block(origin, decision.get("target", {}) as Dictionary)
+		var stand_position := _reachable_stand_position_for_block(origin, decision_target)
 		if stand_position.is_empty():
 			_set_desired_input(false, false, false)
 			_advance_local_physics(self_state, delta, false)
@@ -2576,8 +2596,11 @@ func _apply_tile_batch(payload: Dictionary) -> void:
 			_terrain_tiles.erase(key)
 			_support_preserving_mine_tiles.erase(key)
 			_protected_build_cells.erase(key)
+			_opened_generated_chest_cells.erase(key)
 		elif not name.is_empty():
 			_terrain_tiles[key] = name
+			if name != "chest":
+				_opened_generated_chest_cells.erase(key)
 			if tile.has("preserves_support_on_mine"):
 				if bool(tile.get("preserves_support_on_mine", false)):
 					_support_preserving_mine_tiles[key] = true
@@ -4574,6 +4597,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["emoji_events"] = _active_emoji_events(now_msec)
 	snapshot["action_history"] = _action_history.duplicate(true)
 	snapshot["protected_build_cells"] = _protected_build_cells.duplicate(true)
+	snapshot["opened_generated_chest_cells"] = _opened_generated_chest_cells.duplicate(true)
 	snapshot["world_id"] = world_id
 	_action_loop_blocked_until = ActionLoop.refresh_blocked_actions(
 		_action_history,
@@ -4950,13 +4974,12 @@ func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
 
 
 func _active_blocked_action_targets(now_msec: int) -> Dictionary:
-	# Tile actions and station routes keep exact target IDs in this map. Expose
-	# only those policy-relevant keys, so the provider can choose another station
-	# after a blocked route without leaking unrelated cooldown state.
+	# Expose only policy-relevant targets, so selectors can choose a different
+	# resource, station, or container after a failed attempt.
 	var targets: Dictionary = {}
 	for raw_key in _blocked_action_targets.keys():
 		var key := str(raw_key)
-		if not key.begins_with("tile:") and not key.begins_with("station:"):
+		if not key.begins_with("tile:") and not key.begins_with("station:") and not key.begins_with("container:"):
 			continue
 		var blocked_until := int(_blocked_action_targets[raw_key])
 		if blocked_until <= now_msec:
@@ -5015,6 +5038,8 @@ func _expire_stale_action_targets(now_msec: int) -> void:
 			continue
 		if str(pending.get("action", "")) in [Contract.ACTION_MINE, Contract.ACTION_PLACE] and key.contains(":"):
 			_blocked_action_targets["tile:%s" % key] = now_msec + ACTION_RETRY_BLOCK_MSEC
+		if str(pending.get("action", "")) == Contract.ACTION_OPEN_CONTAINER:
+			_blocked_action_targets["container:%s" % key] = now_msec + CONTAINER_RETRY_BLOCK_MSEC
 		if str(pending.get("action", "")) == Contract.ACTION_PLACE:
 			_note_build_project_failure(pending, "place_ack_timeout", now_msec)
 		_pending_action_targets.erase(raw_key)
@@ -5341,7 +5366,7 @@ func _visible_containers_from_snapshot(snapshot: Dictionary, self_state: Diction
 	if not raw_containers is Array:
 		return containers
 	var origin := Contract.target_position(self_state)
-	var max_distance := observation_radius + float(BlockDefs.TILE)
+	var max_distance := maxf(observation_radius, CHEST_OBSERVATION_RADIUS) + float(BlockDefs.TILE)
 	for raw_entry in raw_containers:
 		if not raw_entry is Dictionary:
 			continue
@@ -5368,6 +5393,7 @@ func _visible_containers_from_snapshot(snapshot: Dictionary, self_state: Diction
 			"y": tile_y,
 			"position": [position.x, position.y],
 			"kind": kind,
+			"generated": kind == "chest" and not str(data.get("loot_key", "")).is_empty(),
 			"death_cache": death_cache,
 			"one_use_cache": one_use_cache,
 			"owner_player_id": str(data.get("owner_player_id", "")),
@@ -5706,6 +5732,9 @@ func _on_decision_started(decision: Dictionary) -> void:
 		var container_key := "%d:%d" % [int(container_target.get("x", 0)), int(container_target.get("y", 0))]
 		_pending_action_targets[container_key] = {
 			"action": action,
+			"sent_at_msec": now_msec,
+			"kind": str(container_target.get("kind", "")),
+			"generated": bool(container_target.get("generated", false)),
 			"death_cache": bool(container_target.get("death_cache", false)) or str(container_target.get("kind", "")) == "death_cache",
 			"owner_player_id": str(container_target.get("owner_player_id", "")),
 		}
@@ -5835,10 +5864,14 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 		_blocked_action_targets[target_id] = Time.get_ticks_msec() + retry_delay
 	if (
 		str(decision.get("action", "")) in [Contract.ACTION_MOVE_TO, Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW]
-		and reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "timeout"]
-		and target_id.begins_with("station:")
+		and reason in [
+			"blocked_obstacle", "edge_guard", "unsafe_jump_route", "unsafe_drop_route",
+			"route_unreachable", "pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable", "timeout",
+		]
+		and (target_id.begins_with("station:") or target_id.begins_with("container:"))
 	):
-		_blocked_action_targets[target_id] = Time.get_ticks_msec() + STATION_ROUTE_RETRY_BLOCK_MSEC
+		var route_retry_delay := CONTAINER_RETRY_BLOCK_MSEC if target_id.begins_with("container:") else STATION_ROUTE_RETRY_BLOCK_MSEC
+		_blocked_action_targets[target_id] = Time.get_ticks_msec() + route_retry_delay
 	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable", "timeout", "mine_ack_timeout"]:
 		_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
 		_achievement_goal_note_failure(decision, reason, Time.get_ticks_msec())
@@ -6017,6 +6050,18 @@ func _handle_action_result(payload: Dictionary) -> void:
 		var pending_container: Dictionary = _pending_action_targets.get(container_key, {}) if _pending_action_targets.get(container_key, {}) is Dictionary else {}
 		_pending_action_targets.erase(container_key)
 		var accepted := bool(payload.get("accepted", false))
+		if not accepted:
+			_blocked_action_targets["container:%s" % container_key] = Time.get_ticks_msec() + CONTAINER_RETRY_BLOCK_MSEC
+		else:
+			_blocked_action_targets.erase("container:%s" % container_key)
+		var container_data: Dictionary = payload.get("container", {}) if payload.get("container", {}) is Dictionary else {}
+		var generated_chest := bool(pending_container.get("generated", false)) or (
+			not str(container_data.get("loot_key", "")).is_empty()
+			and not bool(container_data.get("death_cache", false))
+			and not bool(container_data.get("one_use_cache", false))
+		)
+		if accepted and not _is_pvp_world() and generated_chest:
+			_opened_generated_chest_cells[container_key] = true
 		if _should_award_death_cache_recovery(accepted, str(pending_container.get("owner_player_id", ""))) and bool(pending_container.get("death_cache", false)):
 			var achievements := get_node_or_null("/root/Achievements")
 			if achievements != null and achievements.has_method("record_death_cache_recovered"):
