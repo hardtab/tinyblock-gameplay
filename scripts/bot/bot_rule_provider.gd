@@ -231,6 +231,15 @@ func decide(observation: Dictionary) -> Dictionary:
 			# not make the bot alternate pursuit targets every decision.
 			var approach_target := _creature_approach_target(observation, creature_threat)
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_MOVE_TO, approach_target, 2600, 0.9)
+		if (
+			Contract.ACTION_ATTACK_CREATURE in legal
+			and _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
+			and creature_distance <= float(observation.get("creature_attack_distance", 48.0))
+		):
+			# The validated retreat failed and the hostile has already reached melee
+			# range. Empty-handed attacks still deal the game's base one damage; a
+			# bounded defensive hit is preferable to freezing beside an active threat.
+			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_ATTACK_CREATURE, creature_threat, 500, 0.78)
 		if Contract.ACTION_WAIT in legal and _creature_route_failure_still_requires_hold(creature_threat, observation):
 			# If the verified escape graph has no safe route, ordinary exploration can
 			# head straight back toward the same hostile creature. Hold position for a
