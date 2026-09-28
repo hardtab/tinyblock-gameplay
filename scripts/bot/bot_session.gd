@@ -878,7 +878,12 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 				return {"done": true, "reason": "route_unreachable"}
 			target = Contract.target_position(container_waypoint)
 	if action == Contract.ACTION_MOVE_TO and target_id.begins_with("tile:"):
-		var stand_position := _reachable_stand_position_for_block(origin, decision_target)
+		var requested_approach: Variant = decision_target.get("approach_position", [])
+		var stand_position: Dictionary = {}
+		if requested_approach is Array and (requested_approach as Array).size() >= 2:
+			stand_position = _reachable_explicit_stand_position(origin, self_state, requested_approach as Array)
+		else:
+			stand_position = _reachable_stand_position_for_block(origin, decision_target)
 		if stand_position.is_empty():
 			_set_desired_input(false, false, false)
 			_advance_local_physics(self_state, delta, false)
@@ -2094,55 +2099,15 @@ func _rebuild_known_chunk_index(raw_chunks: Variant) -> void:
 func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) -> Dictionary:
 	if not target.has("x") or not target.has("y") or _terrain_tiles.is_empty():
 		return {}
-	var tile := Vector2i(int(target.get("x", 0)), int(target.get("y", 0)))
-	var origin_support := _route_origin_support_tile(
-		origin,
-		_world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {},
-	)
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
-	var first_step_allowed := _safe_jump_first_step_filter(self_state)
-	var later_step_allowed := _safe_jump_later_step_filter(self_state)
-	var candidates: Array[Vector2i] = [
-		tile + Vector2i.LEFT,
-		tile + Vector2i.RIGHT,
-		tile + Vector2i.LEFT * 2,
-		tile + Vector2i.RIGHT * 2,
-		tile + Vector2i.LEFT + Vector2i.DOWN,
-		tile + Vector2i.RIGHT + Vector2i.DOWN,
-		tile + Vector2i.LEFT * 2 + Vector2i.DOWN,
-		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN,
-		# A log can hang two or three tiles above the ground (notably palms).
-		# The avatar's head/mining reach still covers it from a supported floor.
-		tile + Vector2i.DOWN * 2,
-		tile + Vector2i.LEFT + Vector2i.DOWN * 2,
-		tile + Vector2i.RIGHT + Vector2i.DOWN * 2,
-		tile + Vector2i.LEFT * 2 + Vector2i.DOWN * 2,
-		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN * 2,
-		tile + Vector2i.DOWN * 3,
-		tile + Vector2i.LEFT + Vector2i.DOWN * 3,
-		tile + Vector2i.RIGHT + Vector2i.DOWN * 3,
-	]
-	# Some authoritative tiles are replaced atomically and explicitly preserve
-	# support when mined. In that case the tile itself is a safe standing node:
-	# excluding it makes a regenerating block beneath/under the avatar look
-	# unreachable even when the host has confirmed the mining capability.
-	if bool(target.get("preserves_support_on_mine", false)):
-		candidates.push_front(tile)
+	var candidates := _resource_stand_candidates(target)
+	var origin_support := _route_origin_support_tile(origin, self_state)
 	var best_position := {}
 	var best_cost := INF
 	for candidate in candidates:
 		if not _terrain_standable_tile(candidate):
 			continue
-		var route := Navigator.physics_route(
-			origin_support,
-			candidate,
-			Callable(self, "_terrain_standable_tile"),
-			Callable(self, "_terrain_climbable_tile"),
-			Navigator.MAX_PHYSICS_ROUTE_NODES,
-			Callable(self, "_physics_transition_allowed"),
-			first_step_allowed,
-			later_step_allowed,
-		)
+		var route := _physics_route_to_support_tile(origin_support, candidate, self_state)
 		if route.is_empty() or Vector2i((route.back() as Dictionary).get("tile", origin_support)) != candidate:
 			continue
 		var position := _world_position_for_support_tile(candidate)
@@ -2152,6 +2117,67 @@ func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) ->
 		best_cost = cost
 		best_position = {"position": [position.x, position.y]}
 	return best_position
+
+
+func _resource_stand_candidates(target: Dictionary) -> Array[Vector2i]:
+	var candidates: Array[Vector2i] = []
+	if not target.has("x") or not target.has("y"):
+		return candidates
+	var tile := Vector2i(int(target.get("x", 0)), int(target.get("y", 0)))
+	candidates = [
+		tile + Vector2i.LEFT,
+		tile + Vector2i.RIGHT,
+		tile + Vector2i.LEFT * 2,
+		tile + Vector2i.RIGHT * 2,
+		tile + Vector2i.LEFT + Vector2i.DOWN,
+		tile + Vector2i.RIGHT + Vector2i.DOWN,
+		tile + Vector2i.LEFT * 2 + Vector2i.DOWN,
+		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN,
+		# Logs can hang two or three tiles above a floor; the avatar can mine
+		# them from a supported tile under the block.
+		tile + Vector2i.DOWN * 2,
+		tile + Vector2i.LEFT + Vector2i.DOWN * 2,
+		tile + Vector2i.RIGHT + Vector2i.DOWN * 2,
+		tile + Vector2i.LEFT * 2 + Vector2i.DOWN * 2,
+		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN * 2,
+		tile + Vector2i.DOWN * 3,
+		tile + Vector2i.LEFT + Vector2i.DOWN * 3,
+		tile + Vector2i.RIGHT + Vector2i.DOWN * 3,
+	]
+	# A host-confirmed regenerating tile may remain safe support while mined.
+	if bool(target.get("preserves_support_on_mine", false)):
+		candidates.push_front(tile)
+	return candidates
+
+
+func _physics_route_to_support_tile(origin_support: Vector2i, target_support: Vector2i, self_state: Dictionary) -> Array[Dictionary]:
+	return Navigator.physics_route(
+		origin_support,
+		target_support,
+		Callable(self, "_terrain_standable_tile"),
+		Callable(self, "_terrain_climbable_tile"),
+		Navigator.MAX_PHYSICS_ROUTE_NODES,
+		Callable(self, "_physics_transition_allowed"),
+		_safe_jump_first_step_filter(self_state),
+		_safe_jump_later_step_filter(self_state),
+	)
+
+
+func _reachable_explicit_stand_position(origin: Vector2, self_state: Dictionary, raw_position: Array) -> Dictionary:
+	if raw_position.size() < 2:
+		return {}
+	var position := Vector2(float(raw_position[0]), float(raw_position[1]))
+	var support_tile := _support_tile_for_position(position)
+	if not _terrain_standable_tile(support_tile):
+		return {}
+	var origin_support := _route_origin_support_tile(origin, self_state)
+	var route := _physics_route_to_support_tile(origin_support, support_tile, self_state)
+	if route.is_empty() or Vector2i((route.back() as Dictionary).get("tile", origin_support)) != support_tile:
+		return {}
+	return {
+		"position": [position.x, position.y],
+		"support_tile": [support_tile.x, support_tile.y],
+	}
 
 
 func _support_tile_for_position(position: Vector2) -> Vector2i:
@@ -5148,7 +5174,14 @@ func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
 			blocked_until = 0
 		var observed_resource := resource.duplicate(true)
 		if not bool(observed_resource.get("reachable", false)):
-			observed_resource["approachable"] = blocked_until <= now_msec and _resource_has_reachable_stand_tile(observed_resource, reachable_support_tiles)
+			var approach := _resource_approach_stand_position(observed_resource, reachable_support_tiles)
+			observed_resource["approachable"] = blocked_until <= now_msec and not approach.is_empty()
+			if not approach.is_empty() and blocked_until <= now_msec:
+				observed_resource["approach_position"] = approach.get("position", [])
+				observed_resource["approach_support_tile"] = approach.get("support_tile", [])
+			else:
+				observed_resource.erase("approach_position")
+				observed_resource.erase("approach_support_tile")
 		if blocked_until > now_msec:
 			# Keep a failed target in the observation, but make it unselectable until
 			# its bounded retry window expires. Dropping it entirely made progression
@@ -5178,14 +5211,14 @@ func _active_blocked_action_targets(now_msec: int) -> Dictionary:
 
 
 func _physics_reachable_support_tiles(origin_tile: Vector2i, first_step_allowed: Callable = Callable()) -> Dictionary:
-	# Resource approachability, exploration, and movement execution must share the
-	# same graph, including temporary transitions rejected by the authoritative
-	# host and first jump arcs the local physics adapter cannot safely execute.
-	# Otherwise policy advertises a target that the executor immediately refuses.
+	# This is a route map rather than only a boolean set: it gives the policy the
+	# actual stand tile and shortest step count from the same bounded graph used
+	# by movement execution. Both paths include host-rejected edges and unsafe
+	# first/later jumps, so a MOVE_TO can carry an executable destination.
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	if not first_step_allowed.is_valid():
 		first_step_allowed = _safe_jump_first_step_filter(self_state)
-	return Navigator.physics_reachable_tiles(
+	return Navigator.physics_reachable_first_steps(
 		origin_tile,
 		Callable(self, "_terrain_standable_tile"),
 		Callable(self, "_terrain_climbable_tile"),
@@ -5197,36 +5230,33 @@ func _physics_reachable_support_tiles(origin_tile: Vector2i, first_step_allowed:
 
 
 func _resource_has_reachable_stand_tile(resource: Dictionary, reachable_support_tiles: Dictionary) -> bool:
-	if not resource.has("x") or not resource.has("y") or reachable_support_tiles.is_empty():
-		return false
-	var tile := Vector2i(int(resource.get("x", 0)), int(resource.get("y", 0)))
-	var candidates: Array[Vector2i] = [
-		tile + Vector2i.LEFT,
-		tile + Vector2i.RIGHT,
-		tile + Vector2i.LEFT * 2,
-		tile + Vector2i.RIGHT * 2,
-		tile + Vector2i.LEFT + Vector2i.DOWN,
-		tile + Vector2i.RIGHT + Vector2i.DOWN,
-		tile + Vector2i.LEFT * 2 + Vector2i.DOWN,
-		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN,
-		tile + Vector2i.DOWN * 2,
-		tile + Vector2i.LEFT + Vector2i.DOWN * 2,
-		tile + Vector2i.RIGHT + Vector2i.DOWN * 2,
-		tile + Vector2i.LEFT * 2 + Vector2i.DOWN * 2,
-		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN * 2,
-		tile + Vector2i.DOWN * 3,
-		tile + Vector2i.LEFT + Vector2i.DOWN * 3,
-		tile + Vector2i.RIGHT + Vector2i.DOWN * 3,
-	]
-	# Keep reachability proof aligned with _reachable_stand_position_for_block:
-	# the target tile may be the safe support node only when its authoritative
-	# capability says mining replaces it without removing support.
-	if bool(resource.get("preserves_support_on_mine", false)):
-		candidates.push_front(tile)
-	for candidate in candidates:
-		if reachable_support_tiles.has(candidate):
-			return true
-	return false
+	return not _resource_approach_stand_position(resource, reachable_support_tiles).is_empty()
+
+
+func _resource_approach_stand_position(resource: Dictionary, reachable_support_routes: Dictionary) -> Dictionary:
+	if not resource.has("x") or not resource.has("y") or reachable_support_routes.is_empty():
+		return {}
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	var origin := Contract.target_position(self_state)
+	var best := {}
+	var best_cost := INF
+	for candidate in _resource_stand_candidates(resource):
+		if not reachable_support_routes.has(candidate) or not _terrain_standable_tile(candidate):
+			continue
+		var route_info: Variant = reachable_support_routes[candidate]
+		var route_steps := 0
+		if route_info is Dictionary:
+			route_steps = int((route_info as Dictionary).get("steps", 0))
+		var position := _world_position_for_support_tile(candidate)
+		var cost := float(route_steps + 1) * float(BlockDefs.TILE) + origin.distance_to(position)
+		if cost >= best_cost:
+			continue
+		best_cost = cost
+		best = {
+			"position": [position.x, position.y],
+			"support_tile": [candidate.x, candidate.y],
+		}
+	return best
 
 
 func _expire_stale_action_targets(now_msec: int) -> void:

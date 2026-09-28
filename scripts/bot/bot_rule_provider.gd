@@ -1201,7 +1201,14 @@ func _resource_has_proven_approach(resource: Dictionary, observation: Dictionary
 	var now_msec := int(observation.get("observed_at_msec", Time.get_ticks_msec()))
 	if int(resource.get("blocked_until_msec", 0)) > now_msec:
 		return false
-	return bool(resource.get("reachable", false)) or bool(resource.get("approachable", false))
+	if bool(resource.get("reachable", false)):
+		return true
+	var approach_position: Variant = resource.get("approach_position", [])
+	return (
+		bool(resource.get("approachable", false))
+		and approach_position is Array
+		and (approach_position as Array).size() >= 2
+	)
 
 
 func _consecutive_action_streak(observation: Dictionary, action: String) -> int:
@@ -2092,7 +2099,7 @@ func _mode_achievement_action(observation: Dictionary, legal: PackedStringArray)
 					_inventory(observation),
 					_as_array(observation.get("recipes", [])),
 				)
-				var resonance_action := _achievement_recipe_plan_action(resonance_plan, observation, legal)
+				var resonance_action := _achievement_recipe_plan_action(resonance_plan, observation, legal, 0, goal_id)
 				if not resonance_action.is_empty():
 					return _tag_achievement_goal(resonance_action, goal_id)
 			"below_surface":
@@ -2195,7 +2202,13 @@ func _world_underfoot_action(observation: Dictionary, legal: PackedStringArray, 
 	return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, best, 2400, 0.82)
 
 
-func _achievement_recipe_plan_action(plan: Dictionary, observation: Dictionary, legal: PackedStringArray, station_depth: int = 0) -> Dictionary:
+func _achievement_recipe_plan_action(
+	plan: Dictionary,
+	observation: Dictionary,
+	legal: PackedStringArray,
+	station_depth: int = 0,
+	achievement_goal_id: String = "",
+) -> Dictionary:
 	match str(plan.get("status", "")):
 		"craft":
 			var output := str(plan.get("output", ""))
@@ -2213,7 +2226,8 @@ func _achievement_recipe_plan_action(plan: Dictionary, observation: Dictionary, 
 			var item := str(plan.get("item", ""))
 			if item.is_empty():
 				return {}
-			return _achievement_resource_action(observation, legal, {}, [item])
+			var gather_action := _achievement_resource_action(observation, legal, {}, [item])
+			return _tag_achievement_goal(gather_action, achievement_goal_id) if not achievement_goal_id.is_empty() else gather_action
 		"need_station":
 			return _required_station_action(str(plan.get("station", "")), observation, legal, station_depth)
 	return {}
