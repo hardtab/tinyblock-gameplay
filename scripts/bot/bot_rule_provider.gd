@@ -2332,6 +2332,7 @@ func _mid_tier_tool_progression_action(observation: Dictionary, legal: PackedStr
 	var now_msec := int(observation.get("observed_at_msec", 0))
 	var pinned_output := str(goal_state.get("output", ""))
 	var selected_output := ""
+	var pinned_plan: Dictionary = {}
 	if (
 		pinned_output in MID_TIER_TOOL_OUTPUTS
 		and int(inventory.get(pinned_output, 0)) <= 0
@@ -2341,8 +2342,15 @@ func _mid_tier_tool_progression_action(observation: Dictionary, legal: PackedStr
 		and _has_recipe_output(pinned_output, recipes)
 		and pinned_output not in _as_array(observation.get("craft_blocked_outputs", []))
 	):
-		selected_output = pinned_output
+		pinned_plan = RecipePlanner.plan(pinned_output, 1, inventory, recipes)
+		if (
+			str(pinned_plan.get("status", "")) not in ["unresolved", "already_owned"]
+			and not _mid_tier_candidate_provably_unavailable(pinned_plan, observation)
+		):
+			selected_output = pinned_output
 	else:
+		selected_output = ""
+	if selected_output.is_empty():
 		for output in MID_TIER_TOOL_OUTPUTS:
 			if (
 				int(inventory.get(output, 0)) > 0
@@ -2354,7 +2362,10 @@ func _mid_tier_tool_progression_action(observation: Dictionary, legal: PackedStr
 			):
 				continue
 			var candidate_plan := RecipePlanner.plan(output, 1, inventory, recipes)
-			if str(candidate_plan.get("status", "")) in ["unresolved", "already_owned"]:
+			if (
+				str(candidate_plan.get("status", "")) in ["unresolved", "already_owned"]
+				or _mid_tier_candidate_provably_unavailable(candidate_plan, observation)
+			):
 				continue
 			selected_output = output
 			break
@@ -2397,6 +2408,89 @@ func _mid_tier_tool_progression_action(observation: Dictionary, legal: PackedStr
 		return Contract.normalize_decision(bounded_wait)
 	var search_action := _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, frontier, EXPLORE_COMMIT_MSEC, 0.72)
 	return _tag_mid_tier_tool_action(search_action, selected_output, missing_item, true)
+
+
+func _mid_tier_candidate_provably_unavailable(plan: Dictionary, observation: Dictionary) -> bool:
+	var catalog: Dictionary = observation.get("source_material_catalog", {}) if observation.get("source_material_catalog", {}) is Dictionary else {}
+	if not bool(catalog.get("authoritative", false)):
+		return false
+	if not catalog.has("available_materials"):
+		return false
+	var materials: Array = _as_array(catalog.get("available_materials", []))
+	if materials.is_empty():
+		return false
+	var output := str(plan.get("target", ""))
+	if output.is_empty():
+		output = str(plan.get("item", ""))
+	if output.is_empty():
+		return false
+	return not _mid_tier_item_has_attainable_path(
+		output,
+		1,
+		_inventory(observation),
+		_as_array(observation.get("recipes", [])),
+		observation,
+		materials,
+		[],
+		0,
+	)
+
+
+func _mid_tier_item_has_attainable_path(
+	item: String,
+	count: int,
+	inventory: Dictionary,
+	recipes: Array,
+	observation: Dictionary,
+	source_materials: Array,
+	stack: Array,
+	depth: int,
+) -> bool:
+	var normalized_item := _normalized_resource_name(item)
+	if normalized_item.is_empty():
+		return false
+	if int(inventory.get(normalized_item, 0)) >= count or _has_visible_resource_named(observation, normalized_item):
+		return true
+	for raw_material in source_materials:
+		if _normalized_resource_name(str(raw_material)) == normalized_item:
+			return true
+	if depth >= 10 or normalized_item in stack:
+		return false
+	var next_stack := stack.duplicate()
+	next_stack.append(normalized_item)
+	var remaining := maxi(1, count - int(inventory.get(normalized_item, 0)))
+	for raw_recipe in recipes:
+		if not raw_recipe is Dictionary:
+			continue
+		var recipe := raw_recipe as Dictionary
+		var outputs: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
+		var output_count := int(outputs.get(normalized_item, 0))
+		if output_count <= 0:
+			continue
+		var crafts := int(ceil(float(remaining) / float(output_count)))
+		var inputs: Dictionary = recipe.get("in", {}) if recipe.get("in", {}) is Dictionary else {}
+		var recipe_attainable := true
+		for input_name in inputs:
+			var input_item := _normalized_resource_name(str(input_name))
+			var needed := int(inputs[input_name]) * crafts
+			if not _mid_tier_item_has_attainable_path(
+				input_item,
+				needed,
+				inventory,
+				recipes,
+				observation,
+				source_materials,
+				next_stack,
+				depth + 1,
+			):
+				recipe_attainable = false
+				break
+		# At least one complete ingredient path is enough to keep the goal. A
+		# missing/unavailable station is not evidence that its raw materials are
+		# unobtainable, so station reachability is deliberately not pruned here.
+		if recipe_attainable:
+			return true
+	return false
 
 
 func _has_recipe_output(output: String, recipes: Array) -> bool:

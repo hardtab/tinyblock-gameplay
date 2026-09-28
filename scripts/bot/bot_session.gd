@@ -5,6 +5,7 @@ const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
 const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 const Navigator = preload("res://gameplay/scripts/bot/bot_navigator.gd")
 const BlockDefs = preload("res://gameplay/scripts/block_defs.gd")
+const WorldScriptResource = preload("res://gameplay/scripts/world.gd")
 const Social = preload("res://gameplay/scripts/bot/bot_social.gd")
 const EmojiReactions = preload("res://gameplay/scripts/emoji_reactions.gd")
 const BehaviorClass = preload("res://gameplay/scripts/bot/bot_behavior.gd")
@@ -5230,6 +5231,9 @@ func _build_observation(now_msec: int) -> Dictionary:
 	# enemy, so expanding only this read radius cannot authorize random PvP.
 	var perception_radius := maxf(observation_radius, 4096.0) if _is_pvp_world() else _decision_observation_radius()
 	var observation := Perception.build(snapshot, own_player_id, perception_radius, now_msec)
+	var source_material_catalog := _one_block_source_material_catalog()
+	if not source_material_catalog.is_empty():
+		observation["source_material_catalog"] = source_material_catalog
 	# The progression policy needs to know whether moving toward a player can
 	# expose terrain outside the area already scanned for starter wood.
 	observation["resource_scan_radius"] = _decision_observation_radius() if _stone_age_gathering_wood() else 0.0
@@ -5246,6 +5250,67 @@ func _build_observation(now_msec: int) -> Dictionary:
 	observation["build_project_state"] = _build_project_state.duplicate(true)
 	_annotate_active_build_project_route(observation, now_msec)
 	return observation
+
+
+## The bundled One Block phase table describes normal sources before
+## Afterphase. Include block rolls and chest loot/gifts: an item need not be a
+## mined block to be an attainable recipe ingredient. The snapshot's generator
+## marker must match before this local model can prove absence; on an
+## older/unknown host the list is advisory and policy keeps exploring.
+func _one_block_source_material_catalog() -> Dictionary:
+	var generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
+	if str(generation.get("mode", _session_world_mode)).to_lower() != "one_block":
+		return {}
+	var phases: Array = WorldScriptResource.ONE_BLOCK_PHASES if WorldScriptResource.ONE_BLOCK_PHASES is Array else []
+	if phases.is_empty():
+		return {}
+	var materials: Dictionary = {}
+	var currently_available: Dictionary = {}
+	var complete := true
+	var source_state: Dictionary = _world_snapshot.get("one_block", {}) if _world_snapshot.get("one_block", {}) is Dictionary else {}
+	var mined := maxi(0, int(source_state.get("mined", _live_one_block_mined)))
+	var current_phase := clampi(int(source_state.get("phase", _one_block_phase_for_mined(mined))), 0, phases.size())
+	for phase_index in phases.size():
+		var raw_phase: Variant = phases[phase_index]
+		if not raw_phase is Dictionary:
+			complete = false
+			continue
+		var phase := raw_phase as Dictionary
+		var blocks: Dictionary = phase.get("blocks", {}) if phase.get("blocks", {}) is Dictionary else {}
+		var gift: Dictionary = phase.get("gift", {}) if phase.get("gift", {}) is Dictionary else {}
+		var loot: Array = phase.get("loot", []) if phase.get("loot", []) is Array else []
+		for raw_content_id in blocks.keys() + gift.keys() + loot:
+			var content_id := str(raw_content_id)
+			var material := _block_name_for_content_id(content_id)
+			if material.is_empty() and content_id.begins_with("core.plant."):
+				# Core plants are generated definitions; headless bot-only builds do
+				# not necessarily register them through a WorldSim instance.
+				material = "generated_%s" % content_id.sha256_text().substr(0, 12)
+			if material.is_empty():
+				complete = false
+			else:
+				materials[material] = true
+				if phase_index <= current_phase:
+					currently_available[material] = true
+	var names: Array = materials.keys()
+	names.sort()
+	var available_names: Array = currently_available.keys()
+	available_names.sort()
+	var generation_version := str(generation.get("generator_version", "")).strip_edges()
+	return {
+		"materials": names,
+		"available_materials": available_names,
+		"phase": current_phase,
+		"authoritative": complete and current_phase < phases.size() and not generation_version.is_empty() and generation_version == str(WorldScriptResource.GENERATOR_VERSION),
+		"source": "one_block_phases",
+	}
+
+
+func _one_block_phase_for_mined(mined: int) -> int:
+	for index in WorldScriptResource.ONE_BLOCK_PHASES.size():
+		if mined < int(WorldScriptResource.ONE_BLOCK_PHASES[index].get("end", 0)):
+			return index
+	return WorldScriptResource.ONE_BLOCK_PHASES.size()
 
 
 func _annotate_active_build_project_route(observation: Dictionary, now_msec: int = -1) -> void:
@@ -6919,6 +6984,8 @@ func _sync_mid_tier_tool_goal(now_msec: int = -1) -> void:
 			"search_started_msec": -1,
 			"search_deadline_msec": -1,
 			"search_without_frontier": false,
+			"search_inventory_count": 0,
+			"search_source_mined": -1,
 		}
 	var achievements := _achievement_observation()
 	var mode_allowed := (
@@ -6950,6 +7017,24 @@ func _sync_mid_tier_tool_goal(now_msec: int = -1) -> void:
 	if inventory.is_empty():
 		inventory = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
 	var output := str(_mid_tier_tool_goal_state.get("output", ""))
+	var search_item := str(_mid_tier_tool_goal_state.get("search_item", ""))
+	var search_started := int(_mid_tier_tool_goal_state.get("search_started_msec", -1))
+	var search_deadline := int(_mid_tier_tool_goal_state.get("search_deadline_msec", -1))
+	if not output.is_empty() and search_started >= 0 and not search_item.is_empty():
+		var progress_made := false
+		var item_count := int(inventory.get(search_item, 0))
+		var previous_item_count := int(_mid_tier_tool_goal_state.get("search_inventory_count", item_count))
+		if item_count > previous_item_count:
+			_mid_tier_tool_goal_state["search_inventory_count"] = item_count
+			progress_made = true
+		if mode == "one_block":
+			var source_mined := int(_mode_progress_from_snapshot().get("one_block_mined", 0))
+			var previous_source_mined := int(_mid_tier_tool_goal_state.get("search_source_mined", source_mined))
+			if source_mined > previous_source_mined:
+				_mid_tier_tool_goal_state["search_source_mined"] = source_mined
+				progress_made = true
+		if progress_made:
+			_mid_tier_tool_goal_state["search_deadline_msec"] = maxi(search_deadline, now_msec + MID_TIER_TOOL_SEARCH_TIMEOUT_MSEC)
 	if not output.is_empty() and int(inventory.get(output, 0)) > 0:
 		var completed: Dictionary = _mid_tier_tool_goal_state.get("completed_outputs", {}) if _mid_tier_tool_goal_state.get("completed_outputs", {}) is Dictionary else {}
 		completed[output] = true
@@ -6966,10 +7051,12 @@ func _sync_mid_tier_tool_goal(now_msec: int = -1) -> void:
 		_mid_tier_tool_goal_state["search_started_msec"] = -1
 		_mid_tier_tool_goal_state["search_deadline_msec"] = -1
 		_mid_tier_tool_goal_state["search_without_frontier"] = false
+		_mid_tier_tool_goal_state["search_inventory_count"] = 0
+		_mid_tier_tool_goal_state["search_source_mined"] = -1
 		_mid_tier_tool_goal_state["status"] = "idle"
 		output = ""
-	var search_started := int(_mid_tier_tool_goal_state.get("search_started_msec", -1))
-	var search_deadline := int(_mid_tier_tool_goal_state.get("search_deadline_msec", -1))
+	search_started = int(_mid_tier_tool_goal_state.get("search_started_msec", -1))
+	search_deadline = int(_mid_tier_tool_goal_state.get("search_deadline_msec", -1))
 	if not output.is_empty() and search_started >= 0 and search_deadline >= 0 and now_msec >= search_deadline:
 		var attempts: Dictionary = _mid_tier_tool_goal_state.get("search_attempts", {}) if _mid_tier_tool_goal_state.get("search_attempts", {}) is Dictionary else {}
 		var attempt_count := int(attempts.get(output, 0)) + 1
@@ -7014,19 +7101,37 @@ func _mid_tier_tool_note_action_started(decision: Dictionary, now_msec: int) -> 
 		_mid_tier_tool_goal_state["search_started_msec"] = -1
 		_mid_tier_tool_goal_state["search_deadline_msec"] = -1
 		_mid_tier_tool_goal_state["search_without_frontier"] = false
+		_mid_tier_tool_goal_state["search_inventory_count"] = 0
+		_mid_tier_tool_goal_state["search_source_mined"] = -1
 		_mid_tier_tool_goal_state["status"] = "active"
 	if bool(decision.get("mid_tier_tool_search", false)):
 		var missing_item := str(decision.get("mid_tier_tool_missing_item", ""))
 		var no_frontier := bool(decision.get("mid_tier_tool_no_frontier", false))
-		var previous_no_frontier := bool(_mid_tier_tool_goal_state.get("search_without_frontier", false))
-		if (
+		var starts_new_search := (
 			missing_item != str(_mid_tier_tool_goal_state.get("search_item", ""))
 			or int(_mid_tier_tool_goal_state.get("search_started_msec", -1)) < 0
-			or (previous_no_frontier and not no_frontier)
-		):
+		)
+		if starts_new_search:
 			_mid_tier_tool_goal_state["search_item"] = missing_item
 			_mid_tier_tool_goal_state["search_started_msec"] = now_msec
 			_mid_tier_tool_goal_state["search_deadline_msec"] = now_msec + (MID_TIER_TOOL_NO_FRONTIER_TIMEOUT_MSEC if no_frontier else MID_TIER_TOOL_SEARCH_TIMEOUT_MSEC)
+			var inventory: Dictionary = _stone_age_authoritative_inventory
+			if inventory.is_empty():
+				inventory = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+			_mid_tier_tool_goal_state["search_inventory_count"] = int(inventory.get(missing_item, 0))
+			_mid_tier_tool_goal_state["search_source_mined"] = int(_mode_progress_from_snapshot().get("one_block_mined", -1)) if current_mode == "one_block" else -1
+		elif (
+			bool(_mid_tier_tool_goal_state.get("search_without_frontier", false))
+			and not no_frontier
+			and int(_mid_tier_tool_goal_state.get("search_deadline_msec", -1)) <= int(_mid_tier_tool_goal_state.get("search_started_msec", -1)) + MID_TIER_TOOL_NO_FRONTIER_TIMEOUT_MSEC
+		):
+			# A frontier or renewable source became available before the short idle
+			# bound expired. Upgrade it once to a real search window; subsequent
+			# WAIT↔MINE alternation never restarts that deadline.
+			_mid_tier_tool_goal_state["search_deadline_msec"] = maxi(
+				int(_mid_tier_tool_goal_state.get("search_deadline_msec", -1)),
+				now_msec + MID_TIER_TOOL_SEARCH_TIMEOUT_MSEC,
+			)
 		_mid_tier_tool_goal_state["search_without_frontier"] = no_frontier
 		_mid_tier_tool_goal_state["status"] = "searching"
 	else:
@@ -7034,6 +7139,8 @@ func _mid_tier_tool_note_action_started(decision: Dictionary, now_msec: int) -> 
 		_mid_tier_tool_goal_state["search_started_msec"] = -1
 		_mid_tier_tool_goal_state["search_deadline_msec"] = -1
 		_mid_tier_tool_goal_state["search_without_frontier"] = false
+		_mid_tier_tool_goal_state["search_inventory_count"] = 0
+		_mid_tier_tool_goal_state["search_source_mined"] = -1
 		_mid_tier_tool_goal_state["status"] = "active"
 
 
