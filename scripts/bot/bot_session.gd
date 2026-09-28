@@ -1213,10 +1213,26 @@ func _physics_route_step(
 ) -> Dictionary:
 	if _terrain_tiles.is_empty():
 		return {}
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	var origin_tile := _route_origin_support_tile(
 		origin,
-		_world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {},
+		self_state,
 	)
+	# A host-confirmed grounded pose can occasionally map into an invalid support
+	# cell after terrain reconciliation (for example, the body is beside a newly
+	# replicated obstruction). Let the collision-controlled avatar take exactly
+	# one known, same-row walk onto an adjacent standable tile before invoking the
+	# route graph. Never use this recovery in air or substitute a jump/drop.
+	if not _terrain_standable_tile(origin_tile):
+		var origin_recovery := _grounded_origin_walk_step(
+			origin,
+			self_state,
+			destination,
+			first_step_allowed,
+		)
+		if not origin_recovery.is_empty():
+			return origin_recovery
+		return {"unreachable": true}
 	var target_tile := _support_tile_for_position(destination)
 	if explicit_target_tile.size() >= 2:
 		target_tile = Vector2i(int(explicit_target_tile[0]), int(explicit_target_tile[1]))
@@ -1282,7 +1298,7 @@ func _safe_jump_first_step_filter(self_state: Dictionary) -> Callable:
 
 func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2, first_step_allowed: Callable = Callable()) -> Dictionary:
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
-	var origin_tile := _route_origin_support_tile(origin, self_state)
+	var origin_tile: Vector2i = _route_origin_support_tile(origin, self_state)
 	if not first_step_allowed.is_valid():
 		first_step_allowed = _safe_jump_first_step_filter(self_state)
 	if _terrain_tiles.is_empty():
@@ -1297,6 +1313,22 @@ func _safe_pursuit_waypoint(origin: Vector2, destination: Vector2, first_step_al
 		first_step_allowed,
 	)
 	if not reachable_first_steps.has(origin_tile):
+		var origin_recovery_steps := _grounded_origin_walk_steps(origin, self_state, first_step_allowed)
+		var recovery_waypoint: Dictionary = {}
+		var recovery_distance := origin.distance_to(destination)
+		for recovery_step in origin_recovery_steps:
+			var recovery_position: Vector2 = recovery_step.get("position", Vector2.ZERO)
+			var remaining_distance := recovery_position.distance_to(destination)
+			if remaining_distance + float(BlockDefs.TILE) * 0.5 >= recovery_distance:
+				continue
+			recovery_distance = remaining_distance
+			recovery_waypoint = {
+				"position": recovery_position,
+				"support_tile": recovery_step.get("to_tile", origin_tile),
+				"remaining_distance": remaining_distance,
+			}
+		if not recovery_waypoint.is_empty():
+			return recovery_waypoint
 		_emit_pursuit_route_unavailable(origin_tile, "origin_not_reachable", first_step_allowed, reachable_first_steps)
 		return {}
 	var origin_distance := origin.distance_to(destination)
@@ -2009,6 +2041,58 @@ func _route_origin_support_tile(position: Vector2, self_state: Dictionary) -> Ve
 				best_distance = distance
 				best_tile = candidate
 	return best_tile
+
+
+## Returns verified horizontal walk exits for a grounded pose whose mapped
+## support cell is invalid. This is deliberately a one-edge recovery: it does
+## not relax destination standability or let the planner route from a fictional
+## support tile. Physics still moves the player and resolves collision.
+func _grounded_origin_walk_steps(
+	origin: Vector2,
+	self_state: Dictionary,
+	first_step_allowed: Callable = Callable(),
+) -> Array[Dictionary]:
+	var steps: Array[Dictionary] = []
+	if not bool(self_state.get("on_ground", false)):
+		return steps
+	var origin_tile := _route_origin_support_tile(origin, self_state)
+	if _terrain_standable_tile(origin_tile):
+		return steps
+	for direction in [Vector2i.LEFT, Vector2i.RIGHT]:
+		var destination_tile: Vector2i = origin_tile + direction
+		if not _terrain_standable_tile(destination_tile):
+			continue
+		if not _physics_transition_allowed(origin_tile, destination_tile, "walk"):
+			continue
+		if first_step_allowed.is_valid() and not bool(first_step_allowed.call(origin_tile, destination_tile, "walk")):
+			continue
+		steps.append({
+			"position": _world_position_for_support_tile(destination_tile),
+			"from_tile": origin_tile,
+			"to_tile": destination_tile,
+			"kind": "walk",
+			"origin_recovery": true,
+		})
+	return steps
+
+
+func _grounded_origin_walk_step(
+	origin: Vector2,
+	self_state: Dictionary,
+	destination: Vector2,
+	first_step_allowed: Callable = Callable(),
+) -> Dictionary:
+	var steps := _grounded_origin_walk_steps(origin, self_state, first_step_allowed)
+	var best_step: Dictionary = {}
+	var best_distance := origin.distance_to(destination)
+	for step in steps:
+		var step_position: Vector2 = step.get("position", Vector2.ZERO)
+		var remaining_distance := step_position.distance_to(destination)
+		if remaining_distance >= best_distance:
+			continue
+		best_distance = remaining_distance
+		best_step = step
+	return best_step
 
 
 func _world_position_for_support_tile(tile: Vector2i) -> Vector2:
