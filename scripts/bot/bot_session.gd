@@ -1218,6 +1218,9 @@ func _physics_route_step(
 		origin,
 		self_state,
 	)
+	var active_drop_step := _active_verified_drop_step(origin, self_state)
+	if not active_drop_step.is_empty():
+		return active_drop_step
 	# A host-confirmed grounded pose can occasionally map into an invalid support
 	# cell after terrain reconciliation (for example, the body is beside a newly
 	# replicated obstruction). Let the collision-controlled avatar take exactly
@@ -1284,6 +1287,48 @@ func _physics_route_step(
 			}
 		_physics_route.pop_front()
 	return {}
+
+
+## Continue the current movement input only while the avatar is inside the
+## physical corridor of the first edge of a previously verified drop. Falling
+## poses do not have a standable route origin, so asking the route graph to
+## replan at that point would cancel a safe descent halfway through. This does
+## not authorize a new drop or recover an arbitrary airborne pose.
+func _active_verified_drop_step(origin: Vector2, self_state: Dictionary) -> Dictionary:
+	if (
+		bool(self_state.get("on_ground", false))
+		or _jump_active
+		or _climb_active
+		or _physics_route.size() < 2
+		or str(_physics_route[1].get("kind", "")) != "drop"
+	):
+		return {}
+	var from_variant: Variant = _physics_route[0].get("tile")
+	var to_variant: Variant = _physics_route[1].get("tile")
+	if typeof(from_variant) != TYPE_VECTOR2I or typeof(to_variant) != TYPE_VECTOR2I:
+		return {}
+	var from_tile: Vector2i = from_variant
+	var to_tile: Vector2i = to_variant
+	if not _physics_transition_allowed(from_tile, to_tile, "drop"):
+		return {}
+	var from_position := _world_position_for_support_tile(from_tile)
+	var to_position := _world_position_for_support_tile(to_tile)
+	var min_x := minf(from_position.x, to_position.x) - 4.0
+	var max_x := maxf(from_position.x, to_position.x) + 4.0
+	if (
+		origin.x < min_x
+		or origin.x > max_x
+		or origin.y < from_position.y - 2.0
+		or origin.y > to_position.y + 2.0
+	):
+		return {}
+	return {
+		"position": to_position,
+		"kind": "drop",
+		"from_tile": from_tile,
+		"to_tile": to_tile,
+		"active_drop_continuation": true,
+	}
 
 
 func _safe_jump_first_step_filter(self_state: Dictionary) -> Callable:
