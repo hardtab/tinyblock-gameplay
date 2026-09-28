@@ -1224,7 +1224,10 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 					and _explore_direction != 0
 				):
 					var reason := str(entry.get("reason", ""))
-					var progress := absf(origin.x - _last_explore_origin_x)
+					# Count progress only toward the chosen frontier. A social
+					# detour or host reconciliation in the opposite direction
+					# must not keep an unsuccessful heading alive.
+					var progress := (origin.x - _last_explore_origin_x) * float(_explore_direction)
 					var route_failed := reason in [
 						"blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "lava_guard",
 					]
@@ -1789,11 +1792,13 @@ func _stone_age_craft_or_gather(observation: Dictionary, legal: PackedStringArra
 func _stone_age_player_search_action(observation: Dictionary, legal: PackedStringArray, stage: String) -> Dictionary:
 	# A fresh-world wood objective may spawn away from trees (for example, on a
 	# stone shelf across water). If no safe wood target is currently visible,
-	# approach a live player so their already-loaded surroundings can reveal one.
+	# approach a live player only when they are beyond our current wood scan;
+	# walking back and forth inside the same scanned area reveals nothing.
 	# Once a log enters perception, the normal gather/craft chain above takes over.
 	if Contract.ACTION_MOVE_NEAR_PLAYER not in legal and Contract.ACTION_MOVE_TO not in legal:
 		return {}
 	var preferred_distance := float(observation.get("preferred_player_distance", PREFERRED_PLAYER_DISTANCE))
+	var resource_scan_radius := float(observation.get("resource_scan_radius", 0.0))
 	var now_msec := int(observation.get("observed_at_msec", 0))
 	var best_player := {}
 	var best_distance := INF
@@ -1804,7 +1809,7 @@ func _stone_age_player_search_action(observation: Dictionary, legal: PackedStrin
 		if str(player.get("id", "")).is_empty() or not bool(player.get("alive", true)) or bool(player.get("stale", player.get("last_known", false))):
 			continue
 		var distance := float(player.get("distance", INF))
-		if distance <= preferred_distance + SOCIAL_FOLLOW_START_SLACK or distance >= best_distance:
+		if distance <= maxf(preferred_distance + SOCIAL_FOLLOW_START_SLACK, resource_scan_radius) or distance >= best_distance:
 			continue
 		# A host the router already proved unreachable is not retried this tick;
 		# the search falls through to exploration or another useful action.

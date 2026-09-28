@@ -4749,6 +4749,9 @@ func _build_observation(now_msec: int) -> Dictionary:
 	# enemy, so expanding only this read radius cannot authorize random PvP.
 	var perception_radius := maxf(observation_radius, 4096.0) if _is_pvp_world() else _decision_observation_radius()
 	var observation := Perception.build(snapshot, own_player_id, perception_radius, now_msec)
+	# The progression policy needs to know whether moving toward a player can
+	# expose terrain outside the area already scanned for starter wood.
+	observation["resource_scan_radius"] = _decision_observation_radius() if _stone_age_gathering_wood() else 0.0
 	# Perception.build whitelists its keys, so attach the mode-scoped maximums
 	# here for the decision provider: 0 outside their mode, world_mode disambiguates.
 	observation["one_block_mined"] = int(mode_progress.get("one_block_mined", 0))
