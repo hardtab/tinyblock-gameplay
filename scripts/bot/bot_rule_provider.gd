@@ -2369,6 +2369,14 @@ func _mid_tier_tool_progression_action(observation: Dictionary, legal: PackedStr
 	var missing_item := _mid_tier_missing_item(plan, observation)
 	if missing_item.is_empty() or _has_visible_resource_named(observation, missing_item):
 		return {}
+	# A host-confirmed renewable source can reveal the missing ingredient in a
+	# later phase. Reuse its existing support, tier and route checks instead of
+	# waiting for a frontier that a small isolated world cannot have.
+	var renewable_source: Dictionary = observation.get("regenerating_block", {}) if observation.get("regenerating_block", {}) is Dictionary else {}
+	if not renewable_source.is_empty():
+		var source_action := _one_block_achievement_action(observation, legal)
+		if not source_action.is_empty():
+			return _tag_mid_tier_tool_action(source_action, selected_output, missing_item, true)
 	# No resource has a safe, physics-proven approach yet. Explore only through
 	# the same short, connected support waypoints used by ordinary exploration;
 	# this goal never invents a mine target or digs a generic pit while searching.
