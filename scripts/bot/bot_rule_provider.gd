@@ -2308,28 +2308,135 @@ func _mid_tier_tool_progression_action(observation: Dictionary, legal: PackedStr
 	# This is a post-Stone-Age chain, not an alternate way to bypass its first
 	# useful pickaxe. The owned tool is authoritative even if achievement state
 	# is delivered a tick later.
-	var achievements: Dictionary = observation.get("achievements", {}) if observation.get("achievements", {}) is Dictionary else {}
-	var unlocked: Array = achievements.get("unlocked", []) if achievements.get("unlocked", []) is Array else []
-	if int(inventory.get("stone_pickaxe", 0)) <= 0 and "stone_age" not in unlocked:
+	if not _owns_any(inventory, ["stone_pickaxe", "copper_pickaxe", "crystal_pickaxe", "obsidian_pickaxe", "resonance_pickaxe"]):
 		return {}
 	# An open Stone Age goal remains first even when its next resource is absent;
 	# do not jump ahead to a later tier while the foundational achievement is
 	# still being worked on or cooling down.
 	if not _open_achievement(observation, "stone_age").is_empty():
 		return {}
+	var starter_goal: Dictionary = observation.get("stone_age_goal", {}) if observation.get("stone_age_goal", {}) is Dictionary else {}
+	if (
+		str(starter_goal.get("goal_id", "")) in ["stone_age", "starter_tooling"]
+		and str(starter_goal.get("status", "")) != "completed"
+		and str(starter_goal.get("stage", "")) != "complete"
+	):
+		return {}
 	var recipes: Array = _as_array(observation.get("recipes", []))
 	if recipes.is_empty():
 		return {}
-	for output in MID_TIER_TOOL_OUTPUTS:
-		if int(inventory.get(output, 0)) > 0 or output in _as_array(observation.get("craft_blocked_outputs", [])):
+	var goal_state: Dictionary = observation.get("mid_tier_tool_goal", {}) if observation.get("mid_tier_tool_goal", {}) is Dictionary else {}
+	var completed: Dictionary = goal_state.get("completed_outputs", {}) if goal_state.get("completed_outputs", {}) is Dictionary else {}
+	var exhausted: Dictionary = goal_state.get("exhausted_outputs", {}) if goal_state.get("exhausted_outputs", {}) is Dictionary else {}
+	var retries: Dictionary = goal_state.get("retry_after_by_output", {}) if goal_state.get("retry_after_by_output", {}) is Dictionary else {}
+	var now_msec := int(observation.get("observed_at_msec", 0))
+	var pinned_output := str(goal_state.get("output", ""))
+	var selected_output := ""
+	if (
+		pinned_output in MID_TIER_TOOL_OUTPUTS
+		and int(inventory.get(pinned_output, 0)) <= 0
+		and not bool(completed.get(pinned_output, false))
+		and not bool(exhausted.get(pinned_output, false))
+		and int(retries.get(pinned_output, 0)) <= now_msec
+		and _has_recipe_output(pinned_output, recipes)
+		and pinned_output not in _as_array(observation.get("craft_blocked_outputs", []))
+	):
+		selected_output = pinned_output
+	else:
+		for output in MID_TIER_TOOL_OUTPUTS:
+			if (
+				int(inventory.get(output, 0)) > 0
+				or bool(completed.get(output, false))
+				or bool(exhausted.get(output, false))
+				or int(retries.get(output, 0)) > now_msec
+				or output in _as_array(observation.get("craft_blocked_outputs", []))
+				or not _has_recipe_output(output, recipes)
+			):
+				continue
+			var candidate_plan := RecipePlanner.plan(output, 1, inventory, recipes)
+			if str(candidate_plan.get("status", "")) in ["unresolved", "already_owned"]:
+				continue
+			selected_output = output
+			break
+	if selected_output.is_empty():
+		return {}
+	var plan := RecipePlanner.plan(selected_output, 1, inventory, recipes)
+	if str(plan.get("status", "")) in ["unresolved", "already_owned"]:
+		return {}
+	var action := _achievement_recipe_plan_action(plan, observation, legal)
+	if not action.is_empty():
+		return _tag_mid_tier_tool_action(action, selected_output, _mid_tier_missing_item(plan, observation), false)
+	var missing_item := _mid_tier_missing_item(plan, observation)
+	if missing_item.is_empty() or _has_visible_resource_named(observation, missing_item):
+		return {}
+	# No resource has a safe, physics-proven approach yet. Explore only through
+	# the same short, connected support waypoints used by ordinary exploration;
+	# this goal never invents a mine target or digs a generic pit while searching.
+	if Contract.ACTION_MOVE_TO not in legal:
+		if Contract.ACTION_WAIT not in legal:
+			return {}
+		var cannot_explore := _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_WAIT, {}, 900, 0.35)
+		var bounded_wait := _tag_mid_tier_tool_action(cannot_explore, selected_output, missing_item, true)
+		bounded_wait["mid_tier_tool_no_frontier"] = true
+		return Contract.normalize_decision(bounded_wait)
+	var frontier := _exploration_target(observation)
+	if frontier.is_empty():
+		if Contract.ACTION_WAIT not in legal:
+			return {}
+		var no_frontier_wait := _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_WAIT, {}, 900, 0.35)
+		var bounded_wait := _tag_mid_tier_tool_action(no_frontier_wait, selected_output, missing_item, true)
+		bounded_wait["mid_tier_tool_no_frontier"] = true
+		return Contract.normalize_decision(bounded_wait)
+	var search_action := _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, frontier, EXPLORE_COMMIT_MSEC, 0.72)
+	return _tag_mid_tier_tool_action(search_action, selected_output, missing_item, true)
+
+
+func _has_recipe_output(output: String, recipes: Array) -> bool:
+	for raw_recipe in recipes:
+		if not raw_recipe is Dictionary:
 			continue
-		var plan := RecipePlanner.plan(str(output), 1, inventory, recipes)
-		if str(plan.get("status", "")) in ["unresolved", "already_owned"]:
+		var recipe := raw_recipe as Dictionary
+		var outputs: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
+		for raw_output in outputs:
+			if _normalized_resource_name(str(raw_output)) == output and int(outputs[raw_output]) > 0:
+				return true
+	return false
+
+
+func _mid_tier_missing_item(plan: Dictionary, observation: Dictionary, depth: int = 0) -> String:
+	if depth >= STATION_NAMES.size() + 1:
+		return ""
+	match str(plan.get("status", "")):
+		"gather":
+			return _normalized_resource_name(str(plan.get("item", "")))
+		"need_station":
+			var station := str(plan.get("station", ""))
+			if station not in STATION_NAMES:
+				return ""
+			var station_plan := RecipePlanner.plan(station, 1, _inventory(observation), _as_array(observation.get("recipes", [])))
+			return _mid_tier_missing_item(station_plan, observation, depth + 1)
+	return ""
+
+
+func _has_visible_resource_named(observation: Dictionary, item_name: String) -> bool:
+	for raw_resource in _as_array(observation.get("visible_resources", [])):
+		if not raw_resource is Dictionary:
 			continue
-		var action := _achievement_recipe_plan_action(plan, observation, legal)
-		if not action.is_empty():
-			return action
-	return {}
+		var resource := raw_resource as Dictionary
+		var resource_name := _normalized_resource_name(str(resource.get("block_name", resource.get("content_id", ""))))
+		if resource_name == item_name:
+			return true
+	return false
+
+
+func _tag_mid_tier_tool_action(decision: Dictionary, output: String, missing_item: String, searching: bool) -> Dictionary:
+	if decision.is_empty():
+		return decision
+	var tagged := decision.duplicate(true)
+	tagged["mid_tier_tool_output"] = output
+	tagged["mid_tier_tool_missing_item"] = missing_item
+	tagged["mid_tier_tool_search"] = searching
+	return Contract.normalize_decision(tagged)
 
 
 func _required_station_action(station_name: String, observation: Dictionary, legal: PackedStringArray, depth: int) -> Dictionary:

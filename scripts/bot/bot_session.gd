@@ -44,6 +44,10 @@ const DEFAULT_EMPTY_GRACE_MSEC := 30_000
 const DEFAULT_OBSERVATION_RADIUS := 256.0
 const CHEST_OBSERVATION_RADIUS := 512.0
 const STARTER_TOOLING_RESOURCE_SCAN_RADIUS := 1536.0
+const MID_TIER_TOOL_SEARCH_TIMEOUT_MSEC := 120_000
+const MID_TIER_TOOL_NO_FRONTIER_TIMEOUT_MSEC := 5_000
+const MID_TIER_TOOL_SEARCH_RETRY_MSEC := 90_000
+const MID_TIER_TOOL_MAX_SEARCH_ATTEMPTS := 2
 
 var backend: Object
 var network_client: Object
@@ -60,6 +64,10 @@ var _live_challenge_best_distance := 0
 ## Progression state is scoped to the active world and advances only from the
 ## authoritative initial/player-inventory snapshots or action acknowledgements.
 var _stone_age_goal_state: Dictionary = {}
+## Post-Stone-Age tool crafting is a world-local objective. A missing ingredient
+## keeps the same output pinned while the bot safely explores, and host inventory
+## is the only signal that completes that output.
+var _mid_tier_tool_goal_state: Dictionary = {}
 var _stone_age_authoritative_inventory: Dictionary = {}
 var _host_tree_inventory_names: Dictionary = {}
 var _stone_age_authoritative_equipment := {"hand": "", "feet": ""}
@@ -446,6 +454,7 @@ func join_session(record: Dictionary) -> void:
 		Vector2i(2147483647, 2147483647),
 	)
 	_stone_age_goal_state.clear()
+	_mid_tier_tool_goal_state.clear()
 	_achievement_goal_states.clear()
 	_achievement_goal_unlocked_baseline.clear()
 	_build_project_state.clear()
@@ -4093,6 +4102,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	var incoming_world_id := str(snapshot.get("world_id", world_id))
 	if not world_id.is_empty() and not incoming_world_id.is_empty() and incoming_world_id != world_id:
 		_stone_age_goal_state.clear()
+		_mid_tier_tool_goal_state.clear()
 		_stone_age_authoritative_inventory.clear()
 		_stone_age_authoritative_equipment = {"hand": "", "feet": ""}
 		_initial_loadout_source = ""
@@ -4204,6 +4214,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_descent_snapshot_complete = true
 	_descent_planner.observe_initial_snapshot(descent_initial_self_state, _descent_terrain_map(), _descent_coverage())
 	_sync_stone_age_goal(_achievement_observation(), Time.get_ticks_msec())
+	_sync_mid_tier_tool_goal(Time.get_ticks_msec())
 	var initial_support := _support_tile_for_position(Contract.target_position(local_state))
 	var initial_visible_containers: Array = _world_snapshot.get("visible_containers", []) if _world_snapshot.get("visible_containers", []) is Array else []
 	structured_log.emit({
@@ -4927,7 +4938,9 @@ func _apply_inventory_snapshot(payload: Dictionary) -> void:
 		_craft_blocked_outputs.erase(_craft_pending_output)
 		_craft_pending_output = ""
 		_craft_retry_after_msec = Time.get_ticks_msec() + CRAFT_RETRY_DELAY_MSEC
-	_sync_stone_age_goal(_achievement_observation(), Time.get_ticks_msec())
+	var now_msec := Time.get_ticks_msec()
+	_sync_stone_age_goal(_achievement_observation(), now_msec)
+	_sync_mid_tier_tool_goal(now_msec)
 
 
 func _merge_equipment_with_pending(incoming_equipment: Dictionary, inventory: Dictionary) -> Dictionary:
@@ -5105,6 +5118,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	_expire_stone_age_pending(now_msec)
 	_expire_achievement_goal_pending(now_msec)
 	_sync_stone_age_goal(_achievement_observation(), now_msec)
+	_sync_mid_tier_tool_goal(now_msec)
 	var snapshot := _world_snapshot.duplicate(true)
 	snapshot["self"] = snapshot.get("self", {"health": 10, "x": 0.0, "y": 0.0})
 	snapshot["own_player_id"] = own_player_id
@@ -5227,6 +5241,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	# useful to policy if the cooled tiles travel with the observation.
 	observation["blocked_action_targets"] = _active_blocked_action_targets(now_msec)
 	observation["stone_age_goal"] = _stone_age_goal_state.duplicate(true)
+	observation["mid_tier_tool_goal"] = _mid_tier_tool_goal_state.duplicate(true)
 	observation["achievement_goal_states"] = _achievement_goal_states.duplicate(true)
 	observation["build_project_state"] = _build_project_state.duplicate(true)
 	_annotate_active_build_project_route(observation, now_msec)
@@ -6260,6 +6275,7 @@ func _on_decision_started(decision: Dictionary) -> void:
 	var now_msec := Time.get_ticks_msec()
 	_record_action_history("started", decision)
 	_stone_age_note_action_started(decision, now_msec)
+	_mid_tier_tool_note_action_started(decision, now_msec)
 	_achievement_goal_note_action_started(decision, now_msec)
 	var action := str(decision.get("action", ""))
 	var decision_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
@@ -6876,6 +6892,149 @@ func _achievement_observation() -> Dictionary:
 		else:
 			observation["community_locked"] = bool(achievements.get("community_locked"))
 	return observation
+
+
+func _sync_mid_tier_tool_goal(now_msec: int = -1) -> void:
+	if now_msec < 0:
+		now_msec = Time.get_ticks_msec()
+	var generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
+	var mode := str(generation.get("mode", _session_world_mode)).strip_edges().to_lower()
+	if world_id.is_empty():
+		_mid_tier_tool_goal_state.clear()
+		return
+	if (
+		str(_mid_tier_tool_goal_state.get("world_id", "")) != world_id
+		or str(_mid_tier_tool_goal_state.get("world_mode", "")) != mode
+	):
+		_mid_tier_tool_goal_state = {
+			"world_id": world_id,
+			"world_mode": mode,
+			"status": "idle",
+			"output": "",
+			"completed_outputs": {},
+			"exhausted_outputs": {},
+			"retry_after_by_output": {},
+			"search_attempts": {},
+			"search_item": "",
+			"search_started_msec": -1,
+			"search_deadline_msec": -1,
+			"search_without_frontier": false,
+		}
+	var achievements := _achievement_observation()
+	var mode_allowed := (
+		mode in AchievementRegistryClass.TOOL_PROGRESSION_MODES
+		and not _is_pvp_world()
+		and not bool(achievements.get("community_locked", false))
+	)
+	if not mode_allowed:
+		_mid_tier_tool_goal_state["status"] = "paused"
+		_mid_tier_tool_goal_state["search_item"] = ""
+		_mid_tier_tool_goal_state["search_started_msec"] = -1
+		_mid_tier_tool_goal_state["search_deadline_msec"] = -1
+		_mid_tier_tool_goal_state["search_without_frontier"] = false
+		return
+	var stone_goal: Dictionary = _stone_age_goal_state if _stone_age_goal_state is Dictionary else {}
+	if (
+		str(stone_goal.get("goal_id", "")) in ["stone_age", "starter_tooling"]
+		and str(stone_goal.get("status", "")) != "completed"
+		and str(stone_goal.get("stage", "")) != "complete"
+	):
+		_mid_tier_tool_goal_state["status"] = "paused"
+		_mid_tier_tool_goal_state["search_item"] = ""
+		_mid_tier_tool_goal_state["search_started_msec"] = -1
+		_mid_tier_tool_goal_state["search_deadline_msec"] = -1
+		_mid_tier_tool_goal_state["search_without_frontier"] = false
+		return
+	_mid_tier_tool_goal_state["status"] = "active"
+	var inventory: Dictionary = _stone_age_authoritative_inventory
+	if inventory.is_empty():
+		inventory = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+	var output := str(_mid_tier_tool_goal_state.get("output", ""))
+	if not output.is_empty() and int(inventory.get(output, 0)) > 0:
+		var completed: Dictionary = _mid_tier_tool_goal_state.get("completed_outputs", {}) if _mid_tier_tool_goal_state.get("completed_outputs", {}) is Dictionary else {}
+		completed[output] = true
+		_mid_tier_tool_goal_state["completed_outputs"] = completed
+		structured_log.emit({
+			"event": "tool_progression_completed",
+			"output": output,
+			"world_id": world_id,
+			"world_mode": mode,
+			"at_msec": now_msec,
+		})
+		_mid_tier_tool_goal_state["output"] = ""
+		_mid_tier_tool_goal_state["search_item"] = ""
+		_mid_tier_tool_goal_state["search_started_msec"] = -1
+		_mid_tier_tool_goal_state["search_deadline_msec"] = -1
+		_mid_tier_tool_goal_state["search_without_frontier"] = false
+		_mid_tier_tool_goal_state["status"] = "idle"
+		output = ""
+	var search_started := int(_mid_tier_tool_goal_state.get("search_started_msec", -1))
+	var search_deadline := int(_mid_tier_tool_goal_state.get("search_deadline_msec", -1))
+	if not output.is_empty() and search_started >= 0 and search_deadline >= 0 and now_msec >= search_deadline:
+		var attempts: Dictionary = _mid_tier_tool_goal_state.get("search_attempts", {}) if _mid_tier_tool_goal_state.get("search_attempts", {}) is Dictionary else {}
+		var attempt_count := int(attempts.get(output, 0)) + 1
+		attempts[output] = attempt_count
+		_mid_tier_tool_goal_state["search_attempts"] = attempts
+		_mid_tier_tool_goal_state["search_item"] = ""
+		_mid_tier_tool_goal_state["search_started_msec"] = -1
+		_mid_tier_tool_goal_state["search_deadline_msec"] = -1
+		_mid_tier_tool_goal_state["search_without_frontier"] = false
+		if attempt_count >= MID_TIER_TOOL_MAX_SEARCH_ATTEMPTS:
+			var exhausted: Dictionary = _mid_tier_tool_goal_state.get("exhausted_outputs", {}) if _mid_tier_tool_goal_state.get("exhausted_outputs", {}) is Dictionary else {}
+			exhausted[output] = true
+			_mid_tier_tool_goal_state["exhausted_outputs"] = exhausted
+			_mid_tier_tool_goal_state["output"] = ""
+			_mid_tier_tool_goal_state["status"] = "idle"
+			structured_log.emit({"event": "tool_progression_search_exhausted", "output": output, "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
+		else:
+			var retries: Dictionary = _mid_tier_tool_goal_state.get("retry_after_by_output", {}) if _mid_tier_tool_goal_state.get("retry_after_by_output", {}) is Dictionary else {}
+			retries[output] = now_msec + MID_TIER_TOOL_SEARCH_RETRY_MSEC
+			_mid_tier_tool_goal_state["retry_after_by_output"] = retries
+			_mid_tier_tool_goal_state["output"] = ""
+			_mid_tier_tool_goal_state["status"] = "cooldown"
+			structured_log.emit({"event": "tool_progression_search_cooldown", "output": output, "attempt": attempt_count, "world_id": world_id, "world_mode": mode, "at_msec": now_msec})
+	var retries: Dictionary = _mid_tier_tool_goal_state.get("retry_after_by_output", {}) if _mid_tier_tool_goal_state.get("retry_after_by_output", {}) is Dictionary else {}
+	for raw_output in retries.keys():
+		if now_msec >= int(retries[raw_output]):
+			retries.erase(raw_output)
+	_mid_tier_tool_goal_state["retry_after_by_output"] = retries
+
+
+func _mid_tier_tool_note_action_started(decision: Dictionary, now_msec: int) -> void:
+	var output := str(decision.get("mid_tier_tool_output", ""))
+	if output.is_empty() or _mid_tier_tool_goal_state.is_empty():
+		return
+	var generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
+	var current_mode := str(generation.get("mode", _session_world_mode)).strip_edges().to_lower()
+	if str(_mid_tier_tool_goal_state.get("world_id", "")) != world_id or str(_mid_tier_tool_goal_state.get("world_mode", "")) != current_mode:
+		return
+	if output != str(_mid_tier_tool_goal_state.get("output", "")):
+		_mid_tier_tool_goal_state["output"] = output
+		_mid_tier_tool_goal_state["search_item"] = ""
+		_mid_tier_tool_goal_state["search_started_msec"] = -1
+		_mid_tier_tool_goal_state["search_deadline_msec"] = -1
+		_mid_tier_tool_goal_state["search_without_frontier"] = false
+		_mid_tier_tool_goal_state["status"] = "active"
+	if bool(decision.get("mid_tier_tool_search", false)):
+		var missing_item := str(decision.get("mid_tier_tool_missing_item", ""))
+		var no_frontier := bool(decision.get("mid_tier_tool_no_frontier", false))
+		var previous_no_frontier := bool(_mid_tier_tool_goal_state.get("search_without_frontier", false))
+		if (
+			missing_item != str(_mid_tier_tool_goal_state.get("search_item", ""))
+			or int(_mid_tier_tool_goal_state.get("search_started_msec", -1)) < 0
+			or (previous_no_frontier and not no_frontier)
+		):
+			_mid_tier_tool_goal_state["search_item"] = missing_item
+			_mid_tier_tool_goal_state["search_started_msec"] = now_msec
+			_mid_tier_tool_goal_state["search_deadline_msec"] = now_msec + (MID_TIER_TOOL_NO_FRONTIER_TIMEOUT_MSEC if no_frontier else MID_TIER_TOOL_SEARCH_TIMEOUT_MSEC)
+		_mid_tier_tool_goal_state["search_without_frontier"] = no_frontier
+		_mid_tier_tool_goal_state["status"] = "searching"
+	else:
+		_mid_tier_tool_goal_state["search_item"] = ""
+		_mid_tier_tool_goal_state["search_started_msec"] = -1
+		_mid_tier_tool_goal_state["search_deadline_msec"] = -1
+		_mid_tier_tool_goal_state["search_without_frontier"] = false
+		_mid_tier_tool_goal_state["status"] = "active"
 
 
 func _sync_stone_age_goal(achievements: Dictionary, now_msec: int = -1) -> void:
