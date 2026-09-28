@@ -2450,7 +2450,14 @@ func _world_position_for_support_tile(tile: Vector2i) -> Vector2:
 func _terrain_standable_tile(tile: Vector2i) -> bool:
 	if not (
 		_terrain_solid_at(tile.x, tile.y)
-		and not _terrain_solid_at(tile.x, tile.y - 1)
+		and (
+			not _terrain_solid_at(tile.x, tile.y - 1)
+			# WorldSim turns tree_ghost on when a grounded player moves into a
+			# tree-traversal block. That collision exception applies to wood,
+			# foliage and Shagot passage blocks, so a supported route node with
+			# one of those blocks in its head cell is physically enterable.
+			or _terrain_climbable_at(tile.x, tile.y - 1)
+		)
 	):
 		return false
 	var body_left := (tile.x * BlockDefs.TILE)

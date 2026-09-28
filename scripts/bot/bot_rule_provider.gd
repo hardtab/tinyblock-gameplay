@@ -1897,6 +1897,17 @@ func _stone_age_progression_action(observation: Dictionary, legal: PackedStringA
 					return _stone_age_decision(stage, Contract.ACTION_MINE, cobble, 2200, 0.92, observation)
 				if Contract.ACTION_MOVE_TO in legal and Perception.mine_target_is_safe(observation, cobble):
 					return _stone_age_decision(stage, Contract.ACTION_MOVE_TO, cobble, 2200, 0.8, observation)
+			# Natural stone in Procedural worlds is often buried below the first
+			# dirt layers, so it has no reachable mining stand position yet. Reuse
+			# the same one-step, return-route-verified staircase planner used for
+			# deeper exploration instead of yielding to generic surface mining.
+			if str(observation.get("world_mode", "")).to_lower() == "procedural" and not bool(observation.get("pvp_world", false)):
+				var descent_plan: Dictionary = observation.get("descent_plan", {}) if observation.get("descent_plan", {}) is Dictionary else {}
+				var descent_action := _safe_descent_plan_action(observation, legal, descent_plan)
+				if not descent_action.is_empty():
+					descent_action["stone_age_stage"] = stage
+					descent_action["stone_age_goal_id"] = _stone_age_goal_id(observation)
+					return Contract.normalize_decision(descent_action)
 		"craft_stone_pickaxe":
 			return _stone_age_craft_or_gather(observation, legal, stage, "stone_pickaxe", 2)
 		"equip_stone_pickaxe":
