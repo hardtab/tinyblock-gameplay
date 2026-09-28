@@ -132,6 +132,12 @@ const MAX_NOURISHMENT := 100
 const STATION_NAMES := ["workbench", "furnace"]
 const FILLER_BLOCK_NAMES := ["dirt", "grass", "sand", "gravel", "snow", "ice"]
 const MAX_FILLER_RESERVE := 8
+# A narrower subset of the filler names that read as walkable surface in a
+# fresh world. Mining exposed grass/dirt/sand under or beside the bot opens a
+# pointless hole in the ground it is standing on. Buried filler and every
+# non-surface filler name stay valid material targets, and explicit
+# DigPlanner/descent routes or regenerating One Block sources are never skipped.
+const SURFACE_HOLE_FILLER_NAMES := ["dirt", "grass", "sand"]
 func _init(seed: int = 0) -> void:
 	if seed == 0:
 		_rng.randomize()
@@ -1058,6 +1064,7 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var needs_cobblestone := _needs_cobblestone_progression(observation)
 	var filler_count := _count_named(inventory, FILLER_BLOCK_NAMES)
 	var recent_build_cells := _recent_build_cells(observation)
+	var occupied := _terrain_occupied_map(observation)
 	var has_tree_target := false
 	var has_support_preserving_target := false
 	if needs_wood or needs_leaves:
@@ -1119,6 +1126,17 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			continue
 		if block_name in FILLER_BLOCK_NAMES and filler_count >= MAX_FILLER_RESERVE and not regenerates_on_mine:
 			continue
+		# In a fresh Procedural world the nearest grass/dirt/sand is often the
+		# block under or beside the bot. Mining it opens a useless surface pit
+		# instead of advancing progression, so skip only that exposed surface
+		# filler. Buried dirt, explicit verified DigPlanner/descent route steps,
+		# and regenerating One Block sources keep their normal behavior.
+		if (
+			not regenerates_on_mine
+			and not bool(resource.get("dig_route", false))
+			and _opens_surface_hole(resource, observation, occupied)
+		):
+			continue
 		var score := distance
 		if not bool(resource.get("reachable", false)):
 			score += 80.0
@@ -1150,6 +1168,43 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			best_score = score
 			best = resource
 	return best
+
+
+func _opens_surface_hole(resource: Dictionary, observation: Dictionary, occupied: Dictionary) -> bool:
+	# World-agnostic surface-hole guard for generic GATHER. A named surface
+	# filler block that is exposed to air at (or immediately next to) the bot's
+	# own support row, and within its walking footprint, opens a hole in the
+	# ground the bot stands on when mined. Anything buried beneath a solid tile,
+	# any other filler name, and any regenerating/verified-route source is left
+	# to the ordinary scoring path.
+	var block_name := str(resource.get("block_name", "")).to_lower()
+	if not block_name in SURFACE_HOLE_FILLER_NAMES:
+		return false
+	if not resource.has("x") or not resource.has("y"):
+		return false
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if self_state.is_empty():
+		return false
+	var tile := float(BlockDefs.TILE)
+	var px := float(self_state.get("x", 0.0))
+	var py := float(self_state.get("y", 0.0))
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var left := floori(px / tile)
+	var right := floori((px + width - 0.001) / tile)
+	var support_y := floori((py + height) / tile)
+	var tile_x := int(resource.get("x", 0))
+	var tile_y := int(resource.get("y", 0))
+	# "at or immediately next to" the support row, and no more than one tile
+	# outside the bot's own column span.
+	if tile_y < support_y - 1 or tile_y > support_y + 1:
+		return false
+	if tile_x < left - 1 or tile_x > right + 1:
+		return false
+	# Solid terrain directly above means the block is buried; mining it does not
+	# expose the walkable surface.
+	var above := str(occupied.get("%d:%d" % [tile_x, tile_y - 1], "")).to_lower()
+	return above.is_empty() or above in ["air", "core.air"]
 
 
 func _recent_build_cells(observation: Dictionary) -> Dictionary:
