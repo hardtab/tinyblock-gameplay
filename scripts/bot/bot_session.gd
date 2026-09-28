@@ -809,6 +809,9 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# action timed out. Keep the originally chosen side and gap, but recompute the
 	# approach point from each fresh threat observation while the executor is busy.
 	var decision_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+	var explicit_target_tile: Array = []
+	if action == Contract.ACTION_MOVE_TO and decision_target.get("support_tile", []) is Array:
+		explicit_target_tile = (decision_target.get("support_tile", []) as Array).duplicate()
 	if action == Contract.ACTION_MOVE_TO and bool(decision_target.get("combat_approach", false)) and not target_id.is_empty():
 		for raw_threat in observation.get("threats", []):
 			if not raw_threat is Dictionary:
@@ -960,7 +963,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	var route_step := (
 		{}
 		if _is_pvp_world() or emergency_lava_escape
-		else _physics_route_step(origin, destination, target_id, physics_first_step_guard)
+		else _physics_route_step(origin, destination, target_id, physics_first_step_guard, explicit_target_tile)
 	)
 	if bool(route_step.get("unreachable", false)) and _host_rejected_transition_blocks_origin(_support_tile_for_position(origin)):
 		_set_desired_input(false, false, false)
@@ -1206,6 +1209,7 @@ func _physics_route_step(
 	destination: Vector2,
 	target_id: String,
 	first_step_allowed: Callable = Callable(),
+	explicit_target_tile: Array = [],
 ) -> Dictionary:
 	if _terrain_tiles.is_empty():
 		return {}
@@ -1214,6 +1218,8 @@ func _physics_route_step(
 		_world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {},
 	)
 	var target_tile := _support_tile_for_position(destination)
+	if explicit_target_tile.size() >= 2:
+		target_tile = Vector2i(int(explicit_target_tile[0]), int(explicit_target_tile[1]))
 	var now := Time.get_ticks_msec()
 	var active_drop_in_flight := false
 	if _physics_route.size() > 1 and str(_physics_route[1].get("kind", "")) == "drop":
@@ -1986,6 +1992,22 @@ func _route_origin_support_tile(position: Vector2, self_state: Dictionary) -> Ve
 		if distance < best_distance:
 			best_distance = distance
 			best_tile = candidate
+	# The host can also set on_ground from a swept-body collision before its
+	# inset-foot support probe returns a tile. On a one-pixel ledge, the body may
+	# overlap the neighbouring solid while px+3..px+w-3 lies entirely over a
+	# centre-column notch. Trust this wider footprint only when the authoritative
+	# player state explicitly says grounded, and only on the same snapped row.
+	if best_tile == tile and bool(self_state.get("on_ground", false)):
+		var body_left := floori(position.x / float(BlockDefs.TILE))
+		var body_right := floori((position.x + width - 0.001) / float(BlockDefs.TILE))
+		for candidate_x in range(body_left, body_right + 1):
+			var candidate := Vector2i(candidate_x, row)
+			if candidate == tile or not _terrain_standable_tile(candidate):
+				continue
+			var distance := absi(candidate.x - tile.x)
+			if distance < best_distance:
+				best_distance = distance
+				best_tile = candidate
 	return best_tile
 
 
@@ -4614,6 +4636,7 @@ func _reachable_world_underfoot_waypoints(snapshot: Dictionary) -> Array[Diction
 		candidate["biome_id"] = biome_id
 		candidate["tile_x"] = target_tile.x
 		candidate["tile_y"] = target_tile.y
+		candidate["support_tile"] = [target_tile.x, target_tile.y]
 		candidate["position"] = [target_position.x, target_position.y]
 		candidate["distance"] = origin_position.distance_to(target_position)
 		candidate["route_steps"] = maxi(0, route.size() - 1)
@@ -4642,7 +4665,14 @@ func _safe_exploration_waypoints(self_state: Dictionary) -> Array[Dictionary]:
 		and now - _safe_exploration_waypoint_cache_checked_msec < 450
 	):
 		return _safe_exploration_waypoint_cache.duplicate(true)
-	var reachable := _physics_reachable_support_tiles(origin_tile, first_step_allowed)
+	var reachable := Navigator.physics_reachable_first_steps(
+		origin_tile,
+		Callable(self, "_terrain_standable_tile"),
+		Callable(self, "_terrain_climbable_tile"),
+		Navigator.MAX_PHYSICS_ROUTE_NODES,
+		Callable(self, "_physics_transition_allowed"),
+		first_step_allowed,
+	)
 	var result: Array[Dictionary] = []
 	var max_horizontal_tiles := ceili(STARTER_TOOLING_RESOURCE_SCAN_RADIUS / float(BlockDefs.TILE))
 	for raw_tile in reachable:
@@ -4651,10 +4681,12 @@ func _safe_exploration_waypoints(self_state: Dictionary) -> Array[Dictionary]:
 		var tile: Vector2i = raw_tile
 		if tile == origin_tile or abs(tile.x - origin_tile.x) > max_horizontal_tiles:
 			continue
+		var route_info: Dictionary = reachable.get(raw_tile, {}) if reachable.get(raw_tile, {}) is Dictionary else {}
 		var position := _world_position_for_support_tile(tile)
 		result.append({
 			"support_tile": [tile.x, tile.y],
 			"position": [position.x, position.y],
+			"route_steps": int(route_info.get("steps", 0)),
 			"reachable": true,
 		})
 	_safe_exploration_waypoint_cache = result

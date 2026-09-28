@@ -76,6 +76,8 @@ const WANDER_RADIUS := 96.0
 const WANDER_COMMIT_MSEC := 1800
 const EXPLORE_RADIUS := 384.0
 const EXPLORE_COMMIT_MSEC := 4200
+const EXPLORE_MAX_ROUTE_STEPS := 4
+const EXPLORE_MAX_DESCENT_PX := ROUTE_TILE * 2.0
 const MIN_EXPLORE_PROGRESS_PX := 24.0
 const EXPLORE_BOTH_SIDES_WINDOW_MSEC := 20_000
 const EXPLORE_BOTH_SIDES_COOLDOWN_MSEC := 12_000
@@ -1174,6 +1176,7 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 	if _explore_direction == 0:
 		_explore_direction = -1 if _rng.randf() < 0.5 else 1
 	var target_position := Vector2(INF, INF)
+	var target_support_tile: Array = []
 	var target_progress := -1.0
 	var selected_direction := _explore_direction
 	for direction in [_explore_direction, -_explore_direction]:
@@ -1184,12 +1187,25 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 			if not bool(waypoint.get("reachable", false)):
 				continue
 			var position := Contract.target_position(waypoint)
+			var route_steps := int(waypoint.get("route_steps", EXPLORE_MAX_ROUTE_STEPS + 1))
+			# Exploration is incremental. A long graph-reachable descent is still a
+			# poor short action: it can consume the whole movement window and pull the
+			# bot off a ledge before the next frontier is observed. Prefer nearby
+			# proven support cells and keep each exploration move to a shallow drop.
+			if route_steps > EXPLORE_MAX_ROUTE_STEPS or position.y - origin.y > EXPLORE_MAX_DESCENT_PX:
+				continue
 			var delta_x := position.x - origin.x
 			var progress := delta_x * float(direction)
 			if progress < 24.0 or progress > max_distance:
 				continue
 			if progress > target_progress or (is_equal_approx(progress, target_progress) and absf(position.y - origin.y) < absf(target_position.y - origin.y)):
 				target_position = position
+				var raw_support_tile: Variant = waypoint.get("support_tile", [])
+				if raw_support_tile is Array:
+					target_support_tile = (raw_support_tile as Array).duplicate()
+				elif typeof(raw_support_tile) == TYPE_VECTOR2I:
+					var support_tile := raw_support_tile as Vector2i
+					target_support_tile = [support_tile.x, support_tile.y]
 				target_progress = progress
 				selected_direction = int(direction)
 		if target_progress >= 0.0:
@@ -1208,6 +1224,7 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 	return {
 		"id": target_id,
 		"position": [target_position.x, target_position.y],
+		"support_tile": target_support_tile,
 		"reason": "safe_surface_frontier",
 	}
 
