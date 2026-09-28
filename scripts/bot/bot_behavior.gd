@@ -82,6 +82,9 @@ func tick(observation: Dictionary, delta: float, now_msec: int) -> void:
 	# target; ordinary resource gathering is always interrupted.
 	if _combat_should_preempt_mining(observation):
 		executor.cancel("combat_preempted")
+		# A held mine may have committed for longer than the decision interval.
+		# Once an opponent interrupts it, decide how to fight on this tick.
+		_next_decision_msec = now_msec
 	if _hostile_creature_should_preempt_travel(observation, now_msec):
 		executor.cancel("hostile_creature_preempted")
 		# Cancelling must actually re-open the decision loop this tick: the leg
