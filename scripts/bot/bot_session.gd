@@ -213,6 +213,8 @@ const MAX_AUTHORITATIVE_MOTION_DIVERGENCE := BlockDefs.TILE * 3.0
 const HOST_GROUNDED_AIR_REJECTION_TOLERANCE := maxf(BlockDefs.TILE * 1.25, absf(BlockDefs.JUMP))
 const HOST_REJECTED_TRANSITION_COOLDOWN_MSEC := 8_000
 const TREE_CLIMB_SPEED := -3.2
+const FLEE_EMERGENCY_MAX_CLOSURE := BlockDefs.TILE * 1.25
+const FLEE_EMERGENCY_MIN_STANDOFF := 48.0 + BlockDefs.TILE * 0.25
 const CRAFT_RESPONSE_TIMEOUT_MSEC := 4_000
 const CRAFT_RETRY_DELAY_MSEC := 8_000
 const CRAFT_BLOCK_COOLDOWN_MSEC := 12_000
@@ -886,12 +888,20 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 						)
 						break
 			physics_first_step_guard = _safe_flee_first_step_filter(self_state, origin, threat_center)
-			var flee_waypoint := _safe_flee_waypoint(self_state, origin, threat_center, physics_first_step_guard)
+			var allow_emergency_closing_step := target_id.begins_with("creature_") and not player_target
+			var flee_waypoint := _safe_flee_waypoint(
+				self_state, origin, threat_center, physics_first_step_guard, allow_emergency_closing_step
+			)
 			if flee_waypoint.is_empty():
 				_set_desired_input(false, false, false)
 				_advance_local_physics(self_state, delta, false)
 				_world_snapshot["self"] = self_state
 				return {"done": true, "reason": "flee_no_safe_waypoint"}
+			if bool(flee_waypoint.get("emergency_closure", false)):
+				# Tier 3 is intentionally a single, host-known adjacent step. Validate
+				# the same limited closure again while executing it; do not route past
+				# the hostile or allow the normal player-flee path to approach one.
+				physics_first_step_guard = _safe_flee_emergency_step_filter(self_state, origin, threat_center)
 			destination = flee_waypoint.get("position", destination)
 		else:
 			# Actor positions and lava targets are centers in perception, while the
@@ -1416,11 +1426,24 @@ func _safe_flee_first_step_filter(self_state: Dictionary, origin: Vector2, threa
 		return kind != "jump" or _jump_route_has_safe_landing(self_state, first_position)
 
 
+func _safe_flee_emergency_step_filter(self_state: Dictionary, origin: Vector2, threat: Vector2) -> Callable:
+	var origin_distance := origin.distance_to(threat)
+	return func(_from_tile: Vector2i, to_tile: Vector2i, kind: String) -> bool:
+		var first_position := _world_position_for_support_tile(to_tile)
+		var first_distance := first_position.distance_to(threat)
+		if first_distance < FLEE_EMERGENCY_MIN_STANDOFF:
+			return false
+		if first_distance < origin_distance - FLEE_EMERGENCY_MAX_CLOSURE:
+			return false
+		return kind != "jump" or _jump_route_has_safe_landing(self_state, first_position)
+
+
 func _safe_flee_waypoint(
 	self_state: Dictionary,
 	origin: Vector2,
 	threat: Vector2,
 	first_step_allowed: Callable = Callable(),
+	allow_emergency_closing_step: bool = false,
 ) -> Dictionary:
 	if _terrain_tiles.is_empty():
 		return {}
@@ -1447,6 +1470,8 @@ func _safe_flee_waypoint(
 		# Tier 2: no strictly farther escape exists, so allow a same-distance
 		# reposition instead of standing still and re-entering WAIT.
 		var reposition := _safe_flee_reposition_waypoint(self_state, origin_tile, threat, origin_distance, first_step_allowed)
+		if reposition.is_empty() and allow_emergency_closing_step:
+			reposition = _safe_flee_emergency_closing_step(self_state, origin_tile, threat, origin_distance)
 		if reposition.is_empty():
 			_emit_flee_route_unavailable(
 				self_state, origin, threat, origin_tile, origin_distance, first_step_allowed, reachable_first_steps
@@ -1488,6 +1513,8 @@ func _safe_flee_waypoint(
 		var reposition := _safe_flee_reposition_waypoint(
 			self_state, origin_tile, threat, origin_distance, first_step_allowed, reachable_first_steps
 		)
+		if reposition.is_empty() and allow_emergency_closing_step:
+			reposition = _safe_flee_emergency_closing_step(self_state, origin_tile, threat, origin_distance)
 		if reposition.is_empty():
 			_emit_flee_route_unavailable(
 				self_state, origin, threat, origin_tile, origin_distance, first_step_allowed, reachable_first_steps
@@ -1498,6 +1525,66 @@ func _safe_flee_waypoint(
 		"support_tile": best_tile,
 		"distance_from_threat": best_distance,
 	}
+
+
+## Tier 3 for a hostile creature only: if every safe escape and non-closing
+## reposition is blocked, take exactly one validated adjacent step toward it,
+## but stay outside melee range plus a small buffer. The next policy tick must
+## re-evaluate the live threat and terrain; this is not a route through the
+## creature and must never be used to flee from a player.
+func _safe_flee_emergency_closing_step(
+	self_state: Dictionary,
+	origin_tile: Vector2i,
+	threat: Vector2,
+	origin_distance: float,
+) -> Dictionary:
+	var best: Dictionary = {}
+	var best_distance := -INF
+	var best_tile := origin_tile
+	var minimum_closure := float(BlockDefs.TILE) * 0.5
+	var candidates: Array[Dictionary] = []
+	for direction in [Vector2i.LEFT, Vector2i.RIGHT]:
+		candidates.append({"tile": origin_tile + direction, "kind": "walk"})
+		candidates.append({"tile": origin_tile + direction + Vector2i.UP, "kind": "jump"})
+		candidates.append({"tile": origin_tile + direction * 2, "kind": "jump"})
+		candidates.append({"tile": origin_tile + direction * 2 + Vector2i.UP, "kind": "jump"})
+	for candidate in candidates:
+		var tile: Vector2i = candidate.get("tile", origin_tile)
+		var kind := str(candidate.get("kind", "walk"))
+		if tile == origin_tile or not _terrain_standable_tile(tile):
+			continue
+		if not _physics_transition_allowed(origin_tile, tile, kind):
+			continue
+		var position := _world_position_for_support_tile(tile)
+		var distance_from_threat := position.distance_to(threat)
+		var closure := origin_distance - distance_from_threat
+		if closure <= minimum_closure or closure > FLEE_EMERGENCY_MAX_CLOSURE:
+			continue
+		if distance_from_threat < FLEE_EMERGENCY_MIN_STANDOFF:
+			continue
+		if kind == "jump" and not _jump_route_has_safe_landing(self_state, position):
+			continue
+		if distance_from_threat <= best_distance:
+			continue
+		best_distance = distance_from_threat
+		best_tile = tile
+		best = {
+			"position": position,
+			"support_tile": tile,
+			"distance_from_threat": distance_from_threat,
+			"reposition_only": true,
+			"emergency_closure": true,
+		}
+	if not best.is_empty():
+		structured_log.emit({
+			"event": "flee_emergency_step",
+			"at_msec": Time.get_ticks_msec(),
+			"origin_tile": [origin_tile.x, origin_tile.y],
+			"support_tile": [best_tile.x, best_tile.y],
+			"origin_distance": origin_distance,
+			"distance_from_threat": best_distance,
+		})
+	return best
 
 
 ## Bounded one-step escape scan used when the reachability search cannot start or
