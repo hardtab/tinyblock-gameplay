@@ -954,14 +954,38 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		var stand_position: Dictionary = {}
 		if requested_approach is Array and (requested_approach as Array).size() >= 2:
 			stand_position = _reachable_explicit_stand_position(origin, self_state, requested_approach as Array)
-		else:
+		if stand_position.is_empty() and decision_target.has("x") and decision_target.has("y"):
+			# Observation and execution are separated by network updates. The bot can
+			# move, be reseated by the host, or receive a newly rejected transition
+			# after the policy selected this resource. Re-select any currently
+			# reachable interaction side before treating the original stand tile as
+			# unreachable; otherwise a stale approach can strand a still-reachable
+			# resource and trigger its long target cooldown.
 			stand_position = _reachable_stand_position_for_block(origin, decision_target)
-		if stand_position.is_empty():
-			_set_desired_input(false, false, false)
-			_advance_local_physics(self_state, delta, false)
-			_world_snapshot["self"] = self_state
-			return {"done": true, "reason": "route_unreachable"}
-		target = Contract.target_position(stand_position)
+		if not stand_position.is_empty():
+			target = Contract.target_position(stand_position)
+			var stand_support: Variant = stand_position.get("support_tile", [])
+			if stand_support is Array and (stand_support as Array).size() >= 2:
+				explicit_target_tile = (stand_support as Array).duplicate()
+		else:
+			# The resource may be reachable but farther away than one bounded route
+			# search. Advance along a physics-proven support waypoint and reconsider
+			# its interaction side after the next observation. The shared first-step
+			# and landing guards still reject unverified jumps and drops.
+			var resource_waypoint := _safe_pursuit_waypoint(
+				origin,
+				target,
+				_safe_jump_first_step_filter(self_state),
+			)
+			if resource_waypoint.is_empty():
+				_set_desired_input(false, false, false)
+				_advance_local_physics(self_state, delta, false)
+				_world_snapshot["self"] = self_state
+				return {"done": true, "reason": "route_unreachable"}
+			target = resource_waypoint.get("position", target)
+			var waypoint_support: Variant = resource_waypoint.get("support_tile", Vector2i(2147483647, 2147483647))
+			if typeof(waypoint_support) == TYPE_VECTOR2I:
+				explicit_target_tile = [waypoint_support.x, waypoint_support.y]
 
 	if action == Contract.ACTION_LOOK_AT:
 		_set_desired_input(false, false, false)
@@ -2256,7 +2280,10 @@ func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) ->
 		if cost >= best_cost:
 			continue
 		best_cost = cost
-		best_position = {"position": [position.x, position.y]}
+		best_position = {
+			"position": [position.x, position.y],
+			"support_tile": [candidate.x, candidate.y],
+		}
 	return best_position
 
 
