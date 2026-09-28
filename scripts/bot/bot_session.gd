@@ -694,10 +694,23 @@ func _process(delta: float) -> void:
 	_world_snapshot["self"] = self_state
 	var self_alive := int(self_state.get("health", 10)) > 0
 	if not self_alive:
+		# Death freezes ordinary decisions until the host confirms a respawn. Cancel
+		# the in-flight action first so it cannot remain busy forever behind this
+		# early return or resume stale movement on the next life.
+		if behavior != null and behavior.executor != null and behavior.executor.is_busy():
+			var interrupted_decision: Dictionary = behavior.executor.current_decision.duplicate(true)
+			behavior.executor.cancel("bot_dead")
+			structured_log.emit({
+				"event": "dead_action_cancelled",
+				"action": str(interrupted_decision.get("action", "")),
+				"goal": str(interrupted_decision.get("goal", "")),
+				"at_msec": now_msec,
+			})
 		_set_desired_input(false, false, false)
 		_send_guest_defeat_if_due(now_msec)
 		_send_player_input_if_due(now_msec)
 		_send_player_snapshot_if_due(now_msec)
+		_check_empty_world_grace(now_msec)
 		return
 	_guest_defeat_pending = false
 	var observation := _build_observation(now_msec)
@@ -714,6 +727,10 @@ func _process(delta: float) -> void:
 	# after the first player_input packet, while old hosts can still display the
 	# bot until they receive the new protocol.
 	_send_player_snapshot_if_due(now_msec)
+	_check_empty_world_grace(now_msec)
+
+
+func _check_empty_world_grace(now_msec: int) -> void:
 	if not _empty_emitted and Perception.empty_world_should_leave(sync_complete, human_player_count, empty_since_msec, now_msec, empty_grace_msec):
 		_empty_emitted = true
 		empty_world_ready.emit()
