@@ -2109,6 +2109,16 @@ func _reachable_stand_position_for_block(origin: Vector2, target: Dictionary) ->
 		tile + Vector2i.RIGHT + Vector2i.DOWN,
 		tile + Vector2i.LEFT * 2 + Vector2i.DOWN,
 		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN,
+		# A log can hang two or three tiles above the ground (notably palms).
+		# The avatar's head/mining reach still covers it from a supported floor.
+		tile + Vector2i.DOWN * 2,
+		tile + Vector2i.LEFT + Vector2i.DOWN * 2,
+		tile + Vector2i.RIGHT + Vector2i.DOWN * 2,
+		tile + Vector2i.LEFT * 2 + Vector2i.DOWN * 2,
+		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN * 2,
+		tile + Vector2i.DOWN * 3,
+		tile + Vector2i.LEFT + Vector2i.DOWN * 3,
+		tile + Vector2i.RIGHT + Vector2i.DOWN * 3,
 	]
 	# Some authoritative tiles are replaced atomically and explicitly preserve
 	# support when mined. In that case the tile itself is a safe standing node:
@@ -5176,6 +5186,14 @@ func _resource_has_reachable_stand_tile(resource: Dictionary, reachable_support_
 		tile + Vector2i.RIGHT + Vector2i.DOWN,
 		tile + Vector2i.LEFT * 2 + Vector2i.DOWN,
 		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN,
+		tile + Vector2i.DOWN * 2,
+		tile + Vector2i.LEFT + Vector2i.DOWN * 2,
+		tile + Vector2i.RIGHT + Vector2i.DOWN * 2,
+		tile + Vector2i.LEFT * 2 + Vector2i.DOWN * 2,
+		tile + Vector2i.RIGHT * 2 + Vector2i.DOWN * 2,
+		tile + Vector2i.DOWN * 3,
+		tile + Vector2i.LEFT + Vector2i.DOWN * 3,
+		tile + Vector2i.RIGHT + Vector2i.DOWN * 3,
 	]
 	# Keep reachability proof aligned with _reachable_stand_position_for_block:
 	# the target tile may be the safe support node only when its authoritative
