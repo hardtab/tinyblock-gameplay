@@ -5752,6 +5752,12 @@ func _visible_resources_from_terrain(self_state: Dictionary) -> Array:
 		var tile := raw_tile as Dictionary
 		var tile_x := int(tile.get("x", 0))
 		var tile_y := int(tile.get("y", 0))
+		# Join snapshots are only a sparse fallback. Once a live host update has
+		# observed this cell, the terrain mirror is authoritative even when the
+		# updated cell is air and therefore absent from _terrain_tiles. Otherwise
+		# a mined block from the stale join snapshot reappears as a resource.
+		if _terrain_observed_cells.has("%d:%d" % [tile_x, tile_y]):
+			continue
 		var block_name := _block_name_for_content_id(str(tile.get("content_id", "")))
 		if block_name.is_empty():
 			block_name = str(tile.get("block_name", ""))
