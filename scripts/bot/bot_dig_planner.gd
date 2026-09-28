@@ -211,6 +211,7 @@ static func _place_step(
 		or not _solid(terrain, x, y + 1)
 		or not _known_empty_cell(observation, terrain, x, y - 1)
 		or not _known_empty_cell(observation, terrain, x, y - 2)
+		or _retry_cooldown_active(observation, x, y)
 		or _overlaps_any_player(Vector2i(x, y), observation)
 	):
 		return {}
@@ -268,7 +269,10 @@ static func _overlaps_player(tile: Vector2i, raw_player: Variant) -> bool:
 	var position := Contract.target_position(player)
 	var tile_rect := Rect2(float(tile.x * TILE), float(tile.y * TILE), float(TILE), float(TILE))
 	var player_rect := Rect2(position.x, position.y, float(player.get("w", 20.0)), float(player.get("h", 28.0)))
-	return tile_rect.grow(-1.0).intersects(player_rect.grow(-1.0))
+	# Match WorldSim.place_block's strict rectangle overlap. Shrinking both
+	# rectangles let a sub-pixel body intrusion pass here while the host rejected
+	# the exact same placement on every retry.
+	return tile_rect.intersects(player_rect)
 
 
 static func _has_equipped_mining_tool(observation: Dictionary) -> bool:
