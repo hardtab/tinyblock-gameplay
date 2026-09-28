@@ -545,7 +545,7 @@ func decide(observation: Dictionary) -> Dictionary:
 		elif _needs_wood_progression(_inventory(observation)) and Contract.ACTION_MOVE_TO in legal:
 			# Ice-only pads temporarily hide the starter tree from the scored set.
 			# Climb/walk toward any wood/leaf tile still present in the raw list.
-			var tree_target := _nearest_named_resource(resources, true, true)
+			var tree_target := _nearest_named_resource(resources, true, true, observation)
 			if not tree_target.is_empty():
 				return _decision(Contract.GOAL_GATHER, Contract.ACTION_MOVE_TO, tree_target, 2200, 0.85)
 	# The One Block source remains globally known even after exploration takes it
@@ -999,7 +999,7 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 		# `reachable` means close enough to attempt mining, not that physics can
 		# reach a standing position beside the block. Farther resources need an
 		# explicit host-terrain route proof before they can become movement goals.
-		if not _resource_has_proven_approach(resource):
+		if not _resource_has_proven_approach(resource, observation):
 			continue
 		var distance := float(resource.get("distance", 9999.0))
 		if distance > 288.0:
@@ -1076,14 +1076,14 @@ func _recent_build_cells(observation: Dictionary) -> Dictionary:
 	return cells
 
 
-func _nearest_named_resource(values: Array, want_wood: bool, want_leaves: bool) -> Dictionary:
+func _nearest_named_resource(values: Array, want_wood: bool, want_leaves: bool, observation: Dictionary = {}) -> Dictionary:
 	var best := {}
 	var best_distance := INF
 	for raw_value in values:
 		if not raw_value is Dictionary:
 			continue
 		var resource := raw_value as Dictionary
-		if not _resource_has_proven_approach(resource):
+		if not _resource_has_proven_approach(resource, observation):
 			continue
 		var block_name := str(resource.get("block_name", "")).to_lower()
 		if want_wood and _is_wood_log_name(block_name):
@@ -1099,7 +1099,13 @@ func _nearest_named_resource(values: Array, want_wood: bool, want_leaves: bool) 
 	return best
 
 
-func _resource_has_proven_approach(resource: Dictionary) -> bool:
+func _resource_has_proven_approach(resource: Dictionary, observation: Dictionary = {}) -> bool:
+	# An authoritative rejection can leave a resource visible and nominally
+	# reachable in the snapshot. Never let another goal selector bypass the
+	# session's bounded retry cooldown and immediately issue the same action.
+	var now_msec := int(observation.get("observed_at_msec", Time.get_ticks_msec()))
+	if int(resource.get("blocked_until_msec", 0)) > now_msec:
+		return false
 	return bool(resource.get("reachable", false)) or bool(resource.get("approachable", false))
 
 
@@ -1754,7 +1760,7 @@ func _stone_age_gather_wood_action(observation: Dictionary, legal: PackedStringA
 		if not raw_resource is Dictionary:
 			continue
 		var resource := raw_resource as Dictionary
-		if not _resource_has_proven_approach(resource):
+		if not _resource_has_proven_approach(resource, observation):
 			continue
 		var block_name := str(resource.get("block_name", "")).to_lower()
 		if not _is_wood_log_name(block_name) or not Perception.mine_target_is_safe(observation, resource):
@@ -1779,7 +1785,7 @@ func _stone_age_cobblestone_target(observation: Dictionary) -> Dictionary:
 		if not raw_resource is Dictionary:
 			continue
 		var resource := raw_resource as Dictionary
-		if not _resource_has_proven_approach(resource):
+		if not _resource_has_proven_approach(resource, observation):
 			continue
 		if not _is_cobblestone_source(str(resource.get("block_name", ""))):
 			continue
@@ -2134,7 +2140,7 @@ func _achievement_resource_action(observation: Dictionary, legal: PackedStringAr
 		if not raw_resource is Dictionary:
 			continue
 		var resource := raw_resource as Dictionary
-		if not _resource_has_proven_approach(resource):
+		if not _resource_has_proven_approach(resource, observation):
 			continue
 		if _normalized_resource_name(str(resource.get("block_name", resource.get("content_id", "")))) not in wanted_names:
 			continue
