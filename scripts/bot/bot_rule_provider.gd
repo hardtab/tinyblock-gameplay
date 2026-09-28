@@ -16,6 +16,9 @@ var _last_plant_msec := -1
 var _explore_direction := 0
 var _last_explore_origin_x := INF
 var _last_explore_target_id := ""
+var _last_explore_support_tile: Array = []
+var _last_failed_explore_frontier := ""
+var _same_explore_frontier_failures := 0
 var _last_explore_left_failure_msec := -1
 var _last_explore_right_failure_msec := -1
 var _explore_suspended_until_msec := -1
@@ -140,6 +143,9 @@ func reset() -> void:
 	_explore_direction = 0
 	_last_explore_origin_x = INF
 	_last_explore_target_id = ""
+	_last_explore_support_tile.clear()
+	_last_failed_explore_frontier = ""
+	_same_explore_frontier_failures = 0
 	_last_explore_left_failure_msec = -1
 	_last_explore_right_failure_msec = -1
 	_explore_suspended_until_msec = -1
@@ -1242,8 +1248,20 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 					# movement window stalled. Explicit route/obstacle failures
 					# always make the opposite side worth probing.
 					if route_failed or progress < MIN_EXPLORE_PROGRESS_PX:
+						var failed_frontier := "%s:%s" % [target_id, str(_last_explore_support_tile)]
+						_same_explore_frontier_failures = _same_explore_frontier_failures + 1 if failed_frontier == _last_failed_explore_frontier else 1
+						_last_failed_explore_frontier = failed_frontier
+						# A one-sided pit can advertise the same waypoint after every
+						# heading flip. Give route clearing and other goals a window
+						# instead of retrying that known-stalled frontier forever.
+						if _same_explore_frontier_failures >= 2:
+							_explore_suspended_until_msec = maxi(_explore_suspended_until_msec, now_msec + EXPLORE_BOTH_SIDES_COOLDOWN_MSEC)
+							_same_explore_frontier_failures = 0
 						_note_explore_direction_failure(target_id, now_msec)
 						_explore_direction *= -1
+					else:
+						_same_explore_frontier_failures = 0
+						_last_failed_explore_frontier = ""
 		break
 	if _explore_suspended_until_msec >= 0:
 		if now_msec < _explore_suspended_until_msec:
@@ -1293,12 +1311,14 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 		# The executor keeps its independent route/edge guards as a second check,
 		# but policy must not repeatedly aim into ungenerated air and never move.
 		_last_explore_target_id = ""
+		_last_explore_support_tile.clear()
 		return {}
 	_explore_direction = selected_direction
 	var label := "left" if _explore_direction < 0 else "right"
 	var target_id := "explore:%s" % label
 	_last_explore_origin_x = origin.x
 	_last_explore_target_id = target_id
+	_last_explore_support_tile = target_support_tile.duplicate()
 	return {
 		"id": target_id,
 		"position": [target_position.x, target_position.y],
