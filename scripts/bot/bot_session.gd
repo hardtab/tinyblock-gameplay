@@ -4174,9 +4174,10 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 			# floating at an unsupported tile. Fluid and climbable cells are
 			# legitimate support, so they never trigger this.
 			var host_support_reseat := false
+			var host_support_tile := Vector2i(2147483647, 2147483647)
 			if entry.has("x") and entry.has("y") and (_jump_active or _climb_active):
 				var local_support_tile := _support_tile_for_position(local_position)
-				var host_support_tile := _support_tile_for_position(host_position)
+				host_support_tile = _support_tile_for_position(host_position)
 				var local_support_verdict := _authoritative_support_verdict(local_support_tile)
 				var host_support_verdict := _authoritative_support_verdict(host_support_tile)
 				var support_tile_separation := maxi(
@@ -4213,11 +4214,38 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 						and local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
 						and _authoritative_support_verdict(host_tile) in ["supported", "fluid"]
 					)
+			# A support reseat normally just reconciles stale local terrain. If the
+			# authoritative host is still grounded on the transition's takeoff tile
+			# after the bounded jump echo grace, though, the host never accepted that
+			# jump edge. Cool it down so route planning can choose another edge.
+			# Keep nearby confirmed landings and fresh takeoff echoes out of this path.
+			var host_rejected_transition_at_source := false
+			if (
+				host_grounded
+				and host_support_reseat
+				and not fresh_takeoff_echo
+				and not host_confirmed_near_landing
+				and _jump_active
+				and _jump_started_msec >= 0
+				and not _active_air_transition.is_empty()
+			):
+				var transition_from: Vector2i = _active_air_transition.get("from", Vector2i(2147483647, 2147483647))
+				var transition_to: Vector2i = _active_air_transition.get("to", Vector2i(2147483647, 2147483647))
+				var transition_age := Time.get_ticks_msec() - _jump_started_msec
+				host_rejected_transition_at_source = (
+					transition_from.x != 2147483647
+					and transition_from != transition_to
+					and host_support_tile == transition_from
+					and transition_age >= HOST_JUMP_ECHO_GRACE_MSEC
+				)
 			# When terrain proves the local predicted support is absent and the host
 			# pose is on support, this is a stale local arc, not evidence that the
 			# intended edge was rejected. Reseat without poisoning the transition.
-			var host_rejected_air_motion := host_grounded and not host_support_reseat and not fresh_takeoff_echo and (
-				not host_confirmed_near_landing
+			var host_rejected_air_motion := (
+				host_grounded
+				and not fresh_takeoff_echo
+				and (not host_support_reseat or host_rejected_transition_at_source)
+				and not host_confirmed_near_landing
 				and local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
 				and (
 					_jump_active

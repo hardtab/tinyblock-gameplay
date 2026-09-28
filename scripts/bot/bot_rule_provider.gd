@@ -1310,8 +1310,10 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 		# The long-range explore target must itself be on the proven support graph.
 		# The executor keeps its independent route/edge guards as a second check,
 		# but policy must not repeatedly aim into ungenerated air and never move.
-		_last_explore_target_id = ""
-		_last_explore_support_tile.clear()
+		# Keep the identity of the last issued target until its terminal outcome is
+		# consumed. A brief airborne/unknown-origin observation can have no safe
+		# waypoint; clearing the identity here would make the ensuing timeout
+		# uncountable and allow the same failed frontier to be chosen forever.
 		return {}
 	_explore_direction = selected_direction
 	var label := "left" if _explore_direction < 0 else "right"
