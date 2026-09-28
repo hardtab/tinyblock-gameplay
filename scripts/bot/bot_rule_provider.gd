@@ -297,8 +297,13 @@ func decide(observation: Dictionary) -> Dictionary:
 	var social_target_id := str(social_target.get("id", observation.get("social_target_id", "")))
 	var social_distance := float(social_target.get("distance", 9999.0))
 	var preferred_distance := float(observation.get("preferred_player_distance", PREFERRED_PLAYER_DISTANCE))
+	# During starter-wood search, the player's surroundings are already in the
+	# wide resource scan. Returning to that player cannot reveal a new tree.
+	var scanned_player := float(observation.get("resource_scan_radius", 0.0)) > 0.0 and social_distance <= float(observation.get("resource_scan_radius", 0.0))
 	var welcome_emoji := str(observation.get("social_emoji", ""))
 	var bridge_step := _approach_bridge_step(observation, social_target)
+	if scanned_player:
+		bridge_step = {}
 	# A pending wave should wait until the bot can actually reach the player.
 	# Crossing the gap comes first; the same emoji stays available next decision.
 	var social_bridge_ready := (
@@ -621,7 +626,7 @@ func decide(observation: Dictionary) -> Dictionary:
 	# the nearby achievement, gathering, and building opportunities have been
 	# checked; otherwise a player standing beside the bot would starve all useful
 	# actions and leave the avatar idling at their shoulder.
-	var follow_threshold := preferred_distance + SOCIAL_FOLLOW_START_SLACK
+	var follow_threshold := maxf(preferred_distance + SOCIAL_FOLLOW_START_SLACK, float(observation.get("resource_scan_radius", 0.0)))
 	if (
 		not social_target_id.is_empty()
 		and social_distance > follow_threshold
