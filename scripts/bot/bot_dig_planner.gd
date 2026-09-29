@@ -100,7 +100,10 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	if not _solid(terrain, origin.x, origin.y):
 		return {}
 	var waypoints: Array = observation.get("safe_exploration_waypoints", []) if observation.get("safe_exploration_waypoints", []) is Array else []
-	if _has_useful_escape_waypoint(waypoints, observation, self_state, origin):
+	var upward_move := _upward_escape_waypoint_step(waypoints, observation, self_state, origin)
+	if not upward_move.is_empty():
+		return upward_move
+	if not waypoints.is_empty() and not _player_above_origin(observation, self_state):
 		return {}
 	var best := _invalid_tile()
 	var best_score := 999999
@@ -155,22 +158,41 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	return {}
 
 
-static func _has_useful_escape_waypoint(waypoints: Array, observation: Dictionary, self_state: Dictionary, origin: Vector2i) -> bool:
-	if waypoints.is_empty():
-		return false
+static func _player_above_origin(observation: Dictionary, self_state: Dictionary) -> bool:
 	var players: Array = observation.get("players", []) if observation.get("players", []) is Array else []
-	var nearest_player := Vector2.ZERO
-	var player_distance := INF
 	var self_position := Vector2(float(self_state.get("x", 0.0)), float(self_state.get("y", 0.0)))
 	for raw_player in players:
 		if not raw_player is Dictionary or not bool((raw_player as Dictionary).get("alive", true)):
 			continue
 		var player := raw_player as Dictionary
 		var position := Vector2(float(player.get("x", 0.0)), float(player.get("y", 0.0)))
+		if position.y <= self_position.y - float(TILE) * 1.5 and self_position.distance_to(position) <= float(TILE * MAX_TARGET_DISTANCE_TILES):
+			return true
+	return false
+
+
+static func _upward_escape_waypoint_step(waypoints: Array, observation: Dictionary, self_state: Dictionary, origin: Vector2i) -> Dictionary:
+	if waypoints.is_empty() or not _player_above_origin(observation, self_state):
+		return {}
+	var self_position := Vector2(float(self_state.get("x", 0.0)), float(self_state.get("y", 0.0)))
+	var players: Array = observation.get("players", []) if observation.get("players", []) is Array else []
+	var player_position := Vector2.ZERO
+	var player_distance := INF
+	for raw_player in players:
+		if not raw_player is Dictionary or not bool((raw_player as Dictionary).get("alive", true)):
+			continue
+		var player := raw_player as Dictionary
+		var position := Vector2(float(player.get("x", 0.0)), float(player.get("y", 0.0)))
+		if position.y > self_position.y - float(TILE) * 1.5:
+			continue
 		var distance := self_position.distance_to(position)
 		if distance < player_distance:
 			player_distance = distance
-			nearest_player = position
+			player_position = position
+	var blocked: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	var now := int(observation.get("observed_at_msec", 0))
+	var best: Dictionary = {}
+	var best_score := INF
 	for raw_waypoint in waypoints:
 		if not raw_waypoint is Dictionary:
 			continue
@@ -181,14 +203,32 @@ static func _has_useful_escape_waypoint(waypoints: Array, observation: Dictionar
 		if not raw_tile is Array or (raw_tile as Array).size() < 2:
 			continue
 		var tile := Vector2i(int((raw_tile as Array)[0]), int((raw_tile as Array)[1]))
-		if tile.y < origin.y:
-			return true
-		if player_distance == INF:
-			return true
+		if tile.y > origin.y or tile == origin or absi(tile.x - origin.x) > 4:
+			continue
+		var move_id := "pit-return:%d:%d" % [tile.x, tile.y]
+		if int(blocked.get(move_id, 0)) > now:
+			continue
 		var candidate := Vector2(float(tile.x * TILE + 6), float(tile.y * TILE - 28))
-		if candidate.distance_to(nearest_player) + float(TILE) * 0.5 < player_distance:
-			return true
-	return false
+		var remaining := candidate.distance_to(player_position)
+		var rise := origin.y - tile.y
+		if rise == 0 and remaining + 8.0 >= player_distance:
+			continue
+		if rise > 0 and remaining > player_distance + float(TILE) * 2.0:
+			continue
+		var score := remaining + float(int(waypoint.get("route_steps", 1))) * 8.0 - float(rise * TILE)
+		if score < best_score:
+			best_score = score
+			best = {"id": move_id, "position": [candidate.x, candidate.y], "support_tile": [tile.x, tile.y], "distance": self_position.distance_to(candidate), "reachable": true}
+	if best.is_empty():
+		return {}
+	return {
+		"action": Contract.ACTION_MOVE_TO,
+		"goal": Contract.GOAL_DIG_ROUTE,
+		"target_id": str(best["id"]),
+		"target": best,
+		"commit_for_ms": 2200,
+		"confidence": 0.82,
+	}
 
 
 ## If a narrow raised platform has no useful round-trip waypoint, open a

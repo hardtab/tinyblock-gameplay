@@ -7020,9 +7020,9 @@ func _complete_build_project(project_id: String, now_msec: int) -> void:
 
 
 func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
-	if _made_container_route_progress(decision, reason):
+	if _made_bounded_route_progress(decision, reason):
 		# A short movement window is not a failed route when it advanced toward
-		# the same chest. Keep that goal eligible on the next decision tick.
+		# the same chest or pit exit. Keep that goal eligible on the next tick.
 		reason = "route_progress"
 	_log_movement_stall_probe(decision, reason)
 	_clear_aborted_movement_transition_if_needed(decision, reason)
@@ -7040,6 +7040,8 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 		# unexecutable from the current pose). Do not hammer the same return step
 		# every decision tick; allow terrain/position updates and other safe work.
 		_blocked_action_targets[target_id] = Time.get_ticks_msec() + DESCENT_RETURN_ROUTE_RETRY_MSEC
+	if target_id.begins_with("pit-return:") and reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "unsafe_drop_route", "route_unreachable", "lava_guard", "timeout"]:
+		_blocked_action_targets[target_id] = Time.get_ticks_msec() + ACTION_RETRY_BLOCK_MSEC
 	if (
 		str(decision.get("action", "")) in [Contract.ACTION_MOVE_TO, Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW]
 		and reason in [
@@ -7087,10 +7089,11 @@ func _log_movement_stall_probe(decision: Dictionary, reason: String) -> void:
 	})
 
 
-func _made_container_route_progress(decision: Dictionary, reason: String) -> bool:
+func _made_bounded_route_progress(decision: Dictionary, reason: String) -> bool:
 	if reason != "timeout" or str(decision.get("action", "")) != Contract.ACTION_MOVE_TO:
 		return false
-	if not str(decision.get("target_id", "")).begins_with("container:"):
+	var target_id := str(decision.get("target_id", ""))
+	if not (target_id.begins_with("container:") or target_id.begins_with("pit-return:")):
 		return false
 	var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
