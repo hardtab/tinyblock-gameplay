@@ -23,6 +23,133 @@ const SUPPORT_BLOCK_NAMES: PackedStringArray = [
 const PLANK_BLOCK_NAMES: PackedStringArray = [
 	"planks", "palm_planks", "pine_planks", "weeping_planks",
 ]
+const SKYBLOCK_HOME_EXPANSION_LIMIT := 4
+const SKYBLOCK_LEAF_RESERVE := 8
+const SKYBLOCK_LAVA_CLEARANCE_TILES := 3
+
+
+## A finite Skyblock island needs a usable work area even when no distant
+## resource/player supplies a route destination. Build only from a reachable
+## exterior edge, keep a material reserve, and stop after a bounded project.
+## A chest on the new pad makes the extension a functional outpost rather than
+## a directionless bridge. The host still validates every placement.
+static func skyblock_home_step(observation: Dictionary) -> Dictionary:
+	if str(observation.get("world_mode", "")).to_lower() != "skyblock" or bool(observation.get("placement_pending", false)):
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if not bool(self_state.get("on_ground", false)):
+		return {}
+	var origin := _support_tile(self_state)
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	if not _solid(terrain, origin.x, origin.y):
+		return {}
+	var protected: Dictionary = observation.get("protected_build_cells", {}) if observation.get("protected_build_cells", {}) is Dictionary else {}
+	var blocked: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	var now := int(observation.get("observed_at_msec", 0))
+	var completed: Array[Vector2i] = []
+	for raw_key in protected:
+		var record: Dictionary = protected[raw_key] if protected[raw_key] is Dictionary else {}
+		if str(record.get("reason", "")) != "skyblock_expand" or not bool(record.get("confirmed", false)):
+			continue
+		var parts := str(raw_key).split(":")
+		if parts.size() == 2:
+			completed.append(Vector2i(int(parts[0]), int(parts[1])))
+	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	if completed.size() >= 2 and int(inventory.get("chest", 0)) > 0:
+		completed.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return abs(a.x - origin.x) < abs(b.x - origin.x))
+		for foundation in completed:
+			var chest_tile := foundation + Vector2i.UP
+			if not _solid(terrain, foundation.x, foundation.y) or not _empty(terrain, chest_tile.x, chest_tile.y):
+				continue
+			if not _empty(terrain, chest_tile.x, chest_tile.y - 1) or _overlaps_any_player(chest_tile, observation):
+				continue
+			if _lava_near(terrain, chest_tile, SKYBLOCK_LAVA_CLEARANCE_TILES):
+				continue
+			if int(blocked.get("tile:%d:%d" % [chest_tile.x, chest_tile.y], 0)) > now:
+				continue
+			if absi(foundation.x - origin.x) <= MAX_PLACEMENT_REACH_TILES and absi(foundation.y - origin.y) <= MAX_PLACEMENT_REACH_TILES:
+				var chest := _placement(chest_tile, origin, _invalid_tile(), "chest", "skyblock_home_chest")
+				chest["action"] = Contract.ACTION_PLACE
+				return chest
+			var chest_route := _known_safe_worksite(observation, foundation)
+			if not chest_route.is_empty():
+				return chest_route
+	if completed.size() >= SKYBLOCK_HOME_EXPANSION_LIMIT:
+		return {}
+	var block_name := _skyblock_home_support_block(inventory)
+	if block_name.is_empty():
+		return {}
+	var best := {}
+	var best_score := INF
+	var worksites: Array[Vector2i] = [origin]
+	for raw_waypoint in _as_array(observation.get("safe_exploration_waypoints", [])):
+		if not raw_waypoint is Dictionary:
+			continue
+		var waypoint := raw_waypoint as Dictionary
+		if not bool(waypoint.get("reachable", false)):
+			continue
+		var raw_tile: Array = waypoint.get("support_tile", []) if waypoint.get("support_tile", []) is Array else []
+		if raw_tile.size() == 2:
+			worksites.append(Vector2i(int(raw_tile[0]), int(raw_tile[1])))
+	for worksite in worksites:
+		if not _solid(terrain, worksite.x, worksite.y) or not _empty(terrain, worksite.x, worksite.y - 1) or not _empty(terrain, worksite.x, worksite.y - 2):
+			continue
+		for direction in [-1, 1]:
+			var target := worksite + Vector2i(direction, 0)
+			if not _empty(terrain, target.x, target.y) or not _empty(terrain, target.x, target.y + 1) or not _empty(terrain, target.x, target.y + 2):
+				continue
+			if not _empty(terrain, target.x, target.y - 1) or not _empty(terrain, target.x, target.y - 2):
+				continue
+			if _lava_near(terrain, target, SKYBLOCK_LAVA_CLEARANCE_TILES) or _overlaps_any_player(target, observation):
+				continue
+			if protected.has("%d:%d" % [target.x, target.y]) or int(blocked.get("tile:%d:%d" % [target.x, target.y], 0)) > now:
+				continue
+			var score := origin.distance_to(worksite) + float(completed.size()) * 0.01
+			if score >= best_score:
+				continue
+			best_score = score
+			if absi(worksite.x - origin.x) <= MAX_PLACEMENT_REACH_TILES and absi(worksite.y - origin.y) <= MAX_PLACEMENT_REACH_TILES:
+				best = _placement(target, origin, _invalid_tile(), block_name, "skyblock_expand")
+				best["action"] = Contract.ACTION_PLACE
+			else:
+				best = _known_safe_worksite(observation, worksite)
+	return best
+
+
+static func _skyblock_home_support_block(inventory: Dictionary) -> String:
+	for name in SUPPORT_BLOCK_NAMES:
+		if int(inventory.get(name, 0)) > 1:
+			return name
+	for name in PLANK_BLOCK_NAMES:
+		if int(inventory.get(name, 0)) > 4:
+			return name
+	for name in ["leaves", "palm_leaves", "pine_needles", "weeping_leaves"]:
+		if int(inventory.get(name, 0)) > SKYBLOCK_LEAF_RESERVE:
+			return name
+	return ""
+
+
+static func _known_safe_worksite(observation: Dictionary, tile: Vector2i) -> Dictionary:
+	for raw_waypoint in _as_array(observation.get("safe_exploration_waypoints", [])):
+		if not raw_waypoint is Dictionary:
+			continue
+		var waypoint := raw_waypoint as Dictionary
+		if waypoint.get("support_tile", []) == [tile.x, tile.y] and bool(waypoint.get("reachable", false)):
+			return {
+				"action": Contract.ACTION_MOVE_TO,
+				"id": "skyblock:worksite:%d:%d" % [tile.x, tile.y],
+				"position": waypoint.get("position", []),
+				"support_tile": [tile.x, tile.y],
+			}
+	return {}
+
+
+static func _lava_near(terrain: Dictionary, tile: Vector2i, radius: int) -> bool:
+	for dy in range(-radius, radius + 1):
+		for dx in range(-radius, radius + 1):
+			if str(terrain.get("%d:%d" % [tile.x + dx, tile.y + dy], "")).to_lower().contains("lava"):
+				return true
+	return false
 
 
 static func next_step(observation: Dictionary) -> Dictionary:

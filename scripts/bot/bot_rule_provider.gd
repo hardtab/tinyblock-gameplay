@@ -570,6 +570,19 @@ func decide(observation: Dictionary) -> Dictionary:
 		var meal_target := _craftable_food_output(observation)
 		if not meal_target.is_empty() and Contract.ACTION_CRAFT in legal:
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_CRAFT, {"id": meal_target}, 700, 0.93)
+	# Skyblock's finite island is the project itself. Once foundational tooling
+	# is handled, spend surplus material on a connected work area and its chest
+	# instead of searching indefinitely for ore absent from the island.
+	if mode == "skyblock":
+		if not craft_target.is_empty() and Contract.ACTION_CRAFT in legal:
+			return _decision(Contract.GOAL_BUILD, Contract.ACTION_CRAFT, {"id": craft_target}, 700, 0.9)
+		var skyblock_home := BuildPlanner.skyblock_home_step(observation)
+		var skyblock_action := str(skyblock_home.get("action", ""))
+		if skyblock_action in legal:
+			return _tag_useful_home_placement(
+				_decision(Contract.GOAL_BUILD, skyblock_action, skyblock_home, 900 if skyblock_action == Contract.ACTION_PLACE else 2200, 0.86),
+				observation,
+			)
 	# After Stone Age and the active mode objective, continue through real
 	# mid-tier tool recipes one verified dependency at a time. If a required
 	# resource is not currently reachable, the helper yields to other behaviour
@@ -2525,6 +2538,7 @@ func _tag_useful_home_placement(decision: Dictionary, observation: Dictionary) -
 		or reason == "place_station"
 		or reason == "station_work_area"
 		or (reason == "expand_platform" and str(observation.get("world_mode", "")).to_lower() == "one_block")
+		or (reason in ["skyblock_expand", "skyblock_home_chest"] and str(observation.get("world_mode", "")).to_lower() == "skyblock")
 	)
 	if not useful_placement or _open_achievement(observation, "here_will_be_home").is_empty():
 		return decision
