@@ -63,6 +63,16 @@ static func next_step(observation: Dictionary, explicit_route_target: Dictionary
 		if not _solid(terrain, next_x, origin.y) or _solid(terrain, origin.x, origin.y - 3):
 			return _mine_step(next_x, origin.y - 1, origin, target, observation)
 		return {}
+	if target.y > origin.y:
+		# A lower destination needs a one-step descending landing, not a bridge
+		# stranded at the current height. Clear only the next landing's two body
+		# cells, then attach its support to the known column beneath our feet.
+		for body_y in [origin.y, origin.y - 1]:
+			if _solid(terrain, next_x, body_y):
+				return _mine_step(next_x, body_y, origin, target, observation)
+		if not _solid(terrain, next_x, origin.y + 1):
+			return _place_down_step(next_x, origin.y + 1, origin, target, observation, terrain)
+		return {}
 	# Clear the two-cell player corridor before trying to walk through a wall.
 	for head_y in [origin.y - 1, origin.y - 2]:
 		if _solid(terrain, next_x, head_y):
@@ -234,6 +244,39 @@ static func _place_step(
 		"block": block,
 		"commit_for_ms": 900,
 		"confidence": 0.7,
+	}
+
+
+static func _place_down_step(x: int, y: int, origin: Vector2i, target: Vector2i, observation: Dictionary, terrain: Dictionary) -> Dictionary:
+	if (
+		y != origin.y + 1
+		or not _solid(terrain, origin.x, y)
+		or not _known_empty_cell(observation, terrain, x, y)
+		or not _known_empty_cell(observation, terrain, x, y - 1)
+		or not _known_empty_cell(observation, terrain, x, y - 2)
+		or _retry_cooldown_active(observation, x, y)
+		or _overlaps_any_player(Vector2i(x, y), observation)
+	):
+		return {}
+	var block := _support_block(observation)
+	if block.is_empty():
+		return {}
+	return {
+		"action": Contract.ACTION_PLACE,
+		"goal": Contract.GOAL_DIG_ROUTE,
+		"target_id": "dig-step:%d:%d" % [x, y],
+		"target": {
+			"id": "dig-step:%d:%d" % [x, y],
+			"x": x,
+			"y": y,
+			"dig_route": true,
+			"combat_route": bool(observation.get("pvp_world", false)),
+			"route_target": [target.x, target.y],
+			"origin": [origin.x, origin.y],
+		},
+		"block": block,
+		"commit_for_ms": 900,
+		"confidence": 0.74,
 	}
 
 

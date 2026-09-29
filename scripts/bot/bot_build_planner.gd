@@ -52,6 +52,11 @@ static func next_step(observation: Dictionary) -> Dictionary:
 			# Do not disguise a route that cannot be built horizontally as an
 			# unrelated platform expansion.
 			return {}
+		if goal.y > origin.y:
+			# The dig-route planner clears headroom and adds a lower attached step.
+			# A level bridge here increases distance from the lower destination and
+			# can leave the avatar marooned above its original platform.
+			return {}
 		if goal_direction != 0 and goal.y < origin.y:
 			var step := _supported_stair(origin, goal_direction, goal, terrain, observation, block_name, build_project)
 			if not step.is_empty():
