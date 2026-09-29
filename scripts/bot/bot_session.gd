@@ -6193,7 +6193,10 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 func _terrain_known_cell_window(self_state: Dictionary) -> Dictionary:
 	var known_cells: Dictionary = {}
 	var origin := _support_tile_for_position(Contract.target_position(self_state))
-	for tile_y in range(origin.y - 4, origin.y + 3):
+	# A three-step climb needs both empty cells above its landing. The terrain
+	# observation already reaches eight rows up; exposing six *known* rows lets
+	# the pit planner verify that headroom without treating unseen air as empty.
+	for tile_y in range(origin.y - 6, origin.y + 3):
 		for tile_x in range(origin.x - 4, origin.x + 5):
 			if _terrain_cell_is_known(tile_x, tile_y):
 				known_cells["%d:%d" % [tile_x, tile_y]] = true
