@@ -3242,6 +3242,11 @@ func _approach_bridge_step(observation: Dictionary, social_target: Dictionary) -
 	var origin := Vector2i(floori((float(self_state.get("x", 0.0)) + 10.0) / tile), floori((float(self_state.get("y", 0.0)) + 28.0) / tile))
 	var approach_position := Contract.target_position(approach)
 	var approach_tile := Vector2i(floori((approach_position.x + 10.0) / tile), floori((approach_position.y + 28.0) / tile))
+	if approach_tile.y > origin.y and not DigPlanner.next_step(observation, approach).is_empty():
+		# A known attached lower landing is more useful than extending a level
+		# bridge above the player. Let the later dig-route pass clear/place that
+		# one-step descent; true gaps with no safe descent retain bridge fallback.
+		return {}
 	var direction := signi(approach_tile.x - origin.x)
 	if direction == 0:
 		return {}
