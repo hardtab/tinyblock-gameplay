@@ -3,6 +3,7 @@ extends Node
 
 const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
 const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
+const BuildPlanner = preload("res://gameplay/scripts/bot/bot_build_planner.gd")
 const Navigator = preload("res://gameplay/scripts/bot/bot_navigator.gd")
 const BlockDefs = preload("res://gameplay/scripts/block_defs.gd")
 const WorldScriptResource = preload("res://gameplay/scripts/world.gd")
@@ -185,6 +186,8 @@ var _jump_velocity := 0.0
 var _jump_ground_y := 0.0
 var _jump_start_x := 0.0
 var _jump_started_msec := -1
+var _decision_probe_observation: Dictionary = {}
+var _last_island_idle_probe_msec := -1
 var _climb_active := false
 var _climb_column := 0
 var _climb_time_left_msec := 0
@@ -441,6 +444,8 @@ func join_session(record: Dictionary) -> void:
 	_jump_ground_y = 0.0
 	_jump_start_x = 0.0
 	_jump_started_msec = -1
+	_decision_probe_observation.clear()
+	_last_island_idle_probe_msec = -1
 	_climb_active = false
 	_climb_column = 0
 	_climb_time_left_msec = 0
@@ -830,6 +835,7 @@ func _process(delta: float) -> void:
 		_check_empty_world_grace(now_msec)
 		return
 	var observation := _build_observation(now_msec)
+	_decision_probe_observation = observation
 	if _is_pvp_world() and not _duel_started and now_msec - _last_duel_ready_msec >= 1000:
 		_send_duel_ready(now_msec)
 	# The brain may run at a much lower cadence than physics. Reset the held
@@ -837,6 +843,7 @@ func _process(delta: float) -> void:
 	_desired_input = {"left": false, "right": false, "jump": false}
 	_physics_advanced_this_frame = false
 	behavior.tick(observation, delta, now_msec)
+	_decision_probe_observation = {}
 	_advance_local_physics_if_needed(delta)
 	_send_player_input_if_due(now_msec)
 	# Keep the legacy snapshot during rollout. New hosts ignore its coordinates
@@ -6608,7 +6615,37 @@ func _active_emoji_events(now_msec: int) -> Array[Dictionary]:
 func _on_decision_proposed(decision: Dictionary) -> void:
 	var now_msec := Time.get_ticks_msec()
 	_stone_age_note_no_action(decision, now_msec)
+	_log_island_idle_probe(decision, now_msec)
 	decision_logged.emit({"event": "decision_proposed", "decision": decision.duplicate(true), "at_msec": now_msec})
+
+
+func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
+	var mode := str(_decision_probe_observation.get("world_mode", ""))
+	if mode not in ["skyblock", "floating_islands"] or str(decision.get("action", "")) not in [Contract.ACTION_WAIT, Contract.ACTION_LOOK_AT]:
+		return
+	if _last_island_idle_probe_msec >= 0 and now_msec - _last_island_idle_probe_msec < 15_000:
+		return
+	_last_island_idle_probe_msec = now_msec
+	var observation := _decision_probe_observation
+	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	var bridge: Dictionary = BuildPlanner.floating_island_bridge_step(observation) if mode == "floating_islands" else {}
+	var home: Dictionary = BuildPlanner.floating_island_home_step(observation) if mode == "floating_islands" else BuildPlanner.skyblock_home_step(observation)
+	var generator: Dictionary = BuildPlanner.island_stone_generator_step(observation)
+	var project: Dictionary = observation.get("build_project_state", {}) if observation.get("build_project_state", {}) is Dictionary else {}
+	structured_log.emit({
+		"event": "island_idle_probe",
+		"at_msec": now_msec,
+		"world_mode": mode,
+		"on_ground": bool((observation.get("self", {}) as Dictionary).get("on_ground", false)),
+		"visible_resources": (observation.get("visible_resources", []) as Array).size(),
+		"safe_waypoints": (observation.get("safe_exploration_waypoints", []) as Array).size(),
+		"usable_bridge_blocks": BuildPlanner._floating_bridge_usable_support_count(inventory) if mode == "floating_islands" else 0,
+		"bridge_shortfall": BuildPlanner.floating_island_bridge_material_shortfall(observation) if mode == "floating_islands" else 0,
+		"bridge_action": str(bridge.get("action", "")),
+		"home_action": str(home.get("action", "")),
+		"generator_action": str(generator.get("action", "")),
+		"project_status": str(project.get("status", "")),
+	})
 
 
 func _stone_age_note_no_action(decision: Dictionary, now_msec: int) -> void:
