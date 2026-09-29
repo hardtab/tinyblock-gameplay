@@ -582,6 +582,12 @@ static func island_stone_generator_step(observation: Dictionary) -> Dictionary:
 				# after the bot placed an overhead bridge block.
 				if not _solid(terrain, work_x, row) or not _empty(terrain, work_x, row - 1):
 					continue
+				# A worksite one tile from the source is safe only when reached
+				# along a level, supported exterior corridor. A graph waypoint can
+				# otherwise route off a nearby raised station, then the guest falls
+				# into the lava while the host corrects that speculative jump.
+				if origin != worksite and not _generator_level_approach(terrain, origin, worksite, int(lava["x"])):
+					continue
 				var waypoint := {} if origin == worksite else _known_safe_worksite(observation, worksite)
 				if origin != worksite and waypoint.is_empty():
 					continue
@@ -618,6 +624,15 @@ static func island_stone_generator_step(observation: Dictionary) -> Dictionary:
 		target["generator_channel"] = true
 		return {"action": Contract.ACTION_MINE, "target": target}
 	return {}
+
+
+static func _generator_level_approach(terrain: Dictionary, origin: Vector2i, worksite: Vector2i, lava_x: int) -> bool:
+	if origin.y != worksite.y or signi(origin.x - lava_x) != signi(worksite.x - lava_x):
+		return false
+	for x in range(mini(origin.x, worksite.x), maxi(origin.x, worksite.x) + 1):
+		if not _solid(terrain, x, worksite.y) or not _empty(terrain, x, worksite.y - 1):
+			return false
+	return true
 
 
 static func _floating_bridge_block(observation: Dictionary, remaining: int) -> String:
