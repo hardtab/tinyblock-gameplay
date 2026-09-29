@@ -29,7 +29,7 @@ static func next_step(observation: Dictionary, explicit_route_target: Dictionary
 	var terrain := _terrain_map(observation.get("terrain_tiles", []))
 	if terrain.is_empty():
 		return {}
-	var origin := _support_tile(observation.get("self", {}))
+	var origin := _grounded_support_tile(observation.get("self", {}), terrain)
 	# A climbing/ghosted avatar can end up with its body inside wood or leaves.
 	# Route searches then have no usable origin, while the ordinary gatherer
 	# rejects the same block as unapproachable. Clear only the occupied body cell,
@@ -85,6 +85,74 @@ static func next_step(observation: Dictionary, explicit_route_target: Dictionary
 		# An unsupported void is unsafe to bridge without a nearby lower support.
 		return {}
 	return {}
+
+
+## When ordinary route search has no safe waypoint, a grounded avatar in a
+## shallow excavation can still work toward a *seen* higher landing. Return
+## only one ordinary, host-checked dig/step action; never invent a route through
+## unknown terrain or choose a landing beside harmful fluid.
+static func trapped_upward_step(observation: Dictionary) -> Dictionary:
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if not bool(self_state.get("on_ground", false)):
+		return {}
+	var waypoints: Array = observation.get("safe_exploration_waypoints", []) if observation.get("safe_exploration_waypoints", []) is Array else []
+	if not waypoints.is_empty():
+		return {}
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var origin := _grounded_support_tile(self_state, terrain)
+	if not _solid(terrain, origin.x, origin.y):
+		return {}
+	var best := _invalid_tile()
+	var best_score := 999999
+	for raw_tile in observation.get("terrain_tiles", []):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		var candidate := Vector2i(int(tile.get("x", 0)), int(tile.get("y", 0)))
+		var dx := absi(candidate.x - origin.x)
+		var rise := origin.y - candidate.y
+		if dx < 1 or dx > 4 or rise < 1 or rise > 3 or not _solid(terrain, candidate.x, candidate.y):
+			continue
+		if not _known_empty_cell(observation, terrain, candidate.x, candidate.y - 1) or not _known_empty_cell(observation, terrain, candidate.x, candidate.y - 2):
+			continue
+		if _overlaps_any_player(candidate, observation) or _near_harmful_fluid(candidate, observation):
+			continue
+		var score := dx * 4 + rise
+		if score < best_score:
+			best = candidate
+			best_score = score
+	if best == _invalid_tile():
+		return {}
+	return next_step(observation, {"x": float(best.x * TILE + 6), "y": float(best.y * TILE - 28)})
+
+
+static func _near_harmful_fluid(candidate: Vector2i, observation: Dictionary) -> bool:
+	for raw_tile in observation.get("terrain_tiles", []):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		if not bool(tile.get("harmful_fluid", false)) and not str(tile.get("block_name", tile.get("content_id", ""))).to_lower().contains("lava"):
+			continue
+		if absi(int(tile.get("x", 0)) - candidate.x) <= 1 and absi(int(tile.get("y", 0)) - candidate.y) <= 1:
+			return true
+	return false
+
+
+static func _grounded_support_tile(raw_self: Variant, terrain: Dictionary) -> Vector2i:
+	var center := _support_tile(raw_self)
+	if _solid(terrain, center.x, center.y) or not raw_self is Dictionary:
+		return center
+	var self_state := raw_self as Dictionary
+	if not bool(self_state.get("on_ground", false)):
+		return center
+	var left := float(self_state.get("x", 0.0))
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var foot_left := floori((left + 3.0) / float(TILE))
+	var foot_right := floori((left + width - 3.001) / float(TILE))
+	for x in range(foot_left, foot_right + 1):
+		if _solid(terrain, x, center.y):
+			return Vector2i(x, center.y)
+	return center
 
 
 static func _target_tile(observation: Dictionary, origin: Vector2i, explicit_route_target: Dictionary = {}) -> Vector2i:

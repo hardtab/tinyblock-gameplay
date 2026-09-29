@@ -693,6 +693,12 @@ func decide(observation: Dictionary) -> Dictionary:
 		var dig_action := str(dig_step.get("action", ""))
 		if dig_action in legal:
 			return Contract.normalize_decision(dig_step)
+	# A bot below the surrounding surface can have no graph-reachable exploration
+	# frontier and no distant player/resource target. Let the same bounded dig
+	# planner make one safe upward repair toward a host-observed landing.
+	var pit_escape_step := DigPlanner.trapped_upward_step(observation)
+	if not pit_escape_step.is_empty() and str(pit_escape_step.get("action", "")) in legal:
+		return Contract.normalize_decision(pit_escape_step)
 	if movement_stalled:
 		var stalled_escape := _blocked_exploration_dig_step(observation, legal, true)
 		if not stalled_escape.is_empty():
