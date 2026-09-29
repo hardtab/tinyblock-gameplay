@@ -192,6 +192,17 @@ static func floating_island_bridge_step(observation: Dictionary) -> Dictionary:
 			var plan := floating_island_ramp_plan(source, island)
 			if plan.is_empty() or plan.size() >= best_cost:
 				continue
+			var first: Dictionary = plan[0]
+			var first_tile: Array = first.get("tile", [])
+			var first_worksite: Array = first.get("worksite", [])
+			if first_tile.size() != 2 or first_worksite.size() != 2:
+				continue
+			var tile := Vector2i(int(first_tile[0]), int(first_tile[1]))
+			var worksite := Vector2i(int(first_worksite[0]), int(first_worksite[1]))
+			if not _solid(terrain, worksite.x, worksite.y) or not _empty(terrain, tile.x, tile.y):
+				continue
+			if _lava_near(terrain, tile, SKYBLOCK_LAVA_CLEARANCE_TILES) or _worksite_corridor_has_lava(terrain, origin, worksite):
+				continue
 			if _floating_bridge_block(observation, plan.size()).is_empty():
 				continue
 			best_cost = plan.size()
