@@ -137,6 +137,12 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 		var upward := next_step(recovery_observation, {"x": float(best.x * TILE + 6), "y": float(best.y * TILE - 28)})
 		if not upward.is_empty():
 			return upward
+		# A higher landing can be visible while the adjacent approach floor was
+		# excavated. Restore its supported first step before trying the climb;
+		# never remove a station or extend into unknown/unsupported space.
+		var approach_floor := _restore_upward_approach_floor(origin, best, terrain, observation)
+		if not approach_floor.is_empty():
+			return approach_floor
 	# A one-high wall can seal the only same-level floor corridor while a higher
 	# landing is still out of reach. Clear its *body* cell only when its own
 	# support remains intact and known. This opens a reversible walk route in the
@@ -160,6 +166,30 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 		if not clear.is_empty():
 			return clear
 	return {}
+
+
+static func _restore_upward_approach_floor(origin: Vector2i, target: Vector2i, terrain: Dictionary, observation: Dictionary) -> Dictionary:
+	var direction := signi(target.x - origin.x)
+	if direction == 0:
+		return {}
+	var side_x := origin.x + direction
+	var floor_tile := Vector2i(side_x, origin.y)
+	if (
+		_solid(terrain, floor_tile.x, floor_tile.y)
+		or not _known_empty_cell(observation, terrain, floor_tile.x, floor_tile.y)
+		or not _solid(terrain, floor_tile.x, floor_tile.y + 1)
+		or not _known_empty_cell(observation, terrain, floor_tile.x, floor_tile.y - 1)
+		or _near_harmful_fluid(floor_tile, observation)
+	):
+		return {}
+	# Two clear body/headroom cells make the repaired floor a standable,
+	# reversible route step. Clear only the observed overhead obstacle first;
+	# _mine_step checks tools, stations, protection, player support and reach.
+	if _solid(terrain, floor_tile.x, floor_tile.y - 2):
+		return _mine_step(floor_tile.x, floor_tile.y - 2, origin, target, observation)
+	if not _known_empty_cell(observation, terrain, floor_tile.x, floor_tile.y - 2):
+		return {}
+	return _place_step(floor_tile.x, floor_tile.y, origin, target, observation, terrain)
 
 
 static func _player_above_origin(observation: Dictionary, self_state: Dictionary) -> bool:
