@@ -2973,8 +2973,12 @@ func _descent_return_action(observation: Dictionary, legal: PackedStringArray) -
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var tile_x := int(tile[0])
 	var tile_y := int(tile[1])
+	var target_id := "descent-return:%d:%d" % [tile_x, tile_y]
+	var blocked_targets: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	if int(blocked_targets.get(target_id, 0)) > int(observation.get("observed_at_msec", 0)):
+		return {}
 	var target := {
-		"id": "descent-return:%d:%d" % [tile_x, tile_y],
+		"id": target_id,
 		"position": [(float(tile_x) + 0.5) * 32.0 - float(self_state.get("w", 20.0)) * 0.5, float(tile_y) * 32.0 - float(self_state.get("h", 28.0))],
 		"support_tile": tile.duplicate(true),
 	}

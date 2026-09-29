@@ -276,6 +276,7 @@ const BUILD_PROJECT_MAX_FAILURES := 3
 const BUILD_PROJECT_RETRY_MSEC := 30_000
 const BUILD_PROJECT_ROUTE_REPLAN_MSEC := 500
 const ACTION_RETRY_BLOCK_MSEC := 8_000
+const DESCENT_RETURN_ROUTE_RETRY_MSEC := 12_000
 const MINE_REJECTION_RETRY_MSEC := 60_000
 const HARMFUL_FLUID_MINE_RETRY_MSEC := 300_000
 const STATION_ROUTE_RETRY_BLOCK_MSEC := 30_000
@@ -5370,6 +5371,14 @@ func _build_observation(now_msec: int) -> Dictionary:
 		_descent_terrain_map(),
 		_descent_coverage(),
 	)
+	if bool(_descent_last_plan.get("eligible", false)) and str(_descent_last_plan.get("phase", "")) == "move" and not _projected_descent_return_leg_is_executable(_descent_last_plan, snapshot["self"] as Dictionary):
+		# The descent planner proves a static support-graph route. Before taking
+		# the next lower step, also prove that ordinary player controls can make
+		# its first return jump from the *future* landing. A geometric staircase
+		# is not a safe exit when water/ceiling/collision blocks that jump arc.
+		_descent_last_plan["eligible"] = false
+		_descent_last_plan["verified_safe_exit"] = false
+		_descent_last_plan["reason"] = "return_jump_unexecutable"
 	snapshot["descent_plan"] = _descent_last_plan.duplicate(true)
 	snapshot["verified_safe_exit"] = bool(_descent_last_plan.get("eligible", false)) and bool(_descent_last_plan.get("verified_safe_exit", false))
 	snapshot["descent_protected_supports"] = (_descent_last_plan.get("protected_supports", []) as Array).duplicate(true)
@@ -5671,6 +5680,39 @@ func _safe_exploration_waypoints(self_state: Dictionary) -> Array[Dictionary]:
 	return result.duplicate(true)
 
 
+func _projected_descent_return_leg_is_executable(plan: Dictionary, self_state: Dictionary) -> bool:
+	var raw_next: Variant = plan.get("next_support", [])
+	var raw_route: Variant = plan.get("projected_return_route", [])
+	if not raw_next is Array or (raw_next as Array).size() < 2 or not raw_route is Array or (raw_route as Array).size() < 2:
+		return false
+	var route := raw_route as Array
+	var return_step: Dictionary = route[1] if route[1] is Dictionary else {}
+	var raw_return_tile: Variant = return_step.get("tile", [])
+	if not raw_return_tile is Array or (raw_return_tile as Array).size() < 2:
+		return false
+	var next_support := Vector2i(int((raw_next as Array)[0]), int((raw_next as Array)[1]))
+	var return_tile := Vector2i(int((raw_return_tile as Array)[0]), int((raw_return_tile as Array)[1]))
+	if next_support == return_tile or not _terrain_standable_tile(next_support) or not _terrain_standable_tile(return_tile):
+		return false
+	var projected_self := self_state.duplicate(true)
+	var landing := _world_position_for_support_tile(next_support)
+	projected_self["x"] = landing.x
+	projected_self["y"] = landing.y
+	projected_self["vx"] = 0.0
+	projected_self["vy"] = 0.0
+	projected_self["on_ground"] = true
+	var reachable := Navigator.physics_reachable_first_steps(
+		next_support,
+		Callable(self, "_terrain_standable_tile"),
+		Callable(self, "_terrain_climbable_tile"),
+		Navigator.MAX_PHYSICS_ROUTE_NODES,
+		Callable(self, "_physics_transition_allowed"),
+		_safe_jump_first_step_filter(projected_self),
+		_safe_jump_later_step_filter(projected_self),
+	)
+	return reachable.has(return_tile)
+
+
 func _descent_one_block_source() -> Vector2i:
 	if _session_world_mode != "one_block":
 		return Vector2i(2147483647, 2147483647)
@@ -5793,7 +5835,7 @@ func _active_blocked_action_targets(now_msec: int) -> Dictionary:
 	var targets: Dictionary = {}
 	for raw_key in _blocked_action_targets.keys():
 		var key := str(raw_key)
-		if not key.begins_with("tile:") and not key.begins_with("station:") and not key.begins_with("container:"):
+		if not key.begins_with("tile:") and not key.begins_with("station:") and not key.begins_with("container:") and not key.begins_with("descent-return:"):
 			continue
 		var blocked_until := int(_blocked_action_targets[raw_key])
 		if blocked_until <= now_msec:
@@ -6804,6 +6846,11 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 	if reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "route_unreachable", "lava_guard", "timeout"] and target_id.begins_with("tile:"):
 		var retry_delay := UNSAFE_ROUTE_RETRY_BLOCK_MSEC if reason in ["unsafe_jump_route", "route_unreachable"] else ACTION_RETRY_BLOCK_MSEC
 		_blocked_action_targets[target_id] = Time.get_ticks_msec() + retry_delay
+	if target_id.begins_with("descent-return:") and reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "unsafe_drop_route", "route_unreachable", "lava_guard"]:
+		# The host can change a formerly verified stair (or its jump arc can be
+		# unexecutable from the current pose). Do not hammer the same return step
+		# every decision tick; allow terrain/position updates and other safe work.
+		_blocked_action_targets[target_id] = Time.get_ticks_msec() + DESCENT_RETURN_ROUTE_RETRY_MSEC
 	if (
 		str(decision.get("action", "")) in [Contract.ACTION_MOVE_TO, Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW]
 		and reason in [
