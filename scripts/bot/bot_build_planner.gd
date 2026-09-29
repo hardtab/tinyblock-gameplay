@@ -104,6 +104,46 @@ static func next_step(observation: Dictionary) -> Dictionary:
 	return {}
 
 
+static func station_work_area_step(observation: Dictionary, station_name: String) -> Dictionary:
+	# A station in inventory is useful only if it can be placed beside a walkable
+	# surface. Extend that surface by one attached cell when no existing station
+	# footprint is available; this is a functional destination, not decoration.
+	var origin := _support_tile(observation.get("self", {}))
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	if not _solid(terrain, origin.x, origin.y):
+		return {}
+	var block_name := _support_block(observation)
+	if block_name.is_empty():
+		return {}
+	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	if str(observation.get("world_mode", "")).to_lower() == "skyblock" and int(inventory.get(block_name, 0)) <= 1:
+		return {}
+	# A supported empty footprint may simply be on a host-retry cooldown. Do
+	# not spend another block making a duplicate pad in that case.
+	for offset_x in [1, -1, 2, -2, 3, -3]:
+		var footprint := Vector2i(origin.x + offset_x, origin.y - 1)
+		if _empty(terrain, footprint.x, footprint.y) and _solid(terrain, footprint.x, footprint.y + 1) and not _overlaps_any_player(footprint, observation):
+			return {}
+	for direction in [1, -1]:
+		# An occupied station/work cell can obstruct walking above an otherwise
+		# continuous shelf. The new foundation still attaches to that shelf;
+		# station reach and navigation are validated separately by the host.
+		var run := _support_run(terrain, origin, direction)
+		var target := Vector2i(origin.x + direction * (run + 1), origin.y)
+		if abs(target.x - origin.x) > MAX_PLACEMENT_REACH_TILES:
+			continue
+		if not _placeable(terrain, target.x, target.y) or not _solid(terrain, target.x - direction, target.y):
+			continue
+		if not _empty(terrain, target.x, target.y - 1) or not _empty(terrain, target.x, target.y - 2):
+			continue
+		if _overlaps_any_player(target, observation) or _overlaps_any_player(target + Vector2i.UP, observation):
+			continue
+		var placement := _placement(target, origin, _invalid_tile(), block_name, "station_work_area")
+		placement["station"] = station_name
+		return placement
+	return {}
+
+
 static func _supported_stair(origin: Vector2i, direction: int, goal: Vector2i, terrain: Dictionary, observation: Dictionary, block_name: String, build_project: Dictionary) -> Dictionary:
 	var target := Vector2i(origin.x + direction, origin.y - 1)
 	# A stair is only valid when the block directly below already exists. This
@@ -211,6 +251,15 @@ static func _walkable_run(terrain: Dictionary, origin: Vector2i, direction: int)
 		if not _solid(terrain, x, origin.y):
 			break
 		if not _empty(terrain, x, origin.y - 1) or not _empty(terrain, x, origin.y - 2):
+			break
+		count += 1
+	return count
+
+
+static func _support_run(terrain: Dictionary, origin: Vector2i, direction: int) -> int:
+	var count := 0
+	for distance in range(1, MAX_GOAL_DISTANCE_TILES + 1):
+		if not _solid(terrain, origin.x + direction * distance, origin.y):
 			break
 		count += 1
 	return count

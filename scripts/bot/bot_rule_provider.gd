@@ -149,6 +149,7 @@ const MAX_NOURISHMENT := 100
 const STATION_NAMES := ["workbench", "furnace"]
 const FILLER_BLOCK_NAMES := ["dirt", "grass", "sand", "gravel", "snow", "ice"]
 const MAX_FILLER_RESERVE := 8
+const MAX_BACKGROUND_COBBLESTONE_RESERVE := 24
 # A narrower subset of the filler names that read as walkable surface in a
 # fresh world. Mining exposed grass/dirt/sand under or beside the bot opens a
 # pointless hole in the ground it is standing on. Buried filler and every
@@ -1189,6 +1190,11 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			continue
 		if block_name in FILLER_BLOCK_NAMES and filler_count >= MAX_FILLER_RESERVE and not regenerates_on_mine:
 			continue
+		# Natural stone drops cobblestone. Once a working reserve exists, mining
+		# the same generator cell again is not a new goal; explicit recipe and
+		# route planners can still request more when they need it.
+		if _is_cobblestone_source(block_name) and int(inventory.get("cobblestone", 0)) >= MAX_BACKGROUND_COBBLESTONE_RESERVE and not needs_cobblestone:
+			continue
 		# While a stone/furnace progression needs cobblestone, generic GATHER
 		# must not substitute arbitrary terrain removal for a route to stone.
 		# Explicit dig/descent plans can still clear these cells after proving a
@@ -1731,6 +1737,9 @@ func _station_progression_action(observation: Dictionary, foraging: bool) -> Dic
 		var placement := _station_place_target(observation, station_name)
 		if not placement.is_empty():
 			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, placement, 900, 0.97)
+		var work_area := BuildPlanner.station_work_area_step(observation, station_name)
+		if not work_area.is_empty():
+			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, work_area, 900, 0.93)
 	var needed_station := _needed_station_for_affordable_recipe(observation, foraging)
 	if needed_station.is_empty() or _station_is_available(observation, needed_station):
 		return {}
@@ -2295,6 +2304,7 @@ func _tag_useful_home_placement(decision: Dictionary, observation: Dictionary) -
 		(not project.is_empty() and has_route_target)
 		or (reason == "build_stair" and has_route_target)
 		or reason == "place_station"
+		or reason == "station_work_area"
 		or (reason == "expand_platform" and str(observation.get("world_mode", "")).to_lower() == "one_block")
 	)
 	if not useful_placement or _open_achievement(observation, "here_will_be_home").is_empty():
