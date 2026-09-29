@@ -155,6 +155,41 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	return {}
 
 
+## If a narrow raised platform has no useful round-trip waypoint, open a
+## one-block lower, supported landing beside it. Removing the adjacent upper
+## floor keeps the bot's own support intact and makes a reversible step down;
+## never excavate a station, another player's footing, or a fluid seal.
+static func isolated_platform_descent_step(observation: Dictionary) -> Dictionary:
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if not bool(self_state.get("on_ground", false)) or bool(observation.get("pvp_world", false)):
+		return {}
+	var waypoints: Array = observation.get("safe_exploration_waypoints", []) if observation.get("safe_exploration_waypoints", []) is Array else []
+	if waypoints.size() > 1:
+		return {}
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var origin := _grounded_support_tile(self_state, terrain)
+	if not _solid(terrain, origin.x, origin.y):
+		return {}
+	for direction in [-1, 1]:
+		var neighbor := origin + Vector2i(direction, 0)
+		var landing := neighbor + Vector2i.DOWN
+		if (
+			not _solid(terrain, neighbor.x, neighbor.y)
+			or not _solid(terrain, landing.x, landing.y)
+			or not _known_empty_cell(observation, terrain, neighbor.x, neighbor.y - 1)
+			or not _known_empty_cell(observation, terrain, neighbor.x, neighbor.y - 2)
+			or _near_harmful_fluid(landing, observation)
+			or _overlaps_any_player(landing, observation)
+		):
+			continue
+		var clearance := observation.duplicate(false)
+		clearance["allow_isolated_platform_descent"] = true
+		var mine := _mine_step(neighbor.x, neighbor.y, origin, landing, clearance)
+		if not mine.is_empty():
+			return mine
+	return {}
+
+
 static func _near_harmful_fluid(candidate: Vector2i, observation: Dictionary) -> bool:
 	for raw_tile in observation.get("terrain_tiles", []):
 		if not raw_tile is Dictionary:
@@ -245,7 +280,9 @@ static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, obser
 		# After repeated failed movement, one adjacent non-station wall block may
 		# be removed to escape a pocket the bot built around itself. Never clear a
 		# floor/support or a workbench/furnace; the descent guard below still applies.
-		if not bool(observation.get("allow_escape_clear_protected", false)) or abs(x - origin.x) != 1 or y not in [origin.y - 1, origin.y - 2] or str(_terrain_tile(observation, x, y).get("block_name", "")) not in SUPPORT_BLOCK_NAMES:
+		var upper_wall_clear: bool = bool(observation.get("allow_escape_clear_protected", false)) and abs(x - origin.x) == 1 and y in [origin.y - 1, origin.y - 2]
+		var adjacent_descent_clear: bool = bool(observation.get("allow_isolated_platform_descent", false)) and abs(x - origin.x) == 1 and y == origin.y and _solid(_terrain_map(observation.get("terrain_tiles", [])), x, y + 1)
+		if not (upper_wall_clear or adjacent_descent_clear) or str(_terrain_tile(observation, x, y).get("block_name", "")) not in SUPPORT_BLOCK_NAMES:
 			return {}
 	if _is_descent_return_support(observation, x, y):
 		# The generic obstacle planner must honor the same return-route invariant

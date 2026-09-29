@@ -872,6 +872,10 @@ func decide(observation: Dictionary) -> Dictionary:
 			if not idle_return_step.is_empty():
 				_returning_to_descent_root = true
 				return idle_return_step
+			if Contract.ACTION_MINE in legal and not bool(observation.get("pvp_world", false)):
+				var lower_landing_step := DigPlanner.isolated_platform_descent_step(observation)
+				if str(lower_landing_step.get("action", "")) == Contract.ACTION_MINE:
+					return Contract.normalize_decision(lower_landing_step)
 		return _decision(Contract.GOAL_IDLE, Contract.ACTION_WAIT, {}, _rng.randi_range(700, 1800), 0.45)
 	return _decision(Contract.GOAL_IDLE, str(legal[0]), {}, 500, 0.2)
 
