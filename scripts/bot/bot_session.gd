@@ -6480,6 +6480,10 @@ func _on_decision_started(decision: Dictionary) -> void:
 			pending_target["one_block_mined_before"] = int(_mode_progress_from_snapshot().get("one_block_mined", 0))
 		_pending_action_targets[key] = pending_target
 		if action == Contract.ACTION_PLACE:
+			# A placement result may arrive after the next policy tick. Keep the
+			# selected cell unavailable while its acknowledgement is in flight so
+			# the bot does not send duplicate PLACE commands against stale terrain.
+			_blocked_action_targets["tile:%s" % key] = now_msec + 2_200
 			var build_project: Dictionary = target.get("build_project", {}) if target.get("build_project", {}) is Dictionary else {}
 			if not build_project.is_empty():
 				_note_build_project_started(build_project, target, now_msec)

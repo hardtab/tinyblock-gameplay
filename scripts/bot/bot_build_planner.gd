@@ -116,6 +116,8 @@ static func station_work_area_step(observation: Dictionary, station_name: String
 	if block_name.is_empty():
 		return {}
 	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	var blocked_tiles: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	var now_msec := int(observation.get("observed_at_msec", 0))
 	if str(observation.get("world_mode", "")).to_lower() == "skyblock" and int(inventory.get(block_name, 0)) <= 1:
 		return {}
 	# A supported empty footprint may simply be on a host-retry cooldown. Do
@@ -130,6 +132,8 @@ static func station_work_area_step(observation: Dictionary, station_name: String
 		# station reach and navigation are validated separately by the host.
 		var run := _support_run(terrain, origin, direction)
 		var target := Vector2i(origin.x + direction * (run + 1), origin.y)
+		if int(blocked_tiles.get("tile:%d:%d" % [target.x, target.y], 0)) > now_msec:
+			continue
 		if abs(target.x - origin.x) > MAX_PLACEMENT_REACH_TILES:
 			continue
 		if not _placeable(terrain, target.x, target.y) or not _solid(terrain, target.x - direction, target.y):
