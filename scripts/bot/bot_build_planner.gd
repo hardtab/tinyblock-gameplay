@@ -82,6 +82,18 @@ static func skyblock_home_step(observation: Dictionary) -> Dictionary:
 	var best := {}
 	var best_score := INF
 	var worksites: Array[Vector2i] = [origin]
+	# A neighboring edge can be placed from the current supported foot without
+	# walking onto the edge at all. The round-trip waypoint graph deliberately
+	# omits some edge cells; that must not hide a safe two-tile-reach placement.
+	for offset in [-2, -1, 1, 2]:
+		var nearby := origin + Vector2i(offset, 0)
+		var connected := true
+		for step_x in range(mini(origin.x, nearby.x), maxi(origin.x, nearby.x) + 1):
+			if not _solid(terrain, step_x, origin.y) or not _empty(terrain, step_x, origin.y - 1) or not _empty(terrain, step_x, origin.y - 2):
+				connected = false
+				break
+		if connected:
+			worksites.append(nearby)
 	for raw_waypoint in _as_array(observation.get("safe_exploration_waypoints", [])):
 		if not raw_waypoint is Dictionary:
 			continue
