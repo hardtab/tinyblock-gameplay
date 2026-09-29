@@ -3481,6 +3481,8 @@ func _pvp_loadout_container(observation: Dictionary) -> Dictionary:
 
 
 func _approach_bridge_step(observation: Dictionary, social_target: Dictionary) -> Dictionary:
+	if bool(observation.get("placement_pending", false)):
+		return {}
 	var approach := social_target
 	var goal := Contract.GOAL_SOCIAL_FOLLOW
 	var min_distance := float(observation.get("preferred_player_distance", PREFERRED_PLAYER_DISTANCE))
@@ -3518,6 +3520,10 @@ func _approach_bridge_step(observation: Dictionary, social_target: Dictionary) -
 	var current_key := "%d:%d" % [origin.x, origin.y]
 	var next_x := origin.x + direction
 	var next_key := "%d:%d" % [next_x, origin.y]
+	var protected_cells: Dictionary = observation.get("protected_build_cells", {}) if observation.get("protected_build_cells", {}) is Dictionary else {}
+	var blocked_targets: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	if protected_cells.has(next_key) or int(blocked_targets.get("tile:%s" % next_key, 0)) > int(observation.get("observed_at_msec", 0)):
+		return {}
 	# Only bridge from a known solid support into a known empty adjacent cell.
 	# This bounds each placement to one tile and leaves reach/collision checks to
 	# the authoritative host. The same step is used to close a duel gap and to

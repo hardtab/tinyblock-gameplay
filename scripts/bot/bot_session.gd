@@ -6651,10 +6651,12 @@ func _on_decision_started(decision: Dictionary) -> void:
 			var build_project: Dictionary = target.get("build_project", {}) if target.get("build_project", {}) is Dictionary else {}
 			if not build_project.is_empty():
 				_note_build_project_started(build_project, target, now_msec)
+			var was_confirmed := bool((_protected_build_cells.get(key, {}) as Dictionary).get("confirmed", false))
 			_protected_build_cells[key] = {
 				"block": str(decision.get("block", "")),
 				"reason": str(target.get("reason", decision.get("goal", ""))),
 				"at_msec": now_msec,
+				"confirmed": was_confirmed,
 			}
 	elif action == Contract.ACTION_CRAFT:
 		var craft_output := str(decision.get("target_id", ""))
@@ -7123,7 +7125,11 @@ func _handle_action_result(payload: Dictionary) -> void:
 		_stone_age_fail_pending(str(rejected_target.get("stone_age_stage", "")), "action_rejected", Time.get_ticks_msec())
 		_pending_action_targets.erase(rejected_key)
 		if action == "place_block":
-			_protected_build_cells.erase(rejected_key)
+			# An accepted placement may be followed by a delayed rejection for a
+			# duplicate request against the same occupied cell. Keep its confirmed
+			# protection, or the planner mines and replaces the bridge forever.
+			if not bool((_protected_build_cells.get(rejected_key, {}) as Dictionary).get("confirmed", false)):
+				_protected_build_cells.erase(rejected_key)
 			_note_build_project_failure(rejected_target, "place_rejected", Time.get_ticks_msec())
 		if action == "mine_block" and behavior != null and behavior.executor != null and behavior.executor.current_action() == Contract.ACTION_MINE:
 			behavior.executor.cancel("mine_rejected")
@@ -7133,6 +7139,9 @@ func _handle_action_result(payload: Dictionary) -> void:
 	_pending_action_targets.erase(key)
 	_blocked_action_targets.erase("tile:%s" % key)
 	if action == "place_block":
+		var protected_cell: Dictionary = _protected_build_cells.get(key, {}) if _protected_build_cells.get(key, {}) is Dictionary else {}
+		protected_cell["confirmed"] = true
+		_protected_build_cells[key] = protected_cell
 		_note_build_project_placement(target, key, Time.get_ticks_msec())
 	if action == "mine_block" and behavior != null and behavior.executor != null and behavior.executor.current_action() == Contract.ACTION_MINE:
 		behavior.executor.cancel("mine_acknowledged")
