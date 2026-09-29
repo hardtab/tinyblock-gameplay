@@ -282,7 +282,7 @@ func _on_session_left(reason: String) -> void:
 
 
 func _is_transient_session_exit(reason: String) -> bool:
-	return reason == "transport_error" or reason == "snapshot_timeout" or reason.begins_with("disconnected_")
+	return reason in ["transport_error", "snapshot_timeout", "initial_inventory_echo_timeout"] or reason.begins_with("disconnected_")
 
 
 func _on_session_log(event: Dictionary) -> void:
