@@ -132,9 +132,8 @@ static func skyblock_home_step(observation: Dictionary) -> Dictionary:
 
 
 ## A bridge has a real destination, unlike a decorative edge extension.  For
-## now execute level spans and a one-block drop to a lower shore. The return
-## jump supports only one block. An elevated shore
-## needs a separately verified staircase, not a hopeful flat bridge.
+## Every selected span receives a reversible one-step-at-a-time ramp, including
+## when the destination shore sits above or below the current island.
 ## The project keeps its source/target when the avatar is partway across.
 static func floating_island_bridge_step(observation: Dictionary) -> Dictionary:
 	if str(observation.get("world_mode", "")).to_lower() != "floating_islands" or bool(observation.get("placement_pending", false)):
@@ -178,40 +177,38 @@ static func floating_island_bridge_step(observation: Dictionary) -> Dictionary:
 		if source.is_empty() or not _ground_anchored_worksite(terrain, {}, origin):
 			return {}
 		var visited: Dictionary = observation.get("visited_floating_islands", {}) if observation.get("visited_floating_islands", {}) is Dictionary else {}
-		var best_gap := 2147483647
+		var best_cost := 2147483647
 		for raw_island in raw_layout:
 			if not raw_island is Dictionary:
 				continue
 			var island := raw_island as Dictionary
-			var height_delta := int(island.get("y", 2147483647)) - int(source.get("y", 0))
-			if island == source or height_delta < 0 or height_delta > 1:
+			if island == source:
 				continue
 			if bool(visited.get("%d:%d" % [int(island.get("x", 0)), int(island.get("y", 0))], false)):
 				continue
 			var direction := signi(int(island.get("x", 0)) - int(source.get("x", 0)))
 			if direction == 0:
 				continue
-			var gap := absi(int(island.get("x", 0)) - int(source.get("x", 0))) - int(source.get("half_width", 0)) - int(island.get("half_width", 0)) - 1
-			if gap < 1 or gap >= best_gap or gap > 40:
+			var plan := floating_island_ramp_plan(source, island)
+			if plan.is_empty() or plan.size() >= best_cost:
 				continue
-			if _floating_bridge_block(observation, gap).is_empty():
+			if _floating_bridge_block(observation, plan.size()).is_empty():
 				continue
-			best_gap = gap
+			best_cost = plan.size()
 			target = island
 		if target.is_empty():
 			return {}
 	var direction := signi(int(target.get("x", 0)) - int(source.get("x", 0)))
 	var target_row := int(target.get("y", 0))
-	if direction == 0 or target_row < int(source.get("y", 0)) or target_row - int(source.get("y", 0)) > 1:
+	if direction == 0:
 		return {}
 	var row := int(source.get("y", 0))
-	var shore_x := int(source.get("x", 0)) + direction * int(source.get("half_width", 0))
 	var far_shore_x := int(target.get("x", 0)) - direction * int(target.get("half_width", 0))
-	var span := absi(far_shore_x - shore_x) - 1
-	if span < 1 or span > 40:
+	var plan := floating_island_ramp_plan(source, target)
+	if plan.is_empty():
 		return {}
 	var confirmed := maxi(0, int(project.get("confirmed_placements", 0))) if active else 0
-	if confirmed >= span:
+	if confirmed >= plan.size():
 		if not _solid(terrain, far_shore_x, target_row) or not _empty(terrain, far_shore_x, target_row - 1) or not _empty(terrain, far_shore_x, target_row - 2):
 			return {}
 		if absi(origin.x - far_shore_x) <= 1 and origin.y == target_row:
@@ -222,20 +219,16 @@ static func floating_island_bridge_step(observation: Dictionary) -> Dictionary:
 			"position": [float(far_shore_x * TILE + 6), float(target_row * TILE - 28)],
 			"support_tile": [far_shore_x, target_row],
 		}
-	var next_tile := Vector2i(shore_x + direction * (confirmed + 1), row)
-	if not active:
-		# Account for a player-built start of the bridge without assuming any
-		# unobserved tile beyond the local terrain window is already solid.
-		for index in range(1, span + 1):
-			var candidate := Vector2i(shore_x + direction * index, row)
-			if not _solid(terrain, candidate.x, candidate.y):
-				next_tile = candidate
-				break
-	var remaining := absi(far_shore_x - next_tile.x)
-	var block_name := _floating_bridge_block(observation, remaining)
+	var next: Dictionary = plan[confirmed]
+	var raw_next: Array = next.get("tile", []) if next.get("tile", []) is Array else []
+	var raw_worksite: Array = next.get("worksite", []) if next.get("worksite", []) is Array else []
+	if raw_next.size() != 2 or raw_worksite.size() != 2:
+		return {}
+	var next_tile := Vector2i(int(raw_next[0]), int(raw_next[1]))
+	var worksite := Vector2i(int(raw_worksite[0]), int(raw_worksite[1]))
+	var block_name := _floating_bridge_block(observation, plan.size() - confirmed)
 	if block_name.is_empty():
 		return {}
-	var worksite := next_tile - Vector2i(direction, 0)
 	if not _solid(terrain, worksite.x, worksite.y) or not _empty(terrain, worksite.x, worksite.y - 1) or not _empty(terrain, worksite.x, worksite.y - 2):
 		return {}
 	if _worksite_corridor_has_lava(terrain, origin, worksite):
@@ -250,7 +243,9 @@ static func floating_island_bridge_step(observation: Dictionary) -> Dictionary:
 	var known: Dictionary = observation.get("terrain_known_cells", {}) if observation.get("terrain_known_cells", {}) is Dictionary else {}
 	if not known.is_empty() and not bool(known.get("%d:%d" % [next_tile.x, next_tile.y], false)):
 		return {}
-	if not _empty(terrain, next_tile.x, next_tile.y) or not _empty(terrain, next_tile.x, next_tile.y - 1) or not _empty(terrain, next_tile.x, next_tile.y - 2):
+	if not _empty(terrain, next_tile.x, next_tile.y):
+		return {}
+	if str(next.get("kind", "")) != "ramp_brace" and (not _empty(terrain, next_tile.x, next_tile.y - 1) or not _empty(terrain, next_tile.x, next_tile.y - 2)):
 		return {}
 	if _lava_near(terrain, next_tile, SKYBLOCK_LAVA_CLEARANCE_TILES) or _overlaps_any_player(next_tile, observation):
 		return {}
@@ -269,16 +264,68 @@ static func floating_island_bridge_step(observation: Dictionary) -> Dictionary:
 		"goal_tile": [far_shore_x, target_row],
 	}
 	var placement := _placement(next_tile, origin, Vector2i(far_shore_x, target_row), block_name, "bridge_to_island", project_data)
+	placement["bridge_segment_kind"] = str(next.get("kind", ""))
 	placement["action"] = Contract.ACTION_PLACE
 	return placement
 
 
 static func _floating_bridge_block(observation: Dictionary, remaining: int) -> String:
 	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
-	for name in ["dirt", "stone_bricks", "cobblestone", "stone", "grass", "packed_ice", "leaves", "palm_leaves", "pine_needles", "weeping_leaves", "planks", "palm_planks", "pine_planks", "weeping_planks"]:
-		if int(inventory.get(name, 0)) >= remaining + FLOATING_BRIDGE_RETURN_RESERVE:
-			return name
+	var candidates := ["dirt", "stone_bricks", "stone", "grass", "packed_ice", "leaves", "palm_leaves", "pine_needles", "weeping_leaves", "cobblestone", "planks", "palm_planks", "pine_planks", "weeping_planks"]
+	var usable := 0
+	var first := ""
+	for name in candidates:
+		# Keep core crafting ingredients available for tools and workstations.
+		var recipe_reserve := 8 if name == "cobblestone" or name.ends_with("planks") else 0
+		var count := maxi(0, int(inventory.get(name, 0)) - recipe_reserve)
+		if count > 0 and first.is_empty():
+			first = name
+		usable += count
+	if usable >= remaining + FLOATING_BRIDGE_RETURN_RESERVE:
+		return first
 	return ""
+
+
+## A monotone support path across the gap. A rise uses a horizontally attached
+## base plus the next step above it; a descent uses a brace below the previous
+## support plus the lower step. Every transition is reversible by a one-block
+## jump, and every new cell shares an edge with already solid terrain or the
+## immediately preceding project cell. The first/last shore cells are natural
+## terrain and are never included in the placement list.
+static func floating_island_ramp_plan(source: Dictionary, target: Dictionary) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	var direction := signi(int(target.get("x", 0)) - int(source.get("x", 0)))
+	if direction == 0:
+		return result
+	var source_row := int(source.get("y", 0))
+	var target_row := int(target.get("y", 0))
+	var source_shore_x := int(source.get("x", 0)) + direction * int(source.get("half_width", 0))
+	var target_shore_x := int(target.get("x", 0)) - direction * int(target.get("half_width", 0))
+	var steps := absi(target_shore_x - source_shore_x)
+	if steps < 2 or steps > 41 or absi(target_row - source_row) > steps:
+		return result
+	var previous := Vector2i(source_shore_x, source_row)
+	for index in range(1, steps + 1):
+		var next_row := roundi(lerpf(float(source_row), float(target_row), float(index) / float(steps)))
+		var next := Vector2i(source_shore_x + direction * index, next_row)
+		if absi(next.y - previous.y) > 1:
+			return []
+		var is_far_shore := index == steps
+		if next.y < previous.y:
+			# The natural target island already has a block under its shore.
+			if not is_far_shore:
+				result.append({"tile": [next.x, previous.y], "worksite": [previous.x, previous.y], "kind": "ramp_base"})
+				result.append({"tile": [next.x, next.y], "worksite": [previous.x, previous.y], "kind": "ramp_step"})
+		elif next.y > previous.y:
+			# The natural source shore already has a solid layer below it.
+			if index > 1:
+				result.append({"tile": [previous.x, next.y], "worksite": [previous.x, previous.y], "kind": "ramp_brace"})
+			if not is_far_shore:
+				result.append({"tile": [next.x, next.y], "worksite": [previous.x, previous.y], "kind": "ramp_step"})
+		elif not is_far_shore:
+			result.append({"tile": [next.x, next.y], "worksite": [previous.x, previous.y], "kind": "bridge_floor"})
+		previous = next
+	return result
 
 
 static func _skyblock_home_support_block(inventory: Dictionary) -> String:
