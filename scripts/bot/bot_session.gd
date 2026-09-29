@@ -5236,10 +5236,6 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["action_loop_blocked"] = ActionLoop.active_blocks(_action_loop_blocked_until, now_msec)
 	snapshot["self_defense"] = safety.observation_state(now_msec)
 	snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
-	# A local craft is optimistic until inventory_snapshot echoes from the host.
-	# Station placement must not consume an item that exists only in that local
-	# projection; otherwise the host rejects several PLACE commands in a row.
-	snapshot["host_confirmed_inventory_summary"] = _stone_age_authoritative_inventory.duplicate(true)
 	snapshot["craft_pending_output"] = _craft_pending_output
 	snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
 	snapshot["craft_blocked_outputs"] = _active_craft_blocked_outputs(now_msec)
@@ -5328,6 +5324,15 @@ func _build_observation(now_msec: int) -> Dictionary:
 	# enemy, so expanding only this read radius cannot authorize random PvP.
 	var perception_radius := maxf(observation_radius, 4096.0) if _is_pvp_world() else _decision_observation_radius()
 	var observation := Perception.build(snapshot, own_player_id, perception_radius, now_msec)
+	# Perception.build whitelists keys, so attach transaction state to the final
+	# policy observation rather than only to the intermediate snapshot.
+	observation["host_confirmed_inventory_summary"] = _stone_age_authoritative_inventory.duplicate(true)
+	var placement_pending := false
+	for raw_pending in _pending_action_targets.values():
+		if raw_pending is Dictionary and str((raw_pending as Dictionary).get("action", "")) == Contract.ACTION_PLACE:
+			placement_pending = true
+			break
+	observation["placement_pending"] = placement_pending
 	var source_material_catalog := _one_block_source_material_catalog()
 	if not source_material_catalog.is_empty():
 		observation["source_material_catalog"] = source_material_catalog

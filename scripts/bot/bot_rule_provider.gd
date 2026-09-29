@@ -1730,6 +1730,11 @@ func _inventory(observation: Dictionary) -> Dictionary:
 
 
 func _station_progression_action(observation: Dictionary, foraging: bool) -> Dictionary:
+	# A different candidate cell is still a duplicate station when the previous
+	# placement has not received its host result. Other urgent PLACE policies
+	# (such as projectile cover) remain free to act.
+	if bool(observation.get("placement_pending", false)):
+		return {}
 	var inventory := _inventory(observation)
 	var confirmed_inventory: Dictionary = observation.get("host_confirmed_inventory_summary", inventory) if observation.get("host_confirmed_inventory_summary", inventory) is Dictionary else inventory
 	for station_name in STATION_NAMES:
@@ -2644,6 +2649,8 @@ func _tag_mid_tier_tool_action(decision: Dictionary, output: String, missing_ite
 
 func _required_station_action(station_name: String, observation: Dictionary, legal: PackedStringArray, depth: int) -> Dictionary:
 	if station_name not in STATION_NAMES or depth >= STATION_NAMES.size():
+		return {}
+	if bool(observation.get("placement_pending", false)):
 		return {}
 	if _station_is_available(observation, station_name):
 		return {}
