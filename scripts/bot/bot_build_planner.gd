@@ -380,7 +380,10 @@ static func island_stone_generator_step(observation: Dictionary) -> Dictionary:
 					break
 			if not lined:
 				continue
-			for work_x in [left - 1, right + 1]:
+			# The final cut is next to lava. Work only from the exterior side
+			# *behind* that source, so released lava travels away from the bot.
+			var lava_work_x := int(lava["x"]) + signi(int(lava["x"]) - int(water["x"]))
+			for work_x in [lava_work_x]:
 				var worksite := Vector2i(work_x, row)
 				if not _solid(terrain, work_x, row) or not _empty(terrain, work_x, row - 1) or not _empty(terrain, work_x, row - 2):
 					continue
