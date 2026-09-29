@@ -92,7 +92,14 @@ func tick(observation: Dictionary, delta: float, now_msec: int) -> void:
 		# may have started well before the regular decision interval expires, and
 		# an idle executor would otherwise wait it out beside the hostile.
 		_next_decision_msec = now_msec
+	var action_was_busy := executor.is_busy()
 	executor.tick(delta, observation, now_msec)
+	if action_was_busy and not executor.is_busy():
+		# Completion callbacks may block the just-failed target. The observation
+		# passed to this tick was built before those callbacks, so deciding again
+		# immediately would select that same target from stale route data. The next
+		# frame rebuilds perception with the new cooldown and authoritative state.
+		return
 	if executor.is_busy() or now_msec < _next_decision_msec:
 		return
 	if provider == null:
