@@ -176,6 +176,7 @@ var _physics_route_target_id := ""
 var _physics_route_replan_msec := -1
 var _physics_route_first_step_guarded := false
 var _physics_route_later_step_guarded := false
+var _last_movement_stall_probe_msec := -1
 var _host_rejected_transitions: Dictionary = {}
 var _active_air_transition: Dictionary = {}
 var _host_rejected_transition_from := Vector2i(2147483647, 2147483647)
@@ -7000,6 +7001,7 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 		# A short movement window is not a failed route when it advanced toward
 		# the same chest. Keep that goal eligible on the next decision tick.
 		reason = "route_progress"
+	_log_movement_stall_probe(decision, reason)
 	_clear_aborted_movement_transition_if_needed(decision, reason)
 	if reason == "mine_target_became_unsafe":
 		_block_harmful_fluid_mine_target(decision)
@@ -7037,6 +7039,29 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 		_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
 		_achievement_goal_note_failure(decision, reason, Time.get_ticks_msec())
 	_record_action_history("finished", decision, reason)
+
+
+func _log_movement_stall_probe(decision: Dictionary, reason: String) -> void:
+	var target_id := str(decision.get("target_id", ""))
+	if str(decision.get("action", "")) != Contract.ACTION_MOVE_TO or reason not in ["timeout", "route_unreachable"] or not (target_id.begins_with("explore:") or target_id.begins_with("tile:")):
+		return
+	var now := Time.get_ticks_msec()
+	if _last_movement_stall_probe_msec >= 0 and now - _last_movement_stall_probe_msec < 5000:
+		return
+	_last_movement_stall_probe_msec = now
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	var route_next: Dictionary = _physics_route[1] if _physics_route.size() > 1 else {}
+	var next_tile: Vector2i = route_next.get("tile", Vector2i(2147483647, 2147483647))
+	structured_log.emit({
+		"event": "movement_stall_probe", "at_msec": now,
+		"target_id": target_id, "reason": reason,
+		"x": float(self_state.get("x", 0.0)), "y": float(self_state.get("y", 0.0)),
+		"vx": float(self_state.get("vx", 0.0)), "vy": float(self_state.get("vy", 0.0)),
+		"on_ground": bool(self_state.get("on_ground", false)),
+		"tree_ghost": bool(self_state.get("tree_ghost", false)),
+		"route_size": _physics_route.size(), "next_kind": str(route_next.get("kind", "")),
+		"next_tile": [next_tile.x, next_tile.y],
+	})
 
 
 func _made_container_route_progress(decision: Dictionary, reason: String) -> bool:
