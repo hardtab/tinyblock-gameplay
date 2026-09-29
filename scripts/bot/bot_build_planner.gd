@@ -59,7 +59,7 @@ static func skyblock_home_step(observation: Dictionary) -> Dictionary:
 		completed.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return abs(a.x - origin.x) < abs(b.x - origin.x))
 		for foundation in completed:
 			var chest_tile := foundation + Vector2i.UP
-			if not _solid(terrain, foundation.x, foundation.y) or not _empty(terrain, chest_tile.x, chest_tile.y):
+			if not _ground_anchored_worksite(terrain, protected, foundation) or not _empty(terrain, chest_tile.x, chest_tile.y):
 				continue
 			if not _empty(terrain, chest_tile.x, chest_tile.y - 1) or _overlaps_any_player(chest_tile, observation):
 				continue
@@ -104,7 +104,7 @@ static func skyblock_home_step(observation: Dictionary) -> Dictionary:
 		if raw_tile.size() == 2:
 			worksites.append(Vector2i(int(raw_tile[0]), int(raw_tile[1])))
 	for worksite in worksites:
-		if not _solid(terrain, worksite.x, worksite.y) or not _empty(terrain, worksite.x, worksite.y - 1) or not _empty(terrain, worksite.x, worksite.y - 2):
+		if not _ground_anchored_worksite(terrain, protected, worksite) or not _empty(terrain, worksite.x, worksite.y - 1) or not _empty(terrain, worksite.x, worksite.y - 2):
 			continue
 		if _worksite_corridor_has_lava(terrain, origin, worksite):
 			continue
@@ -180,6 +180,27 @@ static func _worksite_corridor_has_lava(terrain: Dictionary, origin: Vector2i, w
 		for y in range(mini(origin.y, worksite.y) - 1, maxi(origin.y, worksite.y) + 2):
 			if str(terrain.get("%d:%d" % [x, y], "")).to_lower().contains("lava"):
 				return true
+	return false
+
+
+static func _ground_anchored_worksite(terrain: Dictionary, protected: Dictionary, tile: Vector2i, depth: int = 0) -> bool:
+	if not _solid(terrain, tile.x, tile.y):
+		return false
+	var name := str(terrain.get("%d:%d" % [tile.x, tile.y], "")).to_lower()
+	# These are ground/foundation materials, including a mined block reused as
+	# a floor. A tree leaf or branch is not an island edge just because it is
+	# solid under the bot's feet.
+	if name in ["grass", "dirt", "stone", "cobblestone", "stone_bricks", "ice", "packed_ice", "sand", "snow"]:
+		return true
+	var below := str(terrain.get("%d:%d" % [tile.x, tile.y + 1], "")).to_lower()
+	if below in ["grass", "dirt", "stone", "cobblestone", "stone_bricks", "ice", "packed_ice", "sand", "snow"]:
+		return true
+	var record: Dictionary = protected.get("%d:%d" % [tile.x, tile.y], {}) if protected.get("%d:%d" % [tile.x, tile.y], {}) is Dictionary else {}
+	if depth >= SKYBLOCK_HOME_EXPANSION_LIMIT or str(record.get("reason", "")) != "skyblock_expand" or not bool(record.get("confirmed", false)):
+		return false
+	for direction in [-1, 1]:
+		if _ground_anchored_worksite(terrain, protected, tile + Vector2i(direction, 0), depth + 1):
+			return true
 	return false
 
 
