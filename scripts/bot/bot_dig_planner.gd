@@ -47,6 +47,8 @@ static func next_step(observation: Dictionary, explicit_route_target: Dictionary
 	var target := _target_tile(observation, origin, explicit_route_target)
 	if target == _invalid_tile() or origin.distance_to(target) > MAX_TARGET_DISTANCE_TILES:
 		return {}
+	if target.y > origin.y and stranded_below_player_without_rising_exit(observation):
+		return {}
 	var horizontal_direction := signi(target.x - origin.x)
 	if horizontal_direction == 0:
 		# A vertical target can still be reached by making the next upward step.
@@ -194,21 +196,36 @@ static func _restore_upward_approach_floor(origin: Vector2i, target: Vector2i, t
 
 static func _player_above_origin(observation: Dictionary, self_state: Dictionary) -> bool:
 	var players: Array = observation.get("players", []) if observation.get("players", []) is Array else []
-	var self_position := Vector2(float(self_state.get("x", 0.0)), float(self_state.get("y", 0.0)))
+	var self_position := Contract.target_position(self_state)
 	for raw_player in players:
 		if not raw_player is Dictionary or not bool((raw_player as Dictionary).get("alive", true)):
 			continue
 		var player := raw_player as Dictionary
-		var position := Vector2(float(player.get("x", 0.0)), float(player.get("y", 0.0)))
+		var position := Contract.target_position(player)
 		if position.y <= self_position.y - float(TILE) * 1.5 and self_position.distance_to(position) <= float(TILE * PIT_RETURN_PLAYER_RADIUS_TILES):
 			return true
 	return false
 
 
+static func stranded_below_player_without_rising_exit(observation: Dictionary) -> bool:
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if not _player_above_origin(observation, self_state):
+		return false
+	var origin := _grounded_support_tile(self_state, _terrain_map(observation.get("terrain_tiles", [])))
+	var waypoints: Array = observation.get("safe_exploration_waypoints", []) if observation.get("safe_exploration_waypoints", []) is Array else []
+	for raw_waypoint in waypoints:
+		if not raw_waypoint is Dictionary or not bool((raw_waypoint as Dictionary).get("reachable", false)):
+			continue
+		var raw_support: Variant = (raw_waypoint as Dictionary).get("support_tile", [])
+		if raw_support is Array and (raw_support as Array).size() >= 2 and int((raw_support as Array)[1]) < origin.y:
+			return false
+	return true
+
+
 static func _upward_escape_waypoint_step(waypoints: Array, observation: Dictionary, self_state: Dictionary, origin: Vector2i) -> Dictionary:
 	if waypoints.is_empty() or not _player_above_origin(observation, self_state):
 		return {}
-	var self_position := Vector2(float(self_state.get("x", 0.0)), float(self_state.get("y", 0.0)))
+	var self_position := Contract.target_position(self_state)
 	var players: Array = observation.get("players", []) if observation.get("players", []) is Array else []
 	var player_position := Vector2.ZERO
 	var player_distance := INF
@@ -216,7 +233,7 @@ static func _upward_escape_waypoint_step(waypoints: Array, observation: Dictiona
 		if not raw_player is Dictionary or not bool((raw_player as Dictionary).get("alive", true)):
 			continue
 		var player := raw_player as Dictionary
-		var position := Vector2(float(player.get("x", 0.0)), float(player.get("y", 0.0)))
+		var position := Contract.target_position(player)
 		if position.y > self_position.y - float(TILE) * 1.5:
 			continue
 		var distance := self_position.distance_to(position)
