@@ -132,7 +132,8 @@ static func skyblock_home_step(observation: Dictionary) -> Dictionary:
 
 
 ## A bridge has a real destination, unlike a decorative edge extension.  For
-## now execute level spans and short drops to a lower shore. An elevated shore
+## now execute level spans and a one-block drop to a lower shore. The return
+## jump supports only one block. An elevated shore
 ## needs a separately verified staircase, not a hopeful flat bridge.
 ## The project keeps its source/target when the avatar is partway across.
 static func floating_island_bridge_step(observation: Dictionary) -> Dictionary:
@@ -183,7 +184,7 @@ static func floating_island_bridge_step(observation: Dictionary) -> Dictionary:
 				continue
 			var island := raw_island as Dictionary
 			var height_delta := int(island.get("y", 2147483647)) - int(source.get("y", 0))
-			if island == source or height_delta < 0 or height_delta > 2:
+			if island == source or height_delta < 0 or height_delta > 1:
 				continue
 			if bool(visited.get("%d:%d" % [int(island.get("x", 0)), int(island.get("y", 0))], false)):
 				continue
@@ -201,7 +202,7 @@ static func floating_island_bridge_step(observation: Dictionary) -> Dictionary:
 			return {}
 	var direction := signi(int(target.get("x", 0)) - int(source.get("x", 0)))
 	var target_row := int(target.get("y", 0))
-	if direction == 0 or target_row < int(source.get("y", 0)) or target_row - int(source.get("y", 0)) > 2:
+	if direction == 0 or target_row < int(source.get("y", 0)) or target_row - int(source.get("y", 0)) > 1:
 		return {}
 	var row := int(source.get("y", 0))
 	var shore_x := int(source.get("x", 0)) + direction * int(source.get("half_width", 0))
