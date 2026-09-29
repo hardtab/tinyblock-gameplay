@@ -47,6 +47,9 @@ const SNAPSHOT_RETRY_INTERVAL_MSEC := 6_000
 const SNAPSHOT_RETRY_LIMIT := 3
 const DEFAULT_EMPTY_GRACE_MSEC := 30_000
 const DEFAULT_OBSERVATION_RADIUS := 256.0
+const DEFAULT_STRUCTURAL_MEMORY_PATH := "user://bot_structural_memory.json"
+const MAX_STRUCTURAL_MEMORY_WORLDS := 32
+const MAX_STRUCTURAL_MEMORY_CELLS := 1024
 const CHEST_OBSERVATION_RADIUS := 512.0
 const STARTER_TOOLING_RESOURCE_SCAN_RADIUS := 1536.0
 const MID_TIER_TOOL_SEARCH_TIMEOUT_MSEC := 120_000
@@ -140,6 +143,8 @@ var _equipment_slots := {"hand": "", "feet": ""}
 var _pending_action_targets: Dictionary = {}
 var _blocked_action_targets: Dictionary = {}
 var _protected_build_cells: Dictionary = {}
+var _structural_memory_path := DEFAULT_STRUCTURAL_MEMORY_PATH
+var _structural_memory_cells: Dictionary = {}
 var _opened_generated_chest_cells: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
 ## Only host-reported level zero is a collectible water/lava source. A tile
@@ -332,6 +337,7 @@ func _init() -> void:
 func configure(backend_adapter: Object = null, multiplayer_adapter: Object = null, options: Dictionary = {}) -> void:
 	backend = backend_adapter
 	network_client = multiplayer_adapter
+	_structural_memory_path = str(options.get("structural_memory_path", DEFAULT_STRUCTURAL_MEMORY_PATH))
 	protocol_version = int(options.get("protocol_version", protocol_version))
 	empty_grace_msec = maxi(0, int(float(options.get("empty_grace_seconds", float(empty_grace_msec) / 1000.0)) * 1000.0))
 	observation_radius = maxf(32.0, float(options.get("observation_radius", observation_radius)))
@@ -420,6 +426,7 @@ func join_session(record: Dictionary) -> void:
 	_pending_action_targets.clear()
 	_blocked_action_targets.clear()
 	_protected_build_cells.clear()
+	_structural_memory_cells.clear()
 	_opened_generated_chest_cells.clear()
 	_action_loop_blocked_until.clear()
 	_terrain_tiles.clear()
@@ -3161,10 +3168,16 @@ func _apply_tile_batch(payload: Dictionary) -> void:
 			_terrain_tiles.erase(key)
 			_terrain_fluid_levels.erase(key)
 			_support_preserving_mine_tiles.erase(key)
-			_protected_build_cells.erase(key)
+			_forget_protected_build_cell(key)
 			_opened_generated_chest_cells.erase(key)
 		elif not name.is_empty():
 			_terrain_tiles[key] = name
+			if _structural_memory_cells.has(key) and _normalized_block_name(str((_structural_memory_cells[key] as Dictionary).get("block", ""))) != _normalized_block_name(name):
+				_forget_protected_build_cell(key)
+			elif _protected_build_cells.has(key) and _normalized_block_name(str((_protected_build_cells[key] as Dictionary).get("block", ""))) != _normalized_block_name(name):
+				_forget_protected_build_cell(key)
+			elif _structural_memory_cells.has(key) and _normalized_block_name(str((_structural_memory_cells[key] as Dictionary).get("block", ""))) == _normalized_block_name(name):
+				_protected_build_cells[key] = (_structural_memory_cells[key] as Dictionary).duplicate(true)
 			if name in ["water", "lava", "core.water", "core.lava"] and tile.has("level"):
 				_terrain_fluid_levels[key] = int(tile.get("level", -1))
 			else:
@@ -3187,6 +3200,108 @@ func _apply_tile_batch(payload: Dictionary) -> void:
 
 func _terrain_name_at(tx: int, ty: int) -> String:
 	return str(_terrain_tiles.get("%d:%d" % [tx, ty], ""))
+
+
+func _normalized_block_name(name: String) -> String:
+	return name.to_lower().trim_prefix("core.")
+
+
+func _read_structural_memory() -> Dictionary:
+	if _structural_memory_path.is_empty() or not FileAccess.file_exists(_structural_memory_path):
+		return {}
+	var file := FileAccess.open(_structural_memory_path, FileAccess.READ)
+	if file == null:
+		return {}
+	var parsed: Variant = JSON.parse_string(file.get_as_text())
+	if not parsed is Dictionary or int((parsed as Dictionary).get("version", 0)) != 1:
+		return {}
+	var worlds: Variant = (parsed as Dictionary).get("worlds", {})
+	return worlds if worlds is Dictionary else {}
+
+
+func _load_structural_memory_world() -> void:
+	_protected_build_cells.clear()
+	_structural_memory_cells.clear()
+	if world_id.is_empty():
+		return
+	var metadata: Variant = _read_structural_memory().get(world_id, {})
+	if not metadata is Dictionary:
+		return
+	var cells: Variant = (metadata as Dictionary).get("cells", {})
+	if not cells is Dictionary:
+		return
+	for raw_key in cells:
+		if _structural_memory_cells.size() >= MAX_STRUCTURAL_MEMORY_CELLS:
+			break
+		var cell: Variant = (cells as Dictionary)[raw_key]
+		if cell is Dictionary and not str((cell as Dictionary).get("block", "")).is_empty():
+			_structural_memory_cells[str(raw_key)] = {
+				"block": str((cell as Dictionary).get("block", "")),
+				"reason": str((cell as Dictionary).get("reason", "")),
+				"confirmed": true,
+			}
+
+
+func _restore_protected_build_cells() -> void:
+	for key in _structural_memory_cells.keys():
+		# The snapshot can be partial. Restore only cells for which the host
+		# actually supplied matching terrain; retain unknown cells for tile_batch.
+		if _terrain_tiles.has(key) and _normalized_block_name(str(_terrain_tiles[key])) == _normalized_block_name(str((_structural_memory_cells[key] as Dictionary).get("block", ""))):
+			_protected_build_cells[key] = (_structural_memory_cells[key] as Dictionary).duplicate(true)
+		elif _terrain_tiles.has(key):
+			_forget_protected_build_cell(key)
+
+
+func _save_protected_build_cell(key: String) -> void:
+	if world_id.is_empty() or not _protected_build_cells.has(key):
+		return
+	var cell: Dictionary = _protected_build_cells[key]
+	var block := str(cell.get("block", ""))
+	if block.is_empty() or not bool(cell.get("confirmed", false)):
+		return
+	_structural_memory_cells[key] = {"block": block, "reason": str(cell.get("reason", "")), "confirmed": true}
+	_write_structural_memory()
+
+
+func _forget_protected_build_cell(key: String) -> void:
+	_protected_build_cells.erase(key)
+	if _structural_memory_cells.erase(key):
+		_write_structural_memory()
+
+
+func _write_structural_memory() -> void:
+	if _structural_memory_path.is_empty() or world_id.is_empty():
+		return
+	var worlds := _read_structural_memory()
+	if _structural_memory_cells.is_empty():
+		worlds.erase(world_id)
+	else:
+		while _structural_memory_cells.size() > MAX_STRUCTURAL_MEMORY_CELLS:
+			_structural_memory_cells.erase(_structural_memory_cells.keys()[0])
+		worlds[world_id] = {"updated_unix": Time.get_unix_time_from_system(), "cells": _structural_memory_cells.duplicate(true)}
+	while worlds.size() > MAX_STRUCTURAL_MEMORY_WORLDS:
+		var oldest_id := ""
+		var oldest_time := INF
+		for candidate in worlds:
+			var candidate_metadata: Dictionary = worlds[candidate] if worlds[candidate] is Dictionary else {}
+			var updated := float(candidate_metadata.get("updated_unix", 0.0))
+			if updated < oldest_time:
+				oldest_time = updated
+				oldest_id = str(candidate)
+		worlds.erase(oldest_id)
+	var absolute_path := ProjectSettings.globalize_path(_structural_memory_path)
+	if DirAccess.make_dir_recursive_absolute(absolute_path.get_base_dir()) != OK:
+		return
+	var temporary_path := "%s.tmp" % absolute_path
+	var file := FileAccess.open(temporary_path, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_string(JSON.stringify({"version": 1, "worlds": worlds}))
+	file.flush()
+	file.close()
+	if FileAccess.file_exists(absolute_path):
+		DirAccess.remove_absolute(absolute_path)
+	DirAccess.rename_absolute(temporary_path, absolute_path)
 
 
 func _terrain_solid_at(tx: int, ty: int) -> bool:
@@ -4404,6 +4519,8 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	if str(snapshot_generation.get("mode", "")).to_lower() == "duel":
 		_seed_duel_fallback_terrain()
 	world_id = incoming_world_id
+	_load_structural_memory_world()
+	_restore_protected_build_cells()
 	var multiplayer_state: Dictionary = snapshot.get("multiplayer", {}) if snapshot.get("multiplayer", {}) is Dictionary else {}
 	var player_states: Dictionary = multiplayer_state.get("player_states", {}) if multiplayer_state.get("player_states", {}) is Dictionary else {}
 	# `player` is the host's local avatar in a P2P snapshot. A guest bot must
@@ -7380,8 +7497,12 @@ func _handle_action_result(payload: Dictionary) -> void:
 		_blocked_action_targets.erase("tile:%s" % key)
 	if action == "place_block":
 		var protected_cell: Dictionary = _protected_build_cells.get(key, {}) if _protected_build_cells.get(key, {}) is Dictionary else {}
-		protected_cell["confirmed"] = true
-		_protected_build_cells[key] = protected_cell
+		if not target.is_empty() or not protected_cell.is_empty():
+			protected_cell["confirmed"] = true
+			if str(protected_cell.get("block", "")).is_empty():
+				protected_cell["block"] = str(target.get("block", ""))
+			_protected_build_cells[key] = protected_cell
+			_save_protected_build_cell(key)
 		_note_build_project_placement(target, key, Time.get_ticks_msec())
 	if action == "mine_block" and behavior != null and behavior.executor != null and behavior.executor.current_action() == Contract.ACTION_MINE:
 		behavior.executor.cancel("mine_acknowledged")
