@@ -1320,7 +1320,10 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	if _is_pvp_world():
 		hint = _pvp_jump_hint(origin, destination)
 	else:
-		hint = route_kind if route_kind in ["jump", "climb"] else _movement_hint(origin, destination)
+		# The route graph already proved a supported walk edge, including through
+		# ghostable foliage. A local tree cue must not replace that edge with a
+		# vertical climb that never advances toward the waypoint.
+		hint = route_kind if route_kind in ["walk", "jump", "climb"] else _movement_hint(origin, destination)
 		if route_kind == "drop":
 			# A verified drop is entered by walking off its known edge; do not let
 			# the local one-block pit heuristic turn the descent into a jump.
@@ -1372,6 +1375,10 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 				_advance_local_physics(self_state, delta, false)
 				_world_snapshot["self"] = self_state
 				return {"done": true, "reason": "unsafe_jump_route"}
+	if route_kind == "walk" and _climb_active:
+		_climb_active = false
+		self_state["climbing"] = false
+		self_state["climb_col"] = -1
 	if _climb_active or hint == "climb":
 		if not _climb_active:
 			_active_air_transition = {
@@ -4128,7 +4135,8 @@ func _climb_step(self_state: Dictionary, destination: Vector2, delta: float) -> 
 	self_state["climb_col"] = _climb_column
 	_climb_time_left_msec -= int(maxf(delta, 0.0) * 1000.0)
 	var climb_step := absf(TREE_CLIMB_SPEED) * maxf(delta, 0.0) * NETWORK_PHYSICS_TICKS_PER_SECOND
-	var next_x := lerpf(origin.x, float(_climb_column * BlockDefs.TILE + 6), clampf(delta * 8.0, 0.0, 1.0))
+	# Match the host's climb control: climbing changes y, not the player's x.
+	var next_x := origin.x
 	var next_y := origin.y - climb_step
 	var still_on_tree := _terrain_climbable_at(_climb_column, floori((next_y + 14.0) / float(BlockDefs.TILE))) or _terrain_climbable_at(_climb_column, floori((next_y + 30.0) / float(BlockDefs.TILE)))
 	if _climb_time_left_msec <= 0 or not still_on_tree:
