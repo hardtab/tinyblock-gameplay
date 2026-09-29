@@ -1212,6 +1212,12 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			continue
 		if not Perception.mine_target_is_safe(observation, resource):
 			continue
+		# Background gathering has no planned return route. Leave floor-level
+		# and deeper excavation to explicit dig/descent goals, which verify the
+		# resulting support path before issuing each step. Otherwise a series of
+		# individually safe mines can open a pocket the bot cannot climb out of.
+		if _background_mine_opens_unplanned_descent(resource, observation):
+			continue
 		# `reachable` means close enough to attempt mining, not that physics can
 		# reach a standing position beside the block. Farther resources need an
 		# explicit host-terrain route proof before they can become movement goals.
@@ -1330,6 +1336,25 @@ func _opens_surface_hole(resource: Dictionary, observation: Dictionary, occupied
 	# expose the walkable surface.
 	var above := str(occupied.get("%d:%d" % [tile_x, tile_y - 1], "")).to_lower()
 	return above.is_empty() or above in ["air", "core.air"]
+
+
+func _background_mine_opens_unplanned_descent(resource: Dictionary, observation: Dictionary) -> bool:
+	if bool(resource.get("regenerates_on_mine", false)) or bool(resource.get("preserves_support_on_mine", false)) or bool(resource.get("dig_route", false)):
+		return false
+	if not resource.has("y"):
+		return false
+	# The host's descent planner owns this anchor. Legacy/test observations with
+	# no established root retain their existing resource behavior; in a live
+	# session, even an ineligible plan still carries its last confirmed root.
+	var descent_plan: Dictionary = observation.get("descent_plan", {}) if observation.get("descent_plan", {}) is Dictionary else {}
+	var root_support: Array = descent_plan.get("root_support", []) if descent_plan.get("root_support", []) is Array else []
+	if root_support.size() < 2:
+		return false
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if self_state.is_empty():
+		return false
+	var support_y := floori((float(self_state.get("y", 0.0)) + float(self_state.get("h", 28.0))) / float(BlockDefs.TILE))
+	return int(resource.get("y", 2147483647)) >= support_y
 
 
 func _recent_build_cells(observation: Dictionary) -> Dictionary:
