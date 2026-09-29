@@ -1811,7 +1811,7 @@ func _station_place_target(observation: Dictionary, station_name: String) -> Dic
 		var support_name := str(occupied.get("%d:%d" % [target.x, target.y + 1], ""))
 		if not target_name.is_empty() and target_name.to_lower() not in ["air", "core.air"]:
 			continue
-		if support_name.is_empty() or _tile_overlaps_player(target, self_state):
+		if not _stable_station_support(support_name) or _tile_overlaps_player(target, self_state):
 			continue
 		return {
 			"id": "station:%s:%d:%d" % [station_name, target.x, target.y],
@@ -1821,6 +1821,11 @@ func _station_place_target(observation: Dictionary, station_name: String) -> Dic
 			"reason": "place_station",
 		}
 	return {}
+
+
+func _stable_station_support(block_name: String) -> bool:
+	var block := _block_entry(block_name)
+	return bool(block.get("solid", false)) and not bool(block.get("fluid", false)) and not bool(block.get("falls_when_unsupported", false))
 
 
 func _nearest_station_target(observation: Dictionary, station_name: String) -> Dictionary:
