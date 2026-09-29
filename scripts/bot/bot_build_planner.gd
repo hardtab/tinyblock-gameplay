@@ -27,6 +27,69 @@ const SKYBLOCK_HOME_EXPANSION_LIMIT := 4
 const SKYBLOCK_LEAF_RESERVE := 4
 const SKYBLOCK_LAVA_CLEARANCE_TILES := 2
 const FLOATING_BRIDGE_RETURN_RESERVE := 4
+const ESCAPE_BRIDGE_FAILURE_COOLDOWN_MSEC := 10_000
+
+
+## When retreat is verified impossible because a one-cell fluid gap separates
+## the bot from dry ground, put a single support *above* the source. This keeps
+## island stone generators intact. The follow-up move uses ordinary physics
+## routing and stops if its jump/drop cannot be validated.
+static func urgent_fluid_escape_bridge_step(observation: Dictionary, threat: Dictionary) -> Dictionary:
+	if bool(observation.get("placement_pending", false)):
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if not bool(self_state.get("on_ground", false)):
+		return {}
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var origin := _supported_origin(self_state, terrain)
+	if not _solid(terrain, origin.x, origin.y):
+		return {}
+	var self_center := Contract.target_position(self_state) + Vector2(float(self_state.get("w", 20.0)) * 0.5, 0.0)
+	var threat_center := Contract.target_position(threat) + Vector2(float(threat.get("w", 20.0)) * 0.5, 0.0)
+	var direction := signi(roundi(self_center.x - threat_center.x))
+	if direction == 0:
+		return {}
+	var gap_x := origin.x + direction
+	var shore_x := origin.x + direction * 2
+	var row := origin.y
+	var fluid := str(terrain.get("%d:%d" % [gap_x, row], "")).to_lower().trim_prefix("core.")
+	if fluid not in ["water", "lava"]:
+		return {}
+	var known: Dictionary = observation.get("terrain_known_cells", {}) if observation.get("terrain_known_cells", {}) is Dictionary else {}
+	for cell in [Vector2i(gap_x, row - 1), Vector2i(gap_x, row - 2), Vector2i(gap_x, row - 3), Vector2i(shore_x, row), Vector2i(shore_x, row - 1), Vector2i(shore_x, row - 2)]:
+		if not bool(known.get("%d:%d" % [cell.x, cell.y], false)):
+			return {}
+	if not _solid(terrain, shore_x, row) or not _empty(terrain, shore_x, row - 1) or not _empty(terrain, shore_x, row - 2):
+		return {}
+	if not _empty(terrain, gap_x, row - 2) or not _empty(terrain, gap_x, row - 3):
+		return {}
+	var bridge := Vector2i(gap_x, row - 1)
+	var shore := Vector2i(shore_x, row)
+	var move_id := "escape_bridge:shore:%d:%d" % [shore.x, shore.y]
+	var now := int(observation.get("observed_at_msec", 0))
+	for raw_event in _as_array(observation.get("action_history", [])):
+		if not raw_event is Dictionary:
+			continue
+		var event := raw_event as Dictionary
+		if str(event.get("action", "")) == Contract.ACTION_MOVE_TO and str(event.get("target_id", "")) == move_id and str(event.get("phase", "")) == "finished" and str(event.get("reason", "")) in ["unsafe_jump_route", "unsafe_drop_route", "route_unreachable", "edge_guard", "blocked_obstacle"] and now - int(event.get("at_msec", 0)) < ESCAPE_BRIDGE_FAILURE_COOLDOWN_MSEC:
+			return {}
+	if _solid(terrain, bridge.x, bridge.y):
+		return {
+			"action": Contract.ACTION_MOVE_TO,
+			"target": {"id": move_id, "position": [float(shore.x * TILE + 6), float(shore.y * TILE - 28)], "support_tile": [shore.x, shore.y], "escape_bridge": true},
+		}
+	if not _empty(terrain, bridge.x, bridge.y) or _overlaps_any_player(bridge, observation):
+		return {}
+	var blocked: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	if int(blocked.get("tile:%d:%d" % [bridge.x, bridge.y], 0)) > now:
+		return {}
+	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	for block_name in ["dirt", "planks", "palm_planks", "pine_planks", "weeping_planks", "cobblestone", "stone"]:
+		if int(inventory.get(block_name, 0)) > 0:
+			var placement := _placement(bridge, origin, shore, block_name, "escape_over_fluid")
+			placement["action"] = Contract.ACTION_PLACE
+			return placement
+	return {}
 
 
 ## Pick up a nearby *source*, never flowing fluid. This is a local clearance

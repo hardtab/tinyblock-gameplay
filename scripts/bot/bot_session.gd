@@ -1255,11 +1255,12 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 			_advance_local_physics(self_state, delta, false)
 			_world_snapshot["self"] = self_state
 			return {"done": true, "reason": "pursuit_waypoint_unreachable"}
-	# Exploration targets deliberately point into newly revealed/unknown space;
-	# refuse them unless the cached terrain proves a route. For ordinary movement,
+	# Exploration and emergency-bridge targets must not fall back to direct
+	# steering when the physics graph cannot prove a route across the gap.
+	# For ordinary movement,
 	# keep the collision/edge guards below in charge so a failed route search around
 	# a wall still reports blocked_obstacle/edge_guard instead of masking it.
-	if bool(route_step.get("unreachable", false)) and not player_target and target_id.begins_with("explore:"):
+	if bool(route_step.get("unreachable", false)) and not player_target and (target_id.begins_with("explore:") or target_id.begins_with("escape_bridge:")):
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
 		_world_snapshot["self"] = self_state

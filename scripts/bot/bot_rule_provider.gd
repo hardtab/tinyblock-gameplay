@@ -291,6 +291,15 @@ func decide(observation: Dictionary) -> Dictionary:
 		if creature_distance <= float(observation.get("creature_attack_distance", 48.0)) and Contract.ACTION_ATTACK_CREATURE in legal and _is_melee_weapon(hand):
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_ATTACK_CREATURE, creature_threat, 500, 0.92)
 		if (
+			bool(_creature_route_exhausted.get(str(creature_threat.get("id", "")), false))
+			and _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
+		):
+			var escape_bridge := BuildPlanner.urgent_fluid_escape_bridge_step(observation, creature_threat)
+			var bridge_action := str(escape_bridge.get("action", ""))
+			if bridge_action in legal:
+				var bridge_target: Dictionary = escape_bridge.get("target", escape_bridge) if escape_bridge.get("target", escape_bridge) is Dictionary else {}
+				return _decision(Contract.GOAL_SURVIVE, bridge_action, bridge_target, 1200 if bridge_action == Contract.ACTION_MOVE_TO else 900, 0.94)
+		if (
 			Contract.ACTION_FLEE_FROM in legal
 			and not _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
 			and not _creature_flee_suppressed(creature_threat, observation)
