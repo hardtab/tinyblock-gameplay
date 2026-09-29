@@ -87,7 +87,7 @@ static func next_step(observation: Dictionary, explicit_route_target: Dictionary
 	return {}
 
 
-## When ordinary route search has no safe waypoint, a grounded avatar in a
+## When ordinary route search has no useful escape waypoint, a grounded avatar in a
 ## shallow excavation can still work toward a *seen* higher landing. Return
 ## only one ordinary, host-checked dig/step action; never invent a route through
 ## unknown terrain or choose a landing beside harmful fluid.
@@ -95,12 +95,12 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	if not bool(self_state.get("on_ground", false)):
 		return {}
-	var waypoints: Array = observation.get("safe_exploration_waypoints", []) if observation.get("safe_exploration_waypoints", []) is Array else []
-	if not waypoints.is_empty():
-		return {}
 	var terrain := _terrain_map(observation.get("terrain_tiles", []))
 	var origin := _grounded_support_tile(self_state, terrain)
 	if not _solid(terrain, origin.x, origin.y):
+		return {}
+	var waypoints: Array = observation.get("safe_exploration_waypoints", []) if observation.get("safe_exploration_waypoints", []) is Array else []
+	if _has_useful_escape_waypoint(waypoints, observation, self_state, origin):
 		return {}
 	var best := _invalid_tile()
 	var best_score := 999999
@@ -153,6 +153,42 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 		if not clear.is_empty():
 			return clear
 	return {}
+
+
+static func _has_useful_escape_waypoint(waypoints: Array, observation: Dictionary, self_state: Dictionary, origin: Vector2i) -> bool:
+	if waypoints.is_empty():
+		return false
+	var players: Array = observation.get("players", []) if observation.get("players", []) is Array else []
+	var nearest_player := Vector2.ZERO
+	var player_distance := INF
+	var self_position := Vector2(float(self_state.get("x", 0.0)), float(self_state.get("y", 0.0)))
+	for raw_player in players:
+		if not raw_player is Dictionary or not bool((raw_player as Dictionary).get("alive", true)):
+			continue
+		var player := raw_player as Dictionary
+		var position := Vector2(float(player.get("x", 0.0)), float(player.get("y", 0.0)))
+		var distance := self_position.distance_to(position)
+		if distance < player_distance:
+			player_distance = distance
+			nearest_player = position
+	for raw_waypoint in waypoints:
+		if not raw_waypoint is Dictionary:
+			continue
+		var waypoint := raw_waypoint as Dictionary
+		if not bool(waypoint.get("reachable", true)):
+			continue
+		var raw_tile: Variant = waypoint.get("support_tile", [])
+		if not raw_tile is Array or (raw_tile as Array).size() < 2:
+			continue
+		var tile := Vector2i(int((raw_tile as Array)[0]), int((raw_tile as Array)[1]))
+		if tile.y < origin.y:
+			return true
+		if player_distance == INF:
+			return true
+		var candidate := Vector2(float(tile.x * TILE + 6), float(tile.y * TILE - 28))
+		if candidate.distance_to(nearest_player) + float(TILE) * 0.5 < player_distance:
+			return true
+	return false
 
 
 ## If a narrow raised platform has no useful round-trip waypoint, open a
