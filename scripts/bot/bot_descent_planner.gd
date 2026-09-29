@@ -13,6 +13,7 @@ const TILE_SIZE := 32
 const MAX_ROUTE_NODES := 128
 const STATIC_KNOWN_RADIUS_X := 8
 const STATIC_KNOWN_RADIUS_Y := 6
+const MAX_FALLING_SUPPORT_DEPTH := 16
 const UNKNOWN_TILE := ""
 const SUPPORTED_MODES: PackedStringArray = ["procedural", "one_block", "skyblock", "floating_islands"]
 
@@ -304,8 +305,7 @@ func _safe_standable(tile: Vector2i, terrain: Dictionary, coverage: Dictionary, 
 		return false
 	if not _tile_is_solid(tile, terrain) or not _tile_is_safe(tile, terrain):
 		return false
-	var support_entry := _tile_entry(tile, terrain)
-	if bool(support_entry.get("falls_when_unsupported", false)):
+	if not _support_column_is_stable(tile, terrain, coverage, reference, projected_air):
 		return false
 	return _body_cells_known_and_clear(tile, terrain, coverage, reference, projected_air)
 
@@ -317,9 +317,25 @@ func _body_cells_known_and_clear(support: Vector2i, terrain: Dictionary, coverag
 			return false
 		if projected_air.has(body_cell):
 			continue
-		if _tile_is_solid(body_cell, terrain) or not _tile_is_safe(body_cell, terrain):
+		if not _tile_is_safe(body_cell, terrain):
+			return false
+		if _tile_is_solid(body_cell, terrain) and not bool(_tile_entry(body_cell, terrain).get("tree_traversal", false)):
 			return false
 	return true
+
+
+func _support_column_is_stable(tile: Vector2i, terrain: Dictionary, coverage: Dictionary, reference: Vector2i, projected_air: Dictionary = {}) -> bool:
+	# Sand/gravel are safe to stand on only when every cell down to a fixed
+	# foundation is host-known and solid. A projected clear may not remove any
+	# part of that column, even if the return route itself still looks walkable.
+	var cursor := tile
+	for _depth in range(MAX_FALLING_SUPPORT_DEPTH):
+		if projected_air.has(cursor) or not _tile_is_known(cursor, coverage, reference) or not _tile_is_solid(cursor, terrain) or not _tile_is_safe(cursor, terrain):
+			return false
+		if not bool(_tile_entry(cursor, terrain).get("falls_when_unsupported", false)):
+			return true
+		cursor += Vector2i.DOWN
+	return false
 
 
 ## Host capability for the configured One Block regenerating source. The session
@@ -375,8 +391,7 @@ func _safe_support_candidate(tile: Vector2i, terrain: Dictionary, coverage: Dict
 		return false
 	if tile == _invalid_tile() or not _tile_is_known(tile, coverage, reference):
 		return false
-	var support_entry := _tile_entry(tile, terrain)
-	if not _tile_is_solid(tile, terrain) or not _tile_is_safe(tile, terrain) or bool(support_entry.get("falls_when_unsupported", false)):
+	if not _tile_is_solid(tile, terrain) or not _tile_is_safe(tile, terrain) or not _support_column_is_stable(tile, terrain, coverage, reference):
 		return false
 	return not _known_body_cells(tile, terrain, coverage, reference).is_empty()
 

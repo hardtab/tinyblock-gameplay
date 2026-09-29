@@ -5533,6 +5533,7 @@ func _descent_terrain_map() -> Dictionary:
 		result[key] = {
 			"block_name": block_name,
 			"solid": bool(block.get("solid", false)),
+			"tree_traversal": _terrain_climbable_at(int(key.get_slice(":", 0)), int(key.get_slice(":", 1))),
 			"fluid": bool(block.get("fluid", false)),
 			"falls_when_unsupported": bool(block.get("falls_when_unsupported", false)),
 			"hazard": bool(block.get("hazard", false)),
