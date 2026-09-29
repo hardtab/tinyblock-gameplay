@@ -122,7 +122,12 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 			best = candidate
 			best_score = score
 	if best != _invalid_tile():
-		var upward := next_step(observation, {"x": float(best.x * TILE + 6), "y": float(best.y * TILE - 28)})
+		# With no verified route, an adjacent constructed roof may be the only
+		# obstruction above an otherwise solid step. Allow clearing that roof while
+		# _mine_step still preserves stations, floors, player support and lava seals.
+		var recovery_observation := observation.duplicate(false)
+		recovery_observation["allow_escape_clear_protected"] = true
+		var upward := next_step(recovery_observation, {"x": float(best.x * TILE + 6), "y": float(best.y * TILE - 28)})
 		if not upward.is_empty():
 			return upward
 	# A one-high wall can seal the only same-level floor corridor while a higher
