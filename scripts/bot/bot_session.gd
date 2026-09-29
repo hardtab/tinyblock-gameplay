@@ -34,7 +34,8 @@ const STATE_PLAYING := "PLAYING"
 const STATE_LEAVING := "LEAVING"
 
 const DEFAULT_SYNC_TIMEOUT_MSEC := 45_000
-const INITIAL_INVENTORY_ECHO_TIMEOUT_MSEC := 15_000
+const INITIAL_INVENTORY_ECHO_RETRY_MSEC := 2_000
+const INITIAL_INVENTORY_ECHO_TIMEOUT_MSEC := 30_000
 ## The shared multiplayer client emits `connected` only once per session, so a
 ## P2P RTC reconnect can leave the bot waiting in SYNCING with no further
 ## request. Mirror the human guest path: retry the full request until a transfer
@@ -212,6 +213,7 @@ var _inventory_host_revision := 0
 var _inventory_client_revision := 0
 var _initial_loadout_source := ""
 var _initial_inventory_request_msec := -1
+var _initial_inventory_last_request_msec := -1
 var _initial_inventory_echo_logged := false
 var _action_started_before_inventory_echo := false
 var _population_logged := false
@@ -480,6 +482,7 @@ func join_session(record: Dictionary) -> void:
 	_progression_gear_stripped = false
 	_initial_loadout_source = ""
 	_initial_inventory_request_msec = -1
+	_initial_inventory_last_request_msec = -1
 	_initial_inventory_echo_logged = false
 	_action_started_before_inventory_echo = false
 	safety.reset_session()
@@ -754,6 +757,12 @@ func _process(delta: float) -> void:
 		_send_player_input_if_due(now_msec)
 		_send_player_snapshot_if_due(now_msec)
 		_check_empty_world_grace(now_msec)
+		if now_msec - _initial_inventory_last_request_msec >= INITIAL_INVENTORY_ECHO_RETRY_MSEC:
+			# The first inventory_snapshot can arrive before the host has registered
+			# this guest in _remote_players and be ignored. Resend the exact same
+			# revision after our player snapshot establishes that roster entry.
+			_send_inventory_snapshot(false)
+			_initial_inventory_last_request_msec = now_msec
 		if now_msec - _initial_inventory_request_msec >= INITIAL_INVENTORY_ECHO_TIMEOUT_MSEC:
 			structured_log.emit({
 				"event": "initial_inventory_echo_timeout",
@@ -4173,6 +4182,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		_stone_age_authoritative_equipment = {"hand": "", "feet": ""}
 		_initial_loadout_source = ""
 		_initial_inventory_request_msec = -1
+		_initial_inventory_last_request_msec = -1
 		_initial_inventory_echo_logged = false
 		_action_started_before_inventory_echo = false
 	var selected_world_mode := _session_world_mode
@@ -4311,6 +4321,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_maybe_strip_progression_gear()
 	_send_inventory_snapshot()
 	_initial_inventory_request_msec = Time.get_ticks_msec()
+	_initial_inventory_last_request_msec = _initial_inventory_request_msec
 	_welcome_emoji_pending = human_player_count > 0
 	_welcome_emoji_due_msec = Time.get_ticks_msec() + 900 if _welcome_emoji_pending else -1
 	_send_duel_ready(Time.get_ticks_msec())
@@ -4901,7 +4912,7 @@ func _validated_projectile_snapshot(raw_projectiles: Variant) -> Array:
 	return result
 
 
-func _send_inventory_snapshot() -> void:
+func _send_inventory_snapshot(increment_revision: bool = true) -> void:
 	if network_client == null or not network_client.has_method("send_command"):
 		return
 	var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
@@ -4909,7 +4920,8 @@ func _send_inventory_snapshot() -> void:
 	# Hosts reject guest snapshots whose host revision does not match the last
 	# acknowledged inventory_host_revision. Sending 0 forever made every post-mine
 	# craft/eat snapshot bounce, leaving the bot stuck retrying CRAFT planks.
-	_inventory_client_revision += 1
+	if increment_revision:
+		_inventory_client_revision += 1
 	network_client.call("send_command", "inventory_snapshot", {
 		"inventory_host_revision": _inventory_host_revision,
 		"inventory_client_revision": _inventory_client_revision,
