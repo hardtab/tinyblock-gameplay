@@ -2,6 +2,7 @@ class_name BotDigPlanner
 extends RefCounted
 
 const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
+const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 
 ## Bounded excavation planner used by the rule provider.
 ##
@@ -222,22 +223,28 @@ static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, obser
 		# as the descent planner. Otherwise safety rejects this identical MINE
 		# proposal on every tick, preventing all lower-priority activities.
 		return {}
+	var mine_target := {
+		"id": "dig:%d:%d" % [x, y],
+		"x": x,
+		"y": y,
+		"dig_route": true,
+		"combat_route": bool(observation.get("pvp_world", false)),
+		"route_target": [target.x, target.y],
+		"origin": [origin.x, origin.y],
+		"reachable": true,
+		"harvest_tier": _terrain_harvest_tier(observation, x, y),
+		"hardness": _terrain_hardness(observation, x, y),
+	}
+	# Safety will check the same invariant again at execution time. Checking it
+	# before proposing avoids hundreds of rejected decisions per minute when a
+	# potential route cell also supports the bot or the stationary host.
+	if not Perception.mine_target_is_safe(observation, mine_target):
+		return {}
 	return {
 		"action": Contract.ACTION_MINE,
 		"goal": Contract.GOAL_DIG_ROUTE,
 		"target_id": "dig:%d:%d" % [x, y],
-		"target": {
-			"id": "dig:%d:%d" % [x, y],
-			"x": x,
-			"y": y,
-			"dig_route": true,
-			"combat_route": bool(observation.get("pvp_world", false)),
-			"route_target": [target.x, target.y],
-			"origin": [origin.x, origin.y],
-			"reachable": true,
-			"harvest_tier": _terrain_harvest_tier(observation, x, y),
-			"hardness": _terrain_hardness(observation, x, y),
-		},
+		"target": mine_target,
 		"commit_for_ms": 1200,
 		"confidence": 0.74,
 	}
