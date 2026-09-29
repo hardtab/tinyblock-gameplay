@@ -280,21 +280,83 @@ static func floating_island_bridge_step(observation: Dictionary) -> Dictionary:
 	return placement
 
 
+## Tell the gathering policy how much *usable* support the cheapest reachable
+## island still needs. Without this, the generic cobblestone cap makes the bot
+## wait forever even though it knows a concrete bridge destination.
+static func floating_island_bridge_material_shortfall(observation: Dictionary) -> int:
+	if str(observation.get("world_mode", "")).to_lower() != "floating_islands":
+		return 0
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if not bool(self_state.get("on_ground", false)):
+		return 0
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var origin := _supported_origin(self_state, terrain)
+	var raw_layout: Array = _as_array(observation.get("floating_islands", []))
+	var project: Dictionary = observation.get("build_project_state", {}) if observation.get("build_project_state", {}) is Dictionary else {}
+	var active := str(project.get("status", "")) == "active" and str(project.get("target_kind", "")) == "island"
+	var source: Dictionary = {}
+	for raw_island in raw_layout:
+		if not raw_island is Dictionary:
+			continue
+		var island := raw_island as Dictionary
+		if active:
+			if int(island.get("x", 2147483647)) == int(project.get("source_x", 2147483647)) and int(island.get("y", 2147483647)) == int(project.get("source_y", 2147483647)):
+				source = island
+		elif origin.y == int(island.get("y", 2147483647)) and absi(origin.x - int(island.get("x", 0))) <= int(island.get("half_width", 0)):
+			source = island
+	if source.is_empty():
+		return 0
+	var visited: Dictionary = observation.get("visited_floating_islands", {}) if observation.get("visited_floating_islands", {}) is Dictionary else {}
+	var best_cost := 2147483647
+	for raw_island in raw_layout:
+		if not raw_island is Dictionary:
+			continue
+		var island := raw_island as Dictionary
+		if island == source or (active and (int(island.get("x", 0)) != int(project.get("target_x", 0)) or int(island.get("y", 0)) != int(project.get("target_y", 0)))):
+			continue
+		if not active and bool(visited.get("%d:%d" % [int(island.get("x", 0)), int(island.get("y", 0))], false)):
+			continue
+		var plan := floating_island_ramp_plan(source, island)
+		if plan.is_empty():
+			continue
+		if not active:
+			var first: Dictionary = plan[0]
+			var first_tile: Array = first.get("tile", [])
+			var first_worksite: Array = first.get("worksite", [])
+			if first_tile.size() != 2 or first_worksite.size() != 2:
+				continue
+			var tile := Vector2i(int(first_tile[0]), int(first_tile[1]))
+			var worksite := Vector2i(int(first_worksite[0]), int(first_worksite[1]))
+			if not _solid(terrain, worksite.x, worksite.y) or not _empty(terrain, tile.x, tile.y) or _lava_near(terrain, tile, SKYBLOCK_LAVA_CLEARANCE_TILES):
+				continue
+		best_cost = mini(best_cost, maxi(0, plan.size() - int(project.get("confirmed_placements", 0))) if active else plan.size())
+	if best_cost == 2147483647:
+		return 0
+	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	return maxi(0, best_cost + FLOATING_BRIDGE_RETURN_RESERVE - _floating_bridge_usable_support_count(inventory))
+
+
 static func _floating_bridge_block(observation: Dictionary, remaining: int) -> String:
 	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
-	var candidates := ["dirt", "stone_bricks", "stone", "grass", "packed_ice", "leaves", "palm_leaves", "pine_needles", "weeping_leaves", "cobblestone", "planks", "palm_planks", "pine_planks", "weeping_planks"]
-	var usable := 0
-	var first := ""
-	for name in candidates:
-		# Keep core crafting ingredients available for tools and workstations.
+	if _floating_bridge_usable_support_count(inventory) < remaining + FLOATING_BRIDGE_RETURN_RESERVE:
+		return ""
+	for name in _floating_bridge_candidates():
 		var recipe_reserve := 8 if name == "cobblestone" or name.ends_with("planks") else 0
-		var count := maxi(0, int(inventory.get(name, 0)) - recipe_reserve)
-		if count > 0 and first.is_empty():
-			first = name
-		usable += count
-	if usable >= remaining + FLOATING_BRIDGE_RETURN_RESERVE:
-		return first
+		if int(inventory.get(name, 0)) > recipe_reserve:
+			return name
 	return ""
+
+
+static func _floating_bridge_usable_support_count(inventory: Dictionary) -> int:
+	var usable := 0
+	for name in _floating_bridge_candidates():
+		var recipe_reserve := 8 if name == "cobblestone" or name.ends_with("planks") else 0
+		usable += maxi(0, int(inventory.get(name, 0)) - recipe_reserve)
+	return usable
+
+
+static func _floating_bridge_candidates() -> Array[String]:
+	return ["dirt", "stone_bricks", "stone", "grass", "packed_ice", "leaves", "palm_leaves", "pine_needles", "weeping_leaves", "cobblestone", "planks", "palm_planks", "pine_planks", "weeping_planks"]
 
 
 ## A monotone support path across the gap. A rise uses a horizontally attached

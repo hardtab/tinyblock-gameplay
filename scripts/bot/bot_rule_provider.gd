@@ -1238,6 +1238,7 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 	var needs_cobblestone := _needs_cobblestone_progression(observation)
 	var stone_age_goal: Dictionary = observation.get("stone_age_goal", {}) if observation.get("stone_age_goal", {}) is Dictionary else {}
 	var seeking_stone_age_cobble := needs_cobblestone and str(stone_age_goal.get("stage", "")) == "mine_cobblestone"
+	var bridge_material_shortfall := BuildPlanner.floating_island_bridge_material_shortfall(observation)
 	var filler_count := _count_named(inventory, FILLER_BLOCK_NAMES)
 	var recent_build_cells := _recent_build_cells(observation)
 	var occupied := _terrain_occupied_map(observation)
@@ -1311,7 +1312,7 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 		# Natural stone drops cobblestone. Once a working reserve exists, mining
 		# the same generator cell again is not a new goal; explicit recipe and
 		# route planners can still request more when they need it.
-		if _is_cobblestone_source(block_name) and int(inventory.get("cobblestone", 0)) >= MAX_BACKGROUND_COBBLESTONE_RESERVE and not needs_cobblestone:
+		if _is_cobblestone_source(block_name) and int(inventory.get("cobblestone", 0)) >= MAX_BACKGROUND_COBBLESTONE_RESERVE and not needs_cobblestone and bridge_material_shortfall <= 0:
 			continue
 		# While a stone/furnace progression needs cobblestone, generic GATHER
 		# must not substitute arbitrary terrain removal for a route to stone.
@@ -1341,6 +1342,8 @@ func _best_resource(values: Array, observation: Dictionary = {}) -> Dictionary:
 			score -= 200.0
 		elif needs_cobblestone and _is_cobblestone_source(block_name):
 			score -= 190.0
+		elif bridge_material_shortfall > 0 and _is_cobblestone_source(block_name):
+			score -= 120.0
 		elif has_tree_target and block_name in FILLER_BLOCK_NAMES:
 			score += 180.0
 		elif block_name in FILLER_BLOCK_NAMES:

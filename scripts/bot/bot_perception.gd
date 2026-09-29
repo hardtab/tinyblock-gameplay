@@ -3,6 +3,7 @@ extends RefCounted
 
 const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
 const BlockDefs = preload("res://gameplay/scripts/block_defs.gd")
+const Navigator = preload("res://gameplay/scripts/bot/bot_navigator.gd")
 
 const DEFAULT_RADIUS := 256.0
 const DEFAULT_MAX_EVENTS := 12
@@ -192,7 +193,27 @@ static func mine_target_is_safe(observation: Dictionary, target: Dictionary) -> 
 		var landing_cell: Dictionary = terrain.get(Vector2i(landing_x, support_y + drop), {}) if terrain.get(Vector2i(landing_x, support_y + drop), {}) is Dictionary else {}
 		if landing_cell.is_empty():
 			continue
-		return _safe_solid_terrain(landing_cell)
+		if not _safe_solid_terrain(landing_cell):
+			return false
+		# A harmless landing can still strand the bot below the original floor.
+		# Require a supported, headroom-clear route back before removing its
+		# current footing; directed descent goals use their own return planner.
+		var landing := Vector2i(landing_x, support_y + drop)
+		var standable := func(tile: Vector2i) -> bool:
+			return (
+				_safe_solid_terrain(terrain.get(tile, {}))
+				and not _safe_solid_terrain(terrain.get(tile + Vector2i.UP, {}))
+				and not _safe_solid_terrain(terrain.get(tile + Vector2i.UP * 2, {}))
+				and not _is_harmful_fluid_cell(terrain.get(tile + Vector2i.UP, {}))
+				and not _is_harmful_fluid_cell(terrain.get(tile + Vector2i.UP * 2, {}))
+			)
+		if not standable.call(landing):
+			return false
+		for return_x in range(left - 4, right + 5):
+			var return_tile := Vector2i(return_x, support_y)
+			if standable.call(return_tile) and not Navigator.physics_route(landing, return_tile, standable).is_empty():
+				return true
+		return false
 	return false
 
 
