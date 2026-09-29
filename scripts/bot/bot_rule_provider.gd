@@ -569,6 +569,13 @@ func decide(observation: Dictionary) -> Dictionary:
 	var follow_route_recovery := _follow_route_recovery_action(observation, legal)
 	if not follow_route_recovery.is_empty():
 		return follow_route_recovery
+	# Recover a grounded avatar stranded below nearby supported terrain before
+	# island home/bridge projects can extend the *bottom* of its pit. Combat and
+	# urgent survival above still take precedence; PvP uses target-pinned routes.
+	if not bool(observation.get("pvp_world", false)) and aggressive_player_id.is_empty():
+		var pit_escape_step := DigPlanner.trapped_upward_step(observation)
+		if not pit_escape_step.is_empty() and str(pit_escape_step.get("action", "")) in legal:
+			return Contract.normalize_decision(pit_escape_step)
 	# Achievement goals are advisory progression, never a survival or combat
 	# override. One Block is the exception to ordinary progression order because
 	# its authoritative source is renewable and is the world's central resource.
@@ -693,12 +700,6 @@ func decide(observation: Dictionary) -> Dictionary:
 		var dig_action := str(dig_step.get("action", ""))
 		if dig_action in legal:
 			return Contract.normalize_decision(dig_step)
-	# A bot below the surrounding surface can have no graph-reachable exploration
-	# frontier and no distant player/resource target. Let the same bounded dig
-	# planner make one safe upward repair toward a host-observed landing.
-	var pit_escape_step := DigPlanner.trapped_upward_step(observation)
-	if not pit_escape_step.is_empty() and str(pit_escape_step.get("action", "")) in legal:
-		return Contract.normalize_decision(pit_escape_step)
 	if movement_stalled:
 		var stalled_escape := _blocked_exploration_dig_step(observation, legal, true)
 		if not stalled_escape.is_empty():

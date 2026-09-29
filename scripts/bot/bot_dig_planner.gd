@@ -56,12 +56,12 @@ static func next_step(observation: Dictionary, explicit_route_target: Dictionary
 			return _place_step(next_x, origin.y - 1, origin, target, observation, terrain)
 		if _solid(terrain, next_x, origin.y - 2):
 			return _mine_step(next_x, origin.y - 2, origin, target, observation)
-		# A floor-backed step is only usable when the jump arc has headroom above
-		# the bot's starting column. A low ceiling there makes the avatar hit its
-		# head before it can move over the step. Clear the lateral block instead;
-		# all normal protected-cell and harvest-tier gates still apply.
-		if not _solid(terrain, next_x, origin.y) or _solid(terrain, origin.x, origin.y - 3):
-			return _mine_step(next_x, origin.y - 1, origin, target, observation)
+		# An isolated block is still a valid landing one tile above the bot. Mining
+		# it merely because the cell beneath is empty deletes the only stair and
+		# drops the bot farther into a pit. If a ceiling truly blocks takeoff,
+		# clear that ceiling instead (subject to the usual protection guards).
+		if _solid(terrain, origin.x, origin.y - 3):
+			return _mine_step(origin.x, origin.y - 3, origin, target, observation)
 		return {}
 	if target.y > origin.y:
 		# A lower destination needs a one-step descending landing, not a bridge
@@ -198,6 +198,10 @@ static func _target_tile(observation: Dictionary, origin: Vector2i, explicit_rou
 
 static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, observation: Dictionary) -> Dictionary:
 	if _retry_cooldown_active(observation, x, y) or not _can_clear_route_block(observation, x, y):
+		return {}
+	# A functional station is not expendable route filler, including after a
+	# reconnect when the short action history no longer remembers who placed it.
+	if str(_terrain_tile(observation, x, y).get("block_name", "")).to_lower().trim_prefix("core.") in ["workbench", "furnace"]:
 		return {}
 	if _is_protected_build_cell(observation, x, y):
 		# Never excavate a cell the session deliberately constructed.  Without this
