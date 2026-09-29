@@ -985,7 +985,15 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 				_set_desired_input(false, false, false)
 				return {"done": true, "reason": "route_unreachable"}
 			target = Contract.target_position(container_waypoint)
-	if action == Contract.ACTION_MOVE_TO and target_id.begins_with("tile:"):
+	if action == Contract.ACTION_MOVE_TO and target_id.begins_with("tile:") and not _jump_active:
+		# A previously verified jump must reach its planned landing before the
+		# resource interaction side is replanned. Mid-air has no standable route
+		# origin and would falsely cool this resource as route_unreachable.
+		if _should_settle_airborne(self_state, origin):
+			_set_desired_input(false, false, false)
+			_advance_local_physics(self_state, delta, false)
+			_world_snapshot["self"] = self_state
+			return {"done": false, "reason": "airborne_settling"}
 		var requested_approach: Variant = decision_target.get("approach_position", [])
 		var stand_position: Dictionary = {}
 		if requested_approach is Array and (requested_approach as Array).size() >= 2:
