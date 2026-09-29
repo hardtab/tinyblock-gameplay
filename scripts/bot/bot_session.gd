@@ -10,6 +10,7 @@ const Social = preload("res://gameplay/scripts/bot/bot_social.gd")
 const EmojiReactions = preload("res://gameplay/scripts/emoji_reactions.gd")
 const BehaviorClass = preload("res://gameplay/scripts/bot/bot_behavior.gd")
 const RuleProviderClass = preload("res://gameplay/scripts/bot/bot_rule_provider.gd")
+const BuildPlannerClass = preload("res://gameplay/scripts/bot/bot_build_planner.gd")
 const SafetyClass = preload("res://gameplay/scripts/bot/bot_safety_policy.gd")
 const DescentPlannerClass = preload("res://gameplay/scripts/bot/bot_descent_planner.gd")
 const AchievementRegistryClass = preload("res://gameplay/scripts/bot/bot_achievement_registry.gd")
@@ -153,6 +154,7 @@ var _descent_terrain_cache_revision := -1
 var _last_flee_route_diagnostic_msec := -1
 var _last_flee_motion_diagnostic_msec := -1
 var _last_pursuit_route_diagnostic_msec := -1
+var _last_island_generator_probe_msec := -1
 ## Fully replicated procedural chunks prove that omitted cells are air. Static
 ## worlds instead use a small bounded area from their complete initial snapshot.
 var _terrain_known_chunks: Dictionary = {}
@@ -5496,10 +5498,60 @@ func _build_observation(now_msec: int) -> Dictionary:
 			observation["floating_islands"] = (island_layout as Array).duplicate(true)
 			observation["visited_floating_islands"] = _visited_floating_islands.duplicate(true)
 	_annotate_active_build_project_route(observation, now_msec)
+	_probe_island_generator(observation, now_msec)
 	if _first_observation_probe_pending:
 		_first_observation_probe_pending = false
 		structured_log.emit({"event": "first_observation_finished", "at_msec": Time.get_ticks_msec(), "duration_msec": Time.get_ticks_msec() - probe_start})
 	return observation
+
+
+func _probe_island_generator(observation: Dictionary, now_msec: int) -> void:
+	if str(observation.get("world_mode", "")) not in ["skyblock", "floating_islands"]:
+		return
+	if _last_island_generator_probe_msec >= 0 and now_msec - _last_island_generator_probe_msec < 15_000:
+		return
+	var fluid_sources: Array[Dictionary] = []
+	var channel_tiles: Array[Dictionary] = []
+	for raw_tile in observation.get("terrain_tiles", []):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		var name := str(tile.get("block_name", ""))
+		if name in ["water", "lava", "core.water", "core.lava"] and int(tile.get("fluid_level", -1)) == 0:
+			fluid_sources.append({"x": int(tile.get("x", 0)), "y": int(tile.get("y", 0)), "name": name})
+	if fluid_sources.is_empty():
+		return
+	_last_island_generator_probe_msec = now_msec
+	for raw_tile in observation.get("terrain_tiles", []):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		for source in fluid_sources:
+			if int(tile.get("y", 0)) == int(source["y"]) and absi(int(tile.get("x", 0)) - int(source["x"])) <= 5:
+				channel_tiles.append({"x": int(tile.get("x", 0)), "y": int(tile.get("y", 0)), "name": str(tile.get("block_name", "")), "level": int(tile.get("fluid_level", -1))})
+				break
+	var relevant_resources: Array[String] = []
+	for raw_resource in observation.get("visible_resources", []):
+		if not raw_resource is Dictionary:
+			continue
+		var resource := raw_resource as Dictionary
+		for source in fluid_sources:
+			if int(resource.get("y", 0)) == int(source["y"]) and absi(int(resource.get("x", 0)) - int(source["x"])) <= 4:
+				relevant_resources.append("%s:%s" % [str(resource.get("id", "")), str(resource.get("reachable", false))])
+				break
+	var step := BuildPlannerClass.island_stone_generator_step(observation)
+	var target: Dictionary = step.get("target", {}) if step.get("target", {}) is Dictionary else {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	structured_log.emit({
+		"event": "island_generator_probe", "at_msec": now_msec,
+		"world_mode": str(observation.get("world_mode", "")),
+		"self": {"x": float(self_state.get("x", 0.0)), "y": float(self_state.get("y", 0.0)), "on_ground": bool(self_state.get("on_ground", false))},
+		"cobblestone": int(inventory.get("cobblestone", 0)),
+		"sources": fluid_sources, "channel": channel_tiles, "resources": relevant_resources,
+		"blocked_tiles": observation.get("blocked_action_targets", {}),
+		"step": {"action": str(step.get("action", "")), "target_id": str(target.get("id", step.get("target_id", "")))},
+	})
 
 
 ## The bundled One Block phase table describes normal sources before
