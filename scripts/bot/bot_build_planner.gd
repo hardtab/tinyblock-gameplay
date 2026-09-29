@@ -393,6 +393,61 @@ static func floating_island_bridge_material_shortfall(observation: Dictionary) -
 ## The worker stays on dry natural ground *outside* one of the pools and cuts
 ## the three intervening surface cells from there. No source cell, avatar
 ## support, unobserved floor, or flooded worksite is ever a mining target.
+## While an earlier jump/host correction is settling over a dry support on the
+## same side, do not replace this mode objective with an unrelated long-range
+## search. The ordinary host physics continues during WAIT.
+static func island_stone_generator_settle_step(observation: Dictionary) -> Dictionary:
+	var mode := str(observation.get("world_mode", "")).to_lower()
+	if mode not in ["skyblock", "floating_islands"] or bool(observation.get("pvp_world", false)):
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if bool(self_state.get("on_ground", false)):
+		return {}
+	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	if int(inventory.get("cobblestone", 0)) >= 12:
+		return {}
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var px := float(self_state.get("x", 0.0))
+	var py := float(self_state.get("y", 0.0))
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var bottom := py + maxf(1.0, float(self_state.get("h", 28.0)))
+	var body_left := floori(px / float(TILE))
+	var body_right := floori((px + width - 0.001) / float(TILE))
+	var tiles := _as_array(observation.get("terrain_tiles", []))
+	for raw_water in tiles:
+		if not raw_water is Dictionary:
+			continue
+		var water := raw_water as Dictionary
+		if str(water.get("block_name", "")).to_lower().trim_prefix("core.") != "water" or int(water.get("fluid_level", -1)) != 0:
+			continue
+		for raw_lava in tiles:
+			if not raw_lava is Dictionary:
+				continue
+			var lava := raw_lava as Dictionary
+			var row := int(lava.get("y", 0))
+			if str(lava.get("block_name", "")).to_lower().trim_prefix("core.") != "lava" or int(lava.get("fluid_level", -1)) != 0 or row != int(water.get("y", 0)) or absi(int(lava.get("x", 0)) - int(water.get("x", 0))) != 4:
+				continue
+			var work_x := int(lava.get("x", 0)) + signi(int(lava.get("x", 0)) - int(water.get("x", 0)))
+			var staging_x := work_x + signi(work_x - int(lava.get("x", 0)))
+			if body_left < mini(work_x, staging_x) or body_right > maxi(work_x, staging_x):
+				continue
+			if bottom > float(row * TILE) + 2.0 or bottom < float((row - 3) * TILE):
+				continue
+			var dry_landing := true
+			for foot_x in range(body_left, body_right + 1):
+				if not _solid(terrain, foot_x, row):
+					dry_landing = false
+					break
+				for tile_y in range(floori(bottom / float(TILE)), row):
+					var name := str(terrain.get("%d:%d" % [foot_x, tile_y], "")).to_lower()
+					if name.contains("water") or name.contains("lava"):
+						dry_landing = false
+						break
+			if dry_landing:
+				return {"action": Contract.ACTION_WAIT, "reason": "island_generator_safe_settle"}
+	return {}
+
+
 static func island_stone_generator_step(observation: Dictionary) -> Dictionary:
 	var mode := str(observation.get("world_mode", "")).to_lower()
 	if mode not in ["skyblock", "floating_islands"] or bool(observation.get("pvp_world", false)):

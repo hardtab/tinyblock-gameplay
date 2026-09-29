@@ -592,6 +592,8 @@ func decide(observation: Dictionary) -> Dictionary:
 					return _decision(Contract.GOAL_BUILD, Contract.ACTION_EQUIP, {"id": generator_tool}, 350, 0.93)
 				if _has_required_mining_tier(observation, generator_target):
 					return _decision(Contract.GOAL_BUILD, Contract.ACTION_MINE, generator_target, 2200, 0.9)
+		if Contract.ACTION_WAIT in legal and not BuildPlanner.island_stone_generator_settle_step(observation).is_empty():
+			return _decision(Contract.GOAL_BUILD, Contract.ACTION_WAIT, {"reason": "island_generator_safe_settle"}, 350, 0.84)
 	# Skyblock's finite island is the project itself. Once foundational tooling
 	# is handled, spend surplus material on a connected work area and its chest
 	# instead of searching indefinitely for ore absent from the island.
