@@ -1915,14 +1915,28 @@ func _refresh_flee_route_failures_for_pose(self_state: Dictionary) -> void:
 		return
 	var position := Contract.target_position(self_state)
 	var grounded := bool(self_state.get("on_ground", false))
+	if not grounded:
+		# Moving through a single jump is not a new route origin. Replanning on
+		# every airborne displacement restarted the same failed flee repeatedly.
+		return
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var support_tile := Vector2i(
+		floori((position.x + width * 0.5) / float(BlockDefs.TILE)),
+		floori((position.y + height + 0.01) / float(BlockDefs.TILE)),
+	)
 	for raw_target_id in _flee_route_failure_poses.keys():
 		var target_id := str(raw_target_id)
 		var failed_pose: Dictionary = _flee_route_failure_poses[target_id]
 		var failed_position: Vector2 = failed_pose.get("position", position)
-		if position.distance_to(failed_position) < float(BlockDefs.TILE) * 0.75 and grounded == bool(failed_pose.get("on_ground", grounded)):
+		var failed_support_tile := Vector2i(
+			floori((failed_position.x + width * 0.5) / float(BlockDefs.TILE)),
+			floori((failed_position.y + height + 0.01) / float(BlockDefs.TILE)),
+		)
+		if bool(failed_pose.get("on_ground", grounded)) and support_tile == failed_support_tile:
 			continue
-		# A route failure is about one origin pose. Landing after an airborne
-		# correction or moving one support over gives the graph a new start cell;
+		# Landing after an airborne correction or moving one support over gives
+		# the graph a new start cell;
 		# keeping the old cooldown turns an active attack into repeated WAIT.
 		_flee_route_failure_poses.erase(target_id)
 		_flee_target_route_cooldown_until.erase(target_id)

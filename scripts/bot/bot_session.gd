@@ -1839,6 +1839,8 @@ func _safe_flee_first_step_filter(self_state: Dictionary, origin: Vector2, threa
 		var first_position := _world_position_for_support_tile(to_tile)
 		if first_position.distance_to(threat) < origin_distance - max_closure:
 			return false
+		if kind == "jump" and not _flee_jump_landing_has_hazard_margin(to_tile):
+			return false
 		return kind != "jump" or _jump_route_has_safe_landing(self_state, first_position)
 
 
@@ -1851,7 +1853,20 @@ func _safe_flee_emergency_step_filter(self_state: Dictionary, origin: Vector2, t
 			return false
 		if first_distance < origin_distance - FLEE_EMERGENCY_MAX_CLOSURE:
 			return false
+		if kind == "jump" and not _flee_jump_landing_has_hazard_margin(to_tile):
+			return false
 		return kind != "jump" or _jump_route_has_safe_landing(self_state, first_position)
+
+
+func _flee_jump_landing_has_hazard_margin(tile: Vector2i) -> bool:
+	# A jump that lands on the lip directly above/beside lava may pass the local
+	# collision arc but still overshoot when the authoritative host catches up.
+	# Keep a full neighboring column clear for emergency evasive jumps.
+	for x in range(tile.x - 1, tile.x + 2):
+		for y in range(tile.y - 1, tile.y + 2):
+			if _terrain_is_lava_at(x, y):
+				return false
+	return true
 
 
 func _log_flee_motion(origin: Vector2, threat: Vector2, waypoint: Dictionary, phase: String, self_state: Dictionary) -> void:
