@@ -438,7 +438,11 @@ static func island_stone_generator_step(observation: Dictionary) -> Dictionary:
 			var lava_work_x := int(lava["x"]) + signi(int(lava["x"]) - int(water["x"]))
 			for work_x in [lava_work_x]:
 				var worksite := Vector2i(work_x, row)
-				if not _solid(terrain, work_x, row) or not _empty(terrain, work_x, row - 1) or not _empty(terrain, work_x, row - 2):
+				# The avatar is 28 px high inside one 32 px headroom tile. A
+				# platform two cells above its feet does not block standing/mining;
+				# requiring that extra air made a useful Skyblock worksite disappear
+				# after the bot placed an overhead bridge block.
+				if not _solid(terrain, work_x, row) or not _empty(terrain, work_x, row - 1):
 					continue
 				var waypoint := {} if origin == worksite else _known_safe_worksite(observation, worksite)
 				if origin != worksite and waypoint.is_empty():
