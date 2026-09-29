@@ -3989,6 +3989,11 @@ func _support_place_target(self_state: Dictionary) -> Vector2i:
 	# create an invisible pillar instead of a recovery step.
 	if _terrain_solid_at(tx, ty - 1):
 		return SUPPORT_PLACE_INVALID_TILE
+	# An existing workbench/furnace one cell below is already a landing. A
+	# midair clutch on top of it creates a roof over the only step back from an
+	# island edge and can strand the bot behind its own station.
+	if str(_terrain_name_at(tx, ty + 1)).to_lower().trim_prefix("core.") in ["workbench", "furnace"]:
+		return SUPPORT_PLACE_INVALID_TILE
 	# A falling placement must attach to real terrain. This preserves the useful
 	# block-clutch ability beside a ledge or above a pillar without manufacturing
 	# isolated blocks in empty sky from a stale predicted fall.
