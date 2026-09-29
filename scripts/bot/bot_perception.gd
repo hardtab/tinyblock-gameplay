@@ -262,6 +262,24 @@ static func mine_target_opens_harmful_fluid_path(observation: Dictionary, target
 		var source: Dictionary = terrain.get(Vector2i(target_x + offset.x, target_y + offset.y), {}) if terrain.get(Vector2i(target_x + offset.x, target_y + offset.y), {}) is Dictionary else {}
 		if not _is_harmful_fluid_cell(source):
 			continue
+		var source_x := target_x + offset.x
+		var source_y := target_y + offset.y
+		# Mining from dry ground on the *far side* of a hot source opens the
+		# channel away from the avatar. This is how an island stone generator
+		# can be cut without stepping into the lava. Keep the ordinary guard
+		# for a source behind the target, above it, or under the bot's feet.
+		var fluid_between_target_and_avatar := source_y == target_y and target_y == support_y and (
+			(source_x > target_x and source_x < body_left)
+			or (source_x < target_x and source_x > body_right)
+		)
+		if fluid_between_target_and_avatar:
+			var dry_supported := true
+			for foot_x in range(body_left, body_right + 1):
+				if not _safe_solid_terrain(terrain.get(Vector2i(foot_x, support_y), {})):
+					dry_supported = false
+					break
+			if dry_supported and not _is_harmful_fluid_cell(terrain.get(Vector2i(body_left, body_top), {})) and not _is_harmful_fluid_cell(terrain.get(Vector2i(body_right, body_top), {})):
+				continue
 		# A direct vertical spill or a same-level side spill can occupy the newly
 		# opened tile. Reject only when that spill is also near the bot's body or
 		# support row, where it can turn this mining action into self-damage.

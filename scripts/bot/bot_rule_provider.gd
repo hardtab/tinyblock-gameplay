@@ -597,6 +597,19 @@ func decide(observation: Dictionary) -> Dictionary:
 				_decision(Contract.GOAL_BUILD, island_action, island_bridge, 900 if island_action == Contract.ACTION_PLACE else 2200, 0.86),
 				observation,
 			)
+	if mode in ["skyblock", "floating_islands"] and str(observation.get("aggressive_player_id", "")).is_empty() and creature_threat.is_empty():
+		var generator_step := BuildPlanner.island_stone_generator_step(observation)
+		var generator_action := str(generator_step.get("action", ""))
+		if generator_action == Contract.ACTION_MOVE_TO and generator_action in legal:
+			return _decision(Contract.GOAL_BUILD, generator_action, generator_step, 2200, 0.87)
+		if generator_action == Contract.ACTION_MINE and generator_action in legal:
+			var generator_target: Dictionary = generator_step.get("target", {}) if generator_step.get("target", {}) is Dictionary else {}
+			if not generator_target.is_empty() and Perception.mine_target_is_safe(observation, generator_target) and not Perception.mine_target_opens_harmful_fluid_path(observation, generator_target):
+				var generator_tool := _mining_tool_for_target(observation, generator_target)
+				if not generator_tool.is_empty() and Contract.ACTION_EQUIP in legal:
+					return _decision(Contract.GOAL_BUILD, Contract.ACTION_EQUIP, {"id": generator_tool}, 350, 0.93)
+				if _has_required_mining_tier(observation, generator_target):
+					return _decision(Contract.GOAL_BUILD, Contract.ACTION_MINE, generator_target, 2200, 0.9)
 	# After Stone Age and the active mode objective, continue through real
 	# mid-tier tool recipes one verified dependency at a time. If a required
 	# resource is not currently reachable, the helper yields to other behaviour

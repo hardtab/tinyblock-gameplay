@@ -140,6 +140,9 @@ var _blocked_action_targets: Dictionary = {}
 var _protected_build_cells: Dictionary = {}
 var _opened_generated_chest_cells: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
+## Only host-reported level zero is a collectible water/lava source. A tile
+## name alone cannot distinguish it from a temporary flow.
+var _terrain_fluid_levels: Dictionary = {}
 var _jump_landing_cache: Dictionary = {}
 var _terrain_revision := 0
 ## Converting every known tile into a descent-planner entry on each 10 Hz
@@ -413,6 +416,7 @@ func join_session(record: Dictionary) -> void:
 	_opened_generated_chest_cells.clear()
 	_action_loop_blocked_until.clear()
 	_terrain_tiles.clear()
+	_terrain_fluid_levels.clear()
 	_invalidate_jump_landing_cache()
 	_terrain_known_chunks.clear()
 	_terrain_observed_cells.clear()
@@ -2639,6 +2643,7 @@ func _terrain_climbable_tile(tile: Vector2i) -> bool:
 
 func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 	_terrain_tiles.clear()
+	_terrain_fluid_levels.clear()
 	_invalidate_jump_landing_cache()
 	_terrain_observed_cells.clear()
 	_support_preserving_mine_tiles.clear()
@@ -2661,6 +2666,21 @@ func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 			if bool(tile.get("preserves_support_on_mine", false)):
 				_support_preserving_mine_tiles[key] = true
 	_physics_route_replan_msec = 0
+
+
+func _rebuild_fluid_levels(raw_fluids: Variant) -> void:
+	_terrain_fluid_levels.clear()
+	if not raw_fluids is Array:
+		return
+	for raw_fluid in raw_fluids:
+		if not raw_fluid is Dictionary:
+			continue
+		var fluid := raw_fluid as Dictionary
+		var x := int(fluid.get("x", WorldSim.COORD_LIMIT + 1))
+		var y := int(fluid.get("y", WorldSim.COORD_LIMIT + 1))
+		var key := "%d:%d" % [x, y]
+		if absi(x) <= WorldSim.COORD_LIMIT and absi(y) <= WorldSim.COORD_LIMIT and str(_terrain_tiles.get(key, "")) in ["water", "lava", "core.water", "core.lava"]:
+			_terrain_fluid_levels[key] = int(fluid.get("level", -1))
 
 
 func _rebuild_plant_index(raw_plants: Variant) -> void:
@@ -2937,6 +2957,7 @@ func _merge_streamed_chunk_terrain(state: Dictionary) -> bool:
 	# region, unlike sparse tile_batch deltas. Replace cached cells within its
 	# horizontal bounds so old/absent cells cannot survive a procedural update.
 	_erase_chunk_index_keys(_terrain_tiles, chunk_x)
+	_erase_chunk_index_keys(_terrain_fluid_levels, chunk_x)
 	_erase_chunk_index_keys(_terrain_observed_cells, chunk_x)
 	_erase_chunk_index_keys(_support_preserving_mine_tiles, chunk_x)
 	_erase_chunk_index_keys(_plant_tiles, chunk_x)
@@ -2944,6 +2965,13 @@ func _merge_streamed_chunk_terrain(state: Dictionary) -> bool:
 		var key := "%d:%d" % [int(tile["x"]), int(tile["y"])]
 		_terrain_tiles[key] = str(tile["block_name"])
 		_terrain_observed_cells[key] = true
+	for raw_fluid in raw_fluids:
+		if not raw_fluid is Dictionary:
+			continue
+		var fluid := raw_fluid as Dictionary
+		var key := "%d:%d" % [int(fluid.get("x", WorldSim.COORD_LIMIT + 1)), int(fluid.get("y", WorldSim.COORD_LIMIT + 1))]
+		if str(_terrain_tiles.get(key, "")) in ["water", "lava", "core.water", "core.lava"]:
+			_terrain_fluid_levels[key] = int(fluid.get("level", -1))
 	_terrain_known_chunks[chunk_x] = true
 	var plant_entries: Array = state.get("plant_growth", []) if state.get("plant_growth", []) is Array else []
 	for raw_plant in plant_entries:
@@ -3093,11 +3121,16 @@ func _apply_tile_batch(payload: Dictionary) -> void:
 				name = str(defs.call("get_block_name", int(tile.get("block_id", 0))))
 		if int(tile.get("block_id", 1)) == 0 or name == "air":
 			_terrain_tiles.erase(key)
+			_terrain_fluid_levels.erase(key)
 			_support_preserving_mine_tiles.erase(key)
 			_protected_build_cells.erase(key)
 			_opened_generated_chest_cells.erase(key)
 		elif not name.is_empty():
 			_terrain_tiles[key] = name
+			if name in ["water", "lava", "core.water", "core.lava"] and tile.has("level"):
+				_terrain_fluid_levels[key] = int(tile.get("level", -1))
+			else:
+				_terrain_fluid_levels.erase(key)
 			if name != "chest":
 				_opened_generated_chest_cells.erase(key)
 			if tile.has("preserves_support_on_mine"):
@@ -4294,6 +4327,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		_live_challenge_best_distance = maxi(_live_challenge_best_distance, maxi(0, int(challenge_state.get("best_distance", 0))))
 	_rebuild_known_chunk_index(snapshot_generation.get("chunks", []))
 	_rebuild_terrain_index(_world_snapshot.get("tiles", []))
+	_rebuild_fluid_levels(_world_snapshot.get("fluids", []))
 	_rebuild_plant_index(_world_snapshot.get("plant_growth", _world_snapshot.get("plants", [])))
 	_seed_tree_growth_resources(_world_snapshot.get("tree_growth", []))
 	if str(snapshot_generation.get("mode", "")).to_lower() == "duel":
@@ -5745,6 +5779,7 @@ func _descent_terrain_map() -> Dictionary:
 			"solid": bool(block.get("solid", false)),
 			"tree_traversal": _terrain_climbable_at(int(key.get_slice(":", 0)), int(key.get_slice(":", 1))),
 			"fluid": bool(block.get("fluid", false)),
+			"fluid_level": int(_terrain_fluid_levels.get(key, -1)) if bool(block.get("fluid", false)) else -1,
 			"falls_when_unsupported": bool(block.get("falls_when_unsupported", false)),
 			"hazard": bool(block.get("hazard", false)),
 			"hazardous": bool(block.get("hazardous", false)),
@@ -6049,6 +6084,7 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 			"block_name": block_name,
 			"solid": bool(block.get("solid", false)),
 			"fluid": bool(block.get("fluid", false)),
+			"fluid_level": int(_terrain_fluid_levels.get(key, -1)) if bool(block.get("fluid", false)) else -1,
 			"temperature": float(block.get("temperature", 0.0)),
 			"harmful_fluid": bool(block.get("fluid", false)) and float(block.get("temperature", 0.0)) >= 0.8,
 			"harvest_tier": _block_harvest_tier(block),

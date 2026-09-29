@@ -336,6 +336,92 @@ static func floating_island_bridge_material_shortfall(observation: Dictionary) -
 	return maxi(0, best_cost + FLOATING_BRIDGE_RETURN_RESERVE - _floating_bridge_usable_support_count(inventory))
 
 
+## An island's observed source-water and source-lava can make renewable stone.
+## The worker stays on dry natural ground *outside* one of the pools and cuts
+## the three intervening surface cells from there. No source cell, avatar
+## support, unobserved floor, or flooded worksite is ever a mining target.
+static func island_stone_generator_step(observation: Dictionary) -> Dictionary:
+	var mode := str(observation.get("world_mode", "")).to_lower()
+	if mode not in ["skyblock", "floating_islands"] or bool(observation.get("pvp_world", false)):
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if not bool(self_state.get("on_ground", false)):
+		return {}
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var origin := _supported_origin(self_state, terrain)
+	if not _solid(terrain, origin.x, origin.y):
+		return {}
+	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	if int(inventory.get("cobblestone", 0)) >= 12 and (mode != "floating_islands" or floating_island_bridge_material_shortfall(observation) <= 0):
+		return {}
+	var sources: Array[Dictionary] = []
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		var name := str(tile.get("block_name", "")).to_lower().trim_prefix("core.")
+		if name in ["water", "lava"] and int(tile.get("fluid_level", -1)) == 0:
+			sources.append({"x": int(tile.get("x", 0)), "y": int(tile.get("y", 0)), "name": name})
+	var best: Dictionary = {}
+	var best_distance := 2147483647
+	for water in sources:
+		if str(water.get("name", "")) != "water":
+			continue
+		for lava in sources:
+			if str(lava.get("name", "")) != "lava" or int(water["y"]) != int(lava["y"]) or absi(int(water["x"]) - int(lava["x"])) != 4:
+				continue
+			var row := int(water["y"])
+			var left := mini(int(water["x"]), int(lava["x"]))
+			var right := maxi(int(water["x"]), int(lava["x"]))
+			var lined := true
+			for gap_x in range(left + 1, right):
+				if not _solid(terrain, gap_x, row + 1):
+					lined = false
+					break
+			if not lined:
+				continue
+			for work_x in [left - 1, right + 1]:
+				var worksite := Vector2i(work_x, row)
+				if not _solid(terrain, work_x, row) or not _empty(terrain, work_x, row - 1) or not _empty(terrain, work_x, row - 2):
+					continue
+				var waypoint := {} if origin == worksite else _known_safe_worksite(observation, worksite)
+				if origin != worksite and waypoint.is_empty():
+					continue
+				var distance := absi(origin.x - work_x) + absi(origin.y - row)
+				if distance < best_distance:
+					best_distance = distance
+					best = {"water_x": int(water["x"]), "lava_x": int(lava["x"]), "row": row, "left": left, "right": right, "worksite": worksite, "waypoint": waypoint}
+	if best.is_empty():
+		return {}
+	var worksite: Vector2i = best["worksite"]
+	if origin != worksite:
+		return best["waypoint"]
+	var row := int(best["row"])
+	var center := int(best["left"]) + 2
+	var water_adjacent := int(best["water_x"]) + signi(center - int(best["water_x"]))
+	var lava_adjacent := int(best["lava_x"]) + signi(center - int(best["lava_x"]))
+	var blocked: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	var now := int(observation.get("observed_at_msec", 0))
+	var resources := _as_array(observation.get("visible_resources", []))
+	# Open the middle, water side, then lava side. Hot fluid is released only
+	# after the cool side is ready to meet it; all cuts stay in mine reach.
+	for gap_x in [center, water_adjacent, lava_adjacent]:
+		if not _solid(terrain, gap_x, row):
+			continue
+		var target: Dictionary = {}
+		for raw_resource in resources:
+			if raw_resource is Dictionary and int((raw_resource as Dictionary).get("x", 2147483647)) == gap_x and int((raw_resource as Dictionary).get("y", 2147483647)) == row:
+				target = raw_resource as Dictionary
+				break
+		if target.is_empty() or not bool(target.get("reachable", false)) or int(blocked.get("tile:%d:%d" % [gap_x, row], 0)) > now:
+			return {}
+		target = target.duplicate(true)
+		target["reason"] = "island_stone_generator"
+		target["generator_channel"] = true
+		return {"action": Contract.ACTION_MINE, "target": target}
+	return {}
+
+
 static func _floating_bridge_block(observation: Dictionary, remaining: int) -> String:
 	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
 	if _floating_bridge_usable_support_count(inventory) < remaining + FLOATING_BRIDGE_RETURN_RESERVE:
