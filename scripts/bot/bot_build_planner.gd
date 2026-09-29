@@ -753,7 +753,10 @@ static func _worksite_corridor_has_lava(terrain: Dictionary, origin: Vector2i, w
 	# A waypoint can be topologically reachable yet the live motion guard
 	# refuses its jump over the source pool. Island maintenance need not cross
 	# that hazard; leave long crossings to a dedicated bridge project.
-	for x in range(mini(origin.x, worksite.x), maxi(origin.x, worksite.x) + 1):
+	# The avatar can overshoot a nominally dry worksite during an interrupted
+	# jump or host correction. Keep a full neighboring column of clearance from
+	# lava along the whole approach, including both endpoint foot positions.
+	for x in range(mini(origin.x, worksite.x) - 1, maxi(origin.x, worksite.x) + 2):
 		for y in range(mini(origin.y, worksite.y) - 1, maxi(origin.y, worksite.y) + 2):
 			if str(terrain.get("%d:%d" % [x, y], "")).to_lower().contains("lava"):
 				return true
