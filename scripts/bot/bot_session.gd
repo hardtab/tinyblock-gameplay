@@ -34,6 +34,7 @@ const STATE_PLAYING := "PLAYING"
 const STATE_LEAVING := "LEAVING"
 
 const DEFAULT_SYNC_TIMEOUT_MSEC := 45_000
+const INITIAL_INVENTORY_ECHO_TIMEOUT_MSEC := 15_000
 ## The shared multiplayer client emits `connected` only once per session, so a
 ## P2P RTC reconnect can leave the bot waiting in SYNCING with no further
 ## request. Mirror the human guest path: retry the full request until a transfer
@@ -210,6 +211,7 @@ var _food_eat_cooldown_until_msec := -1
 var _inventory_host_revision := 0
 var _inventory_client_revision := 0
 var _initial_loadout_source := ""
+var _initial_inventory_request_msec := -1
 var _initial_inventory_echo_logged := false
 var _action_started_before_inventory_echo := false
 var _population_logged := false
@@ -477,6 +479,7 @@ func join_session(record: Dictionary) -> void:
 	_achievements_recorded_crafts.clear()
 	_progression_gear_stripped = false
 	_initial_loadout_source = ""
+	_initial_inventory_request_msec = -1
 	_initial_inventory_echo_logged = false
 	_action_started_before_inventory_echo = false
 	safety.reset_session()
@@ -741,6 +744,23 @@ func _process(delta: float) -> void:
 		# while the guest RTC channel is being renegotiated. Freeze bot decisions,
 		# predicted motion, and acknowledgement expiry until the transport recovers.
 		_set_desired_input(false, false, false)
+		return
+	if _initial_inventory_request_msec >= 0 and not _initial_inventory_echo_logged:
+		# The initial world snapshot may contain only the host's inventory. Wait
+		# for the host's reply to our own inventory transaction before gathering,
+		# crafting, or spending anything; otherwise an early action makes the
+		# starting loadout impossible to verify and can race the inventory echo.
+		_set_desired_input(false, false, false)
+		_send_player_input_if_due(now_msec)
+		_send_player_snapshot_if_due(now_msec)
+		_check_empty_world_grace(now_msec)
+		if now_msec - _initial_inventory_request_msec >= INITIAL_INVENTORY_ECHO_TIMEOUT_MSEC:
+			structured_log.emit({
+				"event": "initial_inventory_echo_timeout",
+				"world_id": world_id,
+				"at_msec": now_msec,
+			})
+			leave("initial_inventory_echo_timeout")
 		return
 	_request_missing_region_chunks(now_msec)
 	_expire_craft_pending(now_msec)
@@ -4152,6 +4172,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		_stone_age_authoritative_inventory.clear()
 		_stone_age_authoritative_equipment = {"hand": "", "feet": ""}
 		_initial_loadout_source = ""
+		_initial_inventory_request_msec = -1
 		_initial_inventory_echo_logged = false
 		_action_started_before_inventory_echo = false
 	var selected_world_mode := _session_world_mode
@@ -4289,6 +4310,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_set_state(STATE_PLAYING)
 	_maybe_strip_progression_gear()
 	_send_inventory_snapshot()
+	_initial_inventory_request_msec = Time.get_ticks_msec()
 	_welcome_emoji_pending = human_player_count > 0
 	_welcome_emoji_due_msec = Time.get_ticks_msec() + 900 if _welcome_emoji_pending else -1
 	_send_duel_ready(Time.get_ticks_msec())
