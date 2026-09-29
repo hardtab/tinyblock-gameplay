@@ -6083,7 +6083,10 @@ func _append_visible_resource(
 	var key := "%d:%d" % [tile_x, tile_y]
 	if seen.has(key):
 		return
-	if _stone_age_gathering_wood() and not _is_starter_wood_log_name(block_name):
+	# Keep a looted generated chest visible during starter-wood gathering. The
+	# rule provider may safely mine that physical block after OPEN_CONTAINER;
+	# filtering it out here left the chest behind while the bot chased logs.
+	if _stone_age_gathering_wood() and not _is_starter_wood_log_name(block_name) and block_name.to_lower() != "chest":
 		if not _is_host_authoritative_regenerating_source(tile_x, tile_y):
 			return
 	var block_definition: Dictionary = _block_entry(block_name)
