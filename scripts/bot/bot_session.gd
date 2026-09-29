@@ -1887,6 +1887,11 @@ func _safe_flee_waypoint(
 		if tile == origin_tile or not _terrain_standable_tile(tile):
 			continue
 		var position := _world_position_for_support_tile(tile)
+		# A far tile beyond the hostile can have a larger final separation while
+		# the route to it runs straight through the animal. Keep the retreat on
+		# the bot's side unless they are already within one tile of each other.
+		if _flee_destination_crosses_hostile(origin, threat, position):
+			continue
 		var distance_from_threat := position.distance_to(threat)
 		if distance_from_threat <= best_distance:
 			continue
@@ -1924,6 +1929,11 @@ func _safe_flee_waypoint(
 		"support_tile": best_tile,
 		"distance_from_threat": best_distance,
 	}
+
+
+func _flee_destination_crosses_hostile(origin: Vector2, threat: Vector2, destination: Vector2) -> bool:
+	var threat_dx := threat.x - origin.x
+	return absf(threat_dx) > float(BlockDefs.TILE) and threat_dx * (threat.x - destination.x) <= 0.0
 
 
 ## Emergency escape from a fluid the avatar is already touching. The old direct
@@ -2077,6 +2087,8 @@ func _safe_flee_step_escape(
 			if first_step_allowed.is_valid() and not bool(first_step_allowed.call(origin_tile, tile, kind)):
 				continue
 			var position := _world_position_for_support_tile(tile)
+			if _flee_destination_crosses_hostile(_world_position_for_support_tile(origin_tile), threat, position):
+				continue
 			var distance_from_threat := position.distance_to(threat)
 			if distance_from_threat <= best_distance:
 				continue
@@ -2117,6 +2129,8 @@ func _safe_flee_reposition_waypoint(
 			if tile == origin_tile or not _terrain_standable_tile(tile):
 				continue
 			var position := _world_position_for_support_tile(tile)
+			if _flee_destination_crosses_hostile(_world_position_for_support_tile(origin_tile), threat, position):
+				continue
 			var distance_from_threat := position.distance_to(threat)
 			if distance_from_threat < min_distance or distance_from_threat <= best_distance:
 				continue
@@ -2169,6 +2183,8 @@ func _safe_flee_reposition_step(
 			if first_step_allowed.is_valid() and not bool(first_step_allowed.call(origin_tile, tile, kind)):
 				continue
 			var position := _world_position_for_support_tile(tile)
+			if _flee_destination_crosses_hostile(_world_position_for_support_tile(origin_tile), threat, position):
+				continue
 			if kind == "jump" and not _jump_route_has_safe_landing(self_state, position):
 				continue
 			var distance_from_threat := position.distance_to(threat)
