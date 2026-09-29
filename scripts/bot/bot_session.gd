@@ -141,6 +141,11 @@ var _opened_generated_chest_cells: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
 var _jump_landing_cache: Dictionary = {}
 var _terrain_revision := 0
+## Converting every known tile into a descent-planner entry on each 10 Hz
+## players_snapshot stalls large worlds, including the initial inventory echo.
+## Terrain mutations already invalidate _terrain_revision via the jump cache.
+var _descent_terrain_cache: Dictionary = {}
+var _descent_terrain_cache_revision := -1
 var _last_flee_route_diagnostic_msec := -1
 var _last_flee_motion_diagnostic_msec := -1
 var _last_pursuit_route_diagnostic_msec := -1
@@ -5671,6 +5676,8 @@ func _descent_one_block_source() -> Vector2i:
 
 
 func _descent_terrain_map() -> Dictionary:
+	if _descent_terrain_cache_revision == _terrain_revision:
+		return _descent_terrain_cache
 	var result: Dictionary = {}
 	for raw_key in _terrain_tiles.keys():
 		var key := str(raw_key)
@@ -5690,6 +5697,8 @@ func _descent_terrain_map() -> Dictionary:
 			"damage_per_tick": bool(block.get("damage_per_tick", false)),
 			"definition": definition.duplicate(true),
 		}
+	_descent_terrain_cache = result
+	_descent_terrain_cache_revision = _terrain_revision
 	return result
 
 
