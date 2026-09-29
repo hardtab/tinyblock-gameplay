@@ -4,6 +4,7 @@ extends Node
 const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
 const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 const BuildPlanner = preload("res://gameplay/scripts/bot/bot_build_planner.gd")
+const DigPlanner = preload("res://gameplay/scripts/bot/bot_dig_planner.gd")
 const Navigator = preload("res://gameplay/scripts/bot/bot_navigator.gd")
 const BlockDefs = preload("res://gameplay/scripts/block_defs.gd")
 const WorldScriptResource = preload("res://gameplay/scripts/world.gd")
@@ -6631,6 +6632,21 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 	var bridge: Dictionary = BuildPlanner.floating_island_bridge_step(observation) if mode == "floating_islands" else {}
 	var home: Dictionary = BuildPlanner.floating_island_home_step(observation) if mode == "floating_islands" else BuildPlanner.skyblock_home_step(observation)
 	var generator: Dictionary = BuildPlanner.island_stone_generator_step(observation)
+	var pit_escape: Dictionary = DigPlanner.trapped_upward_step(observation)
+	var pit_terrain: Dictionary = DigPlanner._terrain_map(observation.get("terrain_tiles", []))
+	var pit_origin: Vector2i = DigPlanner._grounded_support_tile(observation.get("self", {}), pit_terrain)
+	var pit_sides: Array = []
+	for direction in [1, -1]:
+		var side_x: int = pit_origin.x + direction
+		pit_sides.append({
+			"x": side_x,
+			"floor": DigPlanner._solid(pit_terrain, side_x, pit_origin.y),
+			"wall": DigPlanner._solid(pit_terrain, side_x, pit_origin.y - 1),
+			"headroom_known": DigPlanner._known_empty_cell(observation, pit_terrain, side_x, pit_origin.y - 2),
+			"lava_nearby": DigPlanner._near_harmful_fluid(Vector2i(side_x, pit_origin.y), observation),
+			"player_overlap": DigPlanner._overlaps_any_player(Vector2i(side_x, pit_origin.y - 1), observation),
+			"mine_action": str(DigPlanner._mine_step(side_x, pit_origin.y - 1, pit_origin, Vector2i(side_x, pit_origin.y), observation).get("action", "")),
+		})
 	var project: Dictionary = observation.get("build_project_state", {}) if observation.get("build_project_state", {}) is Dictionary else {}
 	structured_log.emit({
 		"event": "island_idle_probe",
@@ -6644,6 +6660,9 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 		"bridge_action": str(bridge.get("action", "")),
 		"home_action": str(home.get("action", "")),
 		"generator_action": str(generator.get("action", "")),
+		"pit_origin": [pit_origin.x, pit_origin.y],
+		"pit_escape_action": str(pit_escape.get("action", "")),
+		"pit_sides": pit_sides,
 		"project_status": str(project.get("status", "")),
 	})
 
