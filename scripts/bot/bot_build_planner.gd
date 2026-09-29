@@ -24,8 +24,8 @@ const PLANK_BLOCK_NAMES: PackedStringArray = [
 	"planks", "palm_planks", "pine_planks", "weeping_planks",
 ]
 const SKYBLOCK_HOME_EXPANSION_LIMIT := 4
-const SKYBLOCK_LEAF_RESERVE := 8
-const SKYBLOCK_LAVA_CLEARANCE_TILES := 3
+const SKYBLOCK_LEAF_RESERVE := 4
+const SKYBLOCK_LAVA_CLEARANCE_TILES := 2
 
 
 ## A finite Skyblock island needs a usable work area even when no distant
@@ -39,8 +39,8 @@ static func skyblock_home_step(observation: Dictionary) -> Dictionary:
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	if not bool(self_state.get("on_ground", false)):
 		return {}
-	var origin := _support_tile(self_state)
 	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var origin := _supported_origin(self_state, terrain)
 	if not _solid(terrain, origin.x, origin.y):
 		return {}
 	var protected: Dictionary = observation.get("protected_build_cells", {}) if observation.get("protected_build_cells", {}) is Dictionary else {}
@@ -153,7 +153,8 @@ static func _lava_near(terrain: Dictionary, tile: Vector2i, radius: int) -> bool
 
 
 static func next_step(observation: Dictionary) -> Dictionary:
-	var origin := _support_tile(observation.get("self", {}))
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var origin := _supported_origin(observation.get("self", {}), terrain)
 	var project_state: Dictionary = observation.get("build_project_state", {}) if observation.get("build_project_state", {}) is Dictionary else {}
 	var navigation_goal := _navigation_goal(observation, origin, project_state)
 	if str(navigation_goal.get("status", "")) == "complete":
@@ -163,7 +164,6 @@ static func next_step(observation: Dictionary) -> Dictionary:
 	var goal: Vector2i = navigation_goal.get("tile", _invalid_tile())
 	var has_goal := goal != _invalid_tile()
 	var build_project: Dictionary = navigation_goal.get("build_project", {}) if navigation_goal.get("build_project", {}) is Dictionary else {}
-	var terrain := _terrain_map(observation.get("terrain_tiles", []))
 	if terrain.is_empty():
 		return {}
 	if not _solid(terrain, origin.x, origin.y):
@@ -235,8 +235,8 @@ static func station_work_area_step(observation: Dictionary, station_name: String
 	# A station in inventory is useful only if it can be placed beside a walkable
 	# surface. Extend that surface by one attached cell when no existing station
 	# footprint is available; this is a functional destination, not decoration.
-	var origin := _support_tile(observation.get("self", {}))
 	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var origin := _supported_origin(observation.get("self", {}), terrain)
 	if not _solid(terrain, origin.x, origin.y):
 		return {}
 	var block_name := _support_block(observation)
@@ -428,6 +428,26 @@ static func _support_tile(raw: Variant) -> Vector2i:
 		floori((position.x + 10.0) / float(TILE)),
 		floori((position.y + 28.0) / float(TILE)),
 	)
+
+
+static func _supported_origin(raw: Variant, terrain: Dictionary) -> Vector2i:
+	var naive := _support_tile(raw)
+	if not raw is Dictionary or not bool((raw as Dictionary).get("on_ground", false)):
+		return naive
+	var self_state := raw as Dictionary
+	var px := float(self_state.get("x", 0.0))
+	var py := float(self_state.get("y", 0.0))
+	var width := float(self_state.get("w", 20.0))
+	var height := float(self_state.get("h", 28.0))
+	# Mirror WorldSim.find_ground_support: an avatar may be grounded on the
+	# neighboring block under its foot even while its centre is over empty air.
+	var row := floori((py + height + 1.5) / float(TILE))
+	var left := floori((px + 3.0) / float(TILE))
+	var right := floori((px + width - 3.001) / float(TILE))
+	for x in range(left, right + 1):
+		if _solid(terrain, x, row):
+			return Vector2i(x, row)
+	return naive
 
 
 static func _target_tile(target: Dictionary) -> Vector2i:
