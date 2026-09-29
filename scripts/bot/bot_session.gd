@@ -6651,7 +6651,7 @@ func _on_decision_proposed(decision: Dictionary) -> void:
 
 func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 	var mode := str(_decision_probe_observation.get("world_mode", ""))
-	if mode not in ["skyblock", "floating_islands"] or str(decision.get("action", "")) not in [Contract.ACTION_WAIT, Contract.ACTION_LOOK_AT]:
+	if mode not in ["skyblock", "floating_islands", "procedural"] or str(decision.get("action", "")) not in [Contract.ACTION_WAIT, Contract.ACTION_LOOK_AT]:
 		return
 	if _last_island_idle_probe_msec >= 0 and now_msec - _last_island_idle_probe_msec < 15_000:
 		return
@@ -6664,6 +6664,17 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 	var pit_escape: Dictionary = DigPlanner.trapped_upward_step(observation)
 	var pit_terrain: Dictionary = DigPlanner._terrain_map(observation.get("terrain_tiles", []))
 	var pit_origin: Vector2i = DigPlanner._grounded_support_tile(observation.get("self", {}), pit_terrain)
+	var self_position := Contract.target_position(observation.get("self", {}))
+	var nearest_player_distance := 999999.0
+	var nearest_player_vertical_gap := 0.0
+	for raw_player in observation.get("players", []):
+		if not raw_player is Dictionary or not bool((raw_player as Dictionary).get("alive", true)):
+			continue
+		var player_position := Contract.target_position(raw_player)
+		var player_distance := self_position.distance_to(player_position)
+		if player_distance < nearest_player_distance:
+			nearest_player_distance = player_distance
+			nearest_player_vertical_gap = self_position.y - player_position.y
 	var pit_sides: Array = []
 	for direction in [1, -1]:
 		var side_x: int = pit_origin.x + direction
@@ -6678,7 +6689,7 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 		})
 	var project: Dictionary = observation.get("build_project_state", {}) if observation.get("build_project_state", {}) is Dictionary else {}
 	structured_log.emit({
-		"event": "island_idle_probe",
+		"event": "procedural_idle_probe" if mode == "procedural" else "island_idle_probe",
 		"at_msec": now_msec,
 		"world_mode": mode,
 		"on_ground": bool((observation.get("self", {}) as Dictionary).get("on_ground", false)),
@@ -6691,6 +6702,9 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 		"generator_action": str(generator.get("action", "")),
 		"pit_origin": [pit_origin.x, pit_origin.y],
 		"pit_escape_action": str(pit_escape.get("action", "")),
+		"pit_escape_target_id": str(pit_escape.get("target_id", "")),
+		"nearest_player_distance": nearest_player_distance,
+		"nearest_player_vertical_gap": nearest_player_vertical_gap,
 		"pit_sides": pit_sides,
 		"project_status": str(project.get("status", "")),
 	})

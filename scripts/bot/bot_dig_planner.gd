@@ -16,6 +16,10 @@ const TILE := 32
 const MAX_HORIZONTAL_STEP := 1
 const MAX_VERTICAL_STEP := 2
 const MAX_TARGET_DISTANCE_TILES := 8
+# A safe, already verified step back toward a player can be useful farther away
+# than a direct one-step excavation target. Keep both searches bounded, but do
+# not apply the digging limit before considering a nearby return waypoint.
+const PIT_RETURN_PLAYER_RADIUS_TILES := 12
 const MINING_TOOL_NAMES: PackedStringArray = [
 	"wooden_pickaxe", "stone_pickaxe", "copper_pickaxe", "crystal_pickaxe",
 	"obsidian_pickaxe", "resonance_pickaxe", "stone_axe",
@@ -166,7 +170,7 @@ static func _player_above_origin(observation: Dictionary, self_state: Dictionary
 			continue
 		var player := raw_player as Dictionary
 		var position := Vector2(float(player.get("x", 0.0)), float(player.get("y", 0.0)))
-		if position.y <= self_position.y - float(TILE) * 1.5 and self_position.distance_to(position) <= float(TILE * MAX_TARGET_DISTANCE_TILES):
+		if position.y <= self_position.y - float(TILE) * 1.5 and self_position.distance_to(position) <= float(TILE * PIT_RETURN_PLAYER_RADIUS_TILES):
 			return true
 	return false
 
