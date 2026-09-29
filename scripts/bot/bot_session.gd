@@ -5763,6 +5763,16 @@ func _active_blocked_action_targets(now_msec: int) -> Dictionary:
 			_blocked_action_targets.erase(raw_key)
 			continue
 		targets[key] = blocked_until
+	# An OPEN_CONTAINER request is still awaiting its host acknowledgement.
+	# Treat it as temporarily unavailable so another decision cannot reset its
+	# sent_at clock and prevent the terminal timeout/cooldown from ever firing.
+	for raw_key in _pending_action_targets.keys():
+		var pending: Dictionary = _pending_action_targets[raw_key] if _pending_action_targets[raw_key] is Dictionary else {}
+		if str(pending.get("action", "")) != Contract.ACTION_OPEN_CONTAINER:
+			continue
+		var sent_at := int(pending.get("sent_at_msec", -1))
+		if sent_at >= 0 and now_msec - sent_at < 2_200:
+			targets["container:%s" % str(raw_key)] = sent_at + 2_200
 	return targets
 
 

@@ -653,10 +653,14 @@ func decide(observation: Dictionary) -> Dictionary:
 
 	var containers: Array = _as_array(observation.get("visible_containers", []))
 	if not containers.is_empty() and Contract.ACTION_OPEN_CONTAINER in legal:
+		var blocked_containers: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+		var observed_at_msec := int(observation.get("observed_at_msec", 0))
 		for raw_container in containers:
 			if not raw_container is Dictionary:
 				continue
 			var container := raw_container as Dictionary
+			if int(blocked_containers.get(str(container.get("id", "")), 0)) > observed_at_msec:
+				continue
 			# The PvP battle chest is a one-shot loadout action. Once its request
 			# is in flight, do not route it through this generic container pass and
 			# issue the same command again while inventory sync is travelling back.
