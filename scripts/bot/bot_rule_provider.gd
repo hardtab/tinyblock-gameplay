@@ -84,6 +84,7 @@ const FOLLOW_ROUTE_RECOVERY_REASONS := [
 	"pursuit_no_safe_waypoint", "pursuit_waypoint_unreachable",
 ]
 const FLEE_ROUTE_FAILURE_COOLDOWN_MSEC := 5_000
+const FLEE_TIMEOUT_RETRY_MSEC := 500
 const FLEE_ROUTE_FAILURE_REASONS := [
 	"blocked_obstacle", "edge_guard", "unsafe_jump_route", "unsafe_drop_route",
 	"route_unreachable", "flee_no_safe_waypoint", "timeout",
@@ -284,6 +285,14 @@ func decide(observation: Dictionary) -> Dictionary:
 			# range. Empty-handed attacks still deal the game's base one damage; a
 			# bounded defensive hit is preferable to freezing beside an active threat.
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_ATTACK_CREATURE, creature_threat, 500, 0.78)
+		if (
+			Contract.ACTION_WAIT in legal
+			and _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
+			and int(_flee_target_route_cooldown_until.get(str(creature_threat.get("id", "")), 0)) - now_msec <= FLEE_TIMEOUT_RETRY_MSEC
+		):
+			# A timed-out escape may simply be a still-running traversal. During its
+			# short replan gap, do not resume mining beside the pursuing creature.
+			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_WAIT, {}, FLEE_TIMEOUT_RETRY_MSEC, 0.9)
 		if Contract.ACTION_WAIT in legal and _creature_route_failure_still_requires_hold(creature_threat, observation):
 			# If the verified escape graph has no safe route, ordinary exploration can
 			# head straight back toward the same hostile creature. Hold position for a
@@ -1567,9 +1576,10 @@ func _arm_flee_target_route_cooldown(target_id: String, reason: String, at_msec:
 	# built. Its direct callback can arm a fresh cooldown, then history replay in
 	# decide() can still contain an older failure for the same creature. Never let
 	# that stale history move the retry deadline back into the past.
+	var retry_msec := FLEE_TIMEOUT_RETRY_MSEC if reason == "timeout" else FLEE_ROUTE_FAILURE_COOLDOWN_MSEC
 	_flee_target_route_cooldown_until[target_id] = maxi(
 		int(_flee_target_route_cooldown_until.get(target_id, 0)),
-		at_msec + FLEE_ROUTE_FAILURE_COOLDOWN_MSEC,
+		at_msec + retry_msec,
 	)
 	# Remember that this creature has no verified escape route. The bounded
 	# cooldown alone only postponed the next identical FLEE_FROM, so a distant
