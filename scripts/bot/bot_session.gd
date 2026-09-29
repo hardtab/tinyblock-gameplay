@@ -210,6 +210,8 @@ var _food_eat_cooldown_until_msec := -1
 var _inventory_host_revision := 0
 var _inventory_client_revision := 0
 var _initial_loadout_source := ""
+var _initial_inventory_echo_logged := false
+var _action_started_before_inventory_echo := false
 var _population_logged := false
 ## True only while this session owns the /root/Achievements community lock, so
 ## a leave never unlocks a lock another system (e.g. the local host player) set.
@@ -475,6 +477,8 @@ func join_session(record: Dictionary) -> void:
 	_achievements_recorded_crafts.clear()
 	_progression_gear_stripped = false
 	_initial_loadout_source = ""
+	_initial_inventory_echo_logged = false
+	_action_started_before_inventory_echo = false
 	safety.reset_session()
 	_world_snapshot.clear()
 	_equipment_slots = {"hand": "", "feet": ""}
@@ -4148,6 +4152,8 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 		_stone_age_authoritative_inventory.clear()
 		_stone_age_authoritative_equipment = {"hand": "", "feet": ""}
 		_initial_loadout_source = ""
+		_initial_inventory_echo_logged = false
+		_action_started_before_inventory_echo = false
 	var selected_world_mode := _session_world_mode
 	_world_snapshot = snapshot.duplicate(true)
 	if _world_snapshot.has("active_projectiles"):
@@ -4967,6 +4973,18 @@ func _apply_inventory_snapshot(payload: Dictionary) -> void:
 		_stone_age_authoritative_equipment = _equipment_from_player_state({"equipment_slots": payload.get("equipment_slots", {})})
 	_equipment_slots = _merge_equipment_with_pending(incoming_equipment, normalized)
 	_world_snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+	if not _initial_inventory_echo_logged:
+		_initial_inventory_echo_logged = true
+		structured_log.emit({
+			"event": "bot_initial_inventory_echo",
+			"world_id": world_id,
+			"world_mode": _session_world_mode,
+			"snapshot_source": _initial_loadout_source,
+			"action_started_before_echo": _action_started_before_inventory_echo,
+			"inventory": normalized.duplicate(true),
+			"equipment": _stone_age_authoritative_equipment.duplicate(true),
+			"at_msec": Time.get_ticks_msec(),
+		})
 	if payload.has("nourishment"):
 		var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 		var current := clampi(int(self_state.get("nourishment", 100)), 0, 100)
@@ -6696,6 +6714,8 @@ func _clear_aborted_movement_transition_if_needed(decision: Dictionary, reason: 
 
 
 func _record_action_history(phase: String, decision: Dictionary, reason: String = "") -> void:
+	if phase == "started" and not _initial_inventory_echo_logged:
+		_action_started_before_inventory_echo = true
 	var entry := {
 		"at_msec": Time.get_ticks_msec(),
 		"phase": phase,
