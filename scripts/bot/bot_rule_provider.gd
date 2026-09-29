@@ -318,6 +318,20 @@ func decide(observation: Dictionary) -> Dictionary:
 			# bounded defensive hit is preferable to freezing beside an active threat.
 			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_ATTACK_CREATURE, creature_threat, 500, 0.78)
 		if (
+			Contract.ACTION_MOVE_TO in legal
+			and Contract.ACTION_ATTACK_CREATURE in legal
+			and bool(_creature_route_exhausted.get(str(creature_threat.get("id", "")), false))
+			and _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
+			and creature_distance > float(observation.get("creature_attack_distance", 48.0))
+			and creature_distance <= _creature_immediate_distance(observation)
+			and _creature_has_aggression_evidence(creature_threat)
+		):
+			# A trapped bot can still defend itself empty-handed. When the attacker is
+			# just outside hit range, a safe, physics-routed step into reach is more
+			# useful than waiting to be struck again. MOVE_TO still refuses unknown
+			# ground, lava and unbridged edges; this is not a blind charge.
+			return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_MOVE_TO, _creature_approach_target(observation, creature_threat), 1200, 0.84)
+		if (
 			Contract.ACTION_WAIT in legal
 			and _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
 			and int(_flee_target_route_cooldown_until.get(str(creature_threat.get("id", "")), 0)) - now_msec <= FLEE_TIMEOUT_RETRY_MSEC
@@ -869,10 +883,10 @@ func _dangerous_creature_threat(observation: Dictionary, threats: Array) -> Dict
 		var threat_id := str(threat.get("id", ""))
 		if not threat_id.is_empty():
 			visible_ids[threat_id] = true
-			if _creature_has_aggression_evidence(threat):
-				# A creature that hits, provokes or is actually attacking earns its
-				# full flee priority back, even if a previous escape route failed.
-				_creature_route_exhausted.erase(threat_id)
+			# Keep a verified no-route verdict while this creature remains visible.
+			# Aggression already bypasses calm-only flee suppression, so erasing the
+			# verdict on every attacking snapshot only made the cornered-defense
+			# branch forget why it must not stand idle between melee hits.
 		var distance := float(threat.get("distance", Contract.distance_between(self_state, threat)))
 		if distance > danger_radius:
 			continue
