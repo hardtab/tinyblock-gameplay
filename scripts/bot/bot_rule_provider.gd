@@ -1823,9 +1823,22 @@ func _blocked_exploration_dig_step(observation: Dictionary, legal: PackedStringA
 	var toward_player := signf(Contract.target_position(nearest_player).x - origin.x)
 	if is_zero_approx(toward_player):
 		return {}
+	var origin_support := Vector2i(
+		floori((origin.x + float(self_state.get("w", 20.0)) * 0.5) / ROUTE_TILE),
+		floori((origin.y + float(self_state.get("h", 28.0))) / ROUTE_TILE),
+	)
+	var lower_x: int = origin_support.x + int(toward_player)
+	var route_terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var opened_lower_landing := (
+		Contract.target_position(nearest_player).y > origin.y
+		and _terrain_solid(route_terrain, "%d:%d" % [lower_x, origin_support.y + 1])
+		and not _terrain_solid(route_terrain, "%d:%d" % [lower_x, origin_support.y])
+	)
 	var local_target := {
 		"x": origin.x + toward_player * ROUTE_TILE * 4.0,
-		"y": origin.y,
+		# Preserve the lower height only after a supported descent opening exists.
+		# Otherwise the ordinary same-row obstacle dig remains appropriate.
+		"y": Contract.target_position(nearest_player).y if opened_lower_landing else origin.y,
 		"w": float(self_state.get("w", 20.0)),
 		"h": float(self_state.get("h", 28.0)),
 	}
@@ -3723,6 +3736,11 @@ func _approach_bridge_step(observation: Dictionary, social_target: Dictionary) -
 	var current_key := "%d:%d" % [origin.x, origin.y]
 	var next_x := origin.x + direction
 	var next_key := "%d:%d" % [next_x, origin.y]
+	if approach_tile.y > origin.y and _terrain_solid(terrain, "%d:%d" % [next_x, origin.y + 1]):
+		# The adjacent lower support is already attached. Leave the upper cell
+		# open so a descent can use it; rebuilding a level bridge here undoes
+		# the isolated-platform escape and creates a mine/place loop.
+		return {}
 	var protected_cells: Dictionary = observation.get("protected_build_cells", {}) if observation.get("protected_build_cells", {}) is Dictionary else {}
 	var blocked_targets: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
 	if protected_cells.has(next_key) or int(blocked_targets.get("tile:%s" % next_key, 0)) > int(observation.get("observed_at_msec", 0)):
