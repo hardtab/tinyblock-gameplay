@@ -174,19 +174,39 @@ static func isolated_platform_descent_step(observation: Dictionary) -> Dictionar
 		var neighbor := origin + Vector2i(direction, 0)
 		var landing := neighbor + Vector2i.DOWN
 		if (
-			not _solid(terrain, neighbor.x, neighbor.y)
-			or not _solid(terrain, landing.x, landing.y)
+			not _solid(terrain, landing.x, landing.y)
 			or not _known_empty_cell(observation, terrain, neighbor.x, neighbor.y - 1)
 			or not _known_empty_cell(observation, terrain, neighbor.x, neighbor.y - 2)
 			or _near_harmful_fluid(landing, observation)
 			or _overlaps_any_player(landing, observation)
 		):
 			continue
-		var clearance := observation.duplicate(false)
-		clearance["allow_isolated_platform_descent"] = true
-		var mine := _mine_step(neighbor.x, neighbor.y, origin, landing, clearance)
-		if not mine.is_empty():
-			return mine
+		if _solid(terrain, neighbor.x, neighbor.y):
+			var clearance := observation.duplicate(false)
+			clearance["allow_isolated_platform_descent"] = true
+			var mine := _mine_step(neighbor.x, neighbor.y, origin, landing, clearance)
+			if not mine.is_empty():
+				return mine
+		elif _known_empty_cell(observation, terrain, neighbor.x, neighbor.y):
+			var blocked: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+			var move_id := "platform:descend:%d:%d" % [landing.x, landing.y]
+			if int(blocked.get(move_id, 0)) > int(observation.get("observed_at_msec", 0)):
+				continue
+			var body_width := float(self_state.get("w", 20.0))
+			var body_height := float(self_state.get("h", 28.0))
+			return {
+				"action": Contract.ACTION_MOVE_TO,
+				"goal": Contract.GOAL_DIG_ROUTE,
+				"target_id": move_id,
+				"target": {
+					"id": move_id,
+					"position": [float(landing.x * TILE) + (float(TILE) - body_width) * 0.5, float(landing.y * TILE) - body_height],
+					"support_tile": [landing.x, landing.y],
+					"reachable": true,
+				},
+				"commit_for_ms": 2200,
+				"confidence": 0.7,
+			}
 	return {}
 
 

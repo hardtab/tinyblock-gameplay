@@ -831,6 +831,12 @@ func decide(observation: Dictionary) -> Dictionary:
 		var escape_step := _blocked_exploration_dig_step(observation, legal)
 		if not escape_step.is_empty():
 			return escape_step
+	# Once ordinary opportunities are exhausted, recover a local lower landing
+	# before social look/follow or random idle can starve the escape indefinitely.
+	if not bool(observation.get("pvp_world", false)) and _consecutive_action_streak(observation, Contract.ACTION_WAIT) >= 2:
+		var lower_landing_step := DigPlanner.isolated_platform_descent_step(observation)
+		if not lower_landing_step.is_empty() and str(lower_landing_step.get("action", "")) in legal:
+			return Contract.normalize_decision(lower_landing_step)
 
 	# Social proximity is a context, not the bot's whole job.  Only follow after
 	# the nearby achievement, gathering, and building opportunities have been
@@ -872,10 +878,6 @@ func decide(observation: Dictionary) -> Dictionary:
 			if not idle_return_step.is_empty():
 				_returning_to_descent_root = true
 				return idle_return_step
-			if Contract.ACTION_MINE in legal and not bool(observation.get("pvp_world", false)):
-				var lower_landing_step := DigPlanner.isolated_platform_descent_step(observation)
-				if str(lower_landing_step.get("action", "")) == Contract.ACTION_MINE:
-					return Contract.normalize_decision(lower_landing_step)
 		return _decision(Contract.GOAL_IDLE, Contract.ACTION_WAIT, {}, _rng.randi_range(700, 1800), 0.45)
 	return _decision(Contract.GOAL_IDLE, str(legal[0]), {}, 500, 0.2)
 
