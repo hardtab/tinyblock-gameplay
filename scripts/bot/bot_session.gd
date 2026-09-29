@@ -6785,6 +6785,10 @@ func _complete_build_project(project_id: String, now_msec: int) -> void:
 
 
 func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
+	if _made_container_route_progress(decision, reason):
+		# A short movement window is not a failed route when it advanced toward
+		# the same chest. Keep that goal eligible on the next decision tick.
+		reason = "route_progress"
 	_clear_aborted_movement_transition_if_needed(decision, reason)
 	if reason == "mine_target_became_unsafe":
 		_block_harmful_fluid_mine_target(decision)
@@ -6819,6 +6823,20 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 	_record_action_history("finished", decision, reason)
 
 
+func _made_container_route_progress(decision: Dictionary, reason: String) -> bool:
+	if reason != "timeout" or str(decision.get("action", "")) != Contract.ACTION_MOVE_TO:
+		return false
+	if not str(decision.get("target_id", "")).begins_with("container:"):
+		return false
+	var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	if not target.has("position") or not target.has("distance") or self_state.is_empty():
+		return false
+	var initial_distance := float(target.get("distance", INF))
+	var current_distance := Contract.distance_between(self_state, target)
+	return is_finite(initial_distance) and initial_distance - current_distance >= float(BlockDefs.TILE) * 0.5
+
+
 func _on_executor_action_failed(decision: Dictionary, reason: String) -> void:
 	_clear_aborted_movement_transition_if_needed(decision, reason)
 	_note_flee_route_failure(decision, reason)
@@ -6846,7 +6864,7 @@ func _clear_aborted_movement_transition_if_needed(decision: Dictionary, reason: 
 	var action := str(decision.get("action", ""))
 	if action not in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_MOVE_TO, Contract.ACTION_FOLLOW, Contract.ACTION_FLEE_FROM, Contract.ACTION_LOOK_AT]:
 		return
-	if reason in ["movement_step", "jump_step", "climb_step", "look_complete", "already_at_target", "movement_done"]:
+	if reason in ["movement_step", "jump_step", "climb_step", "look_complete", "already_at_target", "movement_done", "route_progress"]:
 		return
 	# A terminal guard, timeout, or cancellation can end an action halfway through
 	# a locally predicted transition. Do not carry its held jump/climb state into

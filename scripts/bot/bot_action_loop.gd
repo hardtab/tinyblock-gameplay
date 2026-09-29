@@ -52,6 +52,13 @@ static func consecutive_started_streak(history: Array, action: String) -> int:
 		if not history[index] is Dictionary:
 			continue
 		var entry := history[index] as Dictionary
+		if (
+			action == Contract.ACTION_MOVE_TO
+			and str(entry.get("phase", "")) == "finished"
+			and str(entry.get("action", "")) == Contract.ACTION_MOVE_TO
+			and str(entry.get("reason", "")) == "route_progress"
+		):
+			break
 		if str(entry.get("phase", "")) != "started":
 			continue
 		var entry_action := str(entry.get("action", ""))
