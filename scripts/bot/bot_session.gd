@@ -5236,6 +5236,10 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["action_loop_blocked"] = ActionLoop.active_blocks(_action_loop_blocked_until, now_msec)
 	snapshot["self_defense"] = safety.observation_state(now_msec)
 	snapshot["equipment_slots"] = _equipment_slots.duplicate(true)
+	# A local craft is optimistic until inventory_snapshot echoes from the host.
+	# Station placement must not consume an item that exists only in that local
+	# projection; otherwise the host rejects several PLACE commands in a row.
+	snapshot["host_confirmed_inventory_summary"] = _stone_age_authoritative_inventory.duplicate(true)
 	snapshot["craft_pending_output"] = _craft_pending_output
 	snapshot["craft_retry_after_msec"] = _craft_retry_after_msec
 	snapshot["craft_blocked_outputs"] = _active_craft_blocked_outputs(now_msec)

@@ -1731,8 +1731,11 @@ func _inventory(observation: Dictionary) -> Dictionary:
 
 func _station_progression_action(observation: Dictionary, foraging: bool) -> Dictionary:
 	var inventory := _inventory(observation)
+	var confirmed_inventory: Dictionary = observation.get("host_confirmed_inventory_summary", inventory) if observation.get("host_confirmed_inventory_summary", inventory) is Dictionary else inventory
 	for station_name in STATION_NAMES:
 		if int(inventory.get(station_name, 0)) <= 0 or _station_is_available(observation, station_name):
+			continue
+		if int(confirmed_inventory.get(station_name, 0)) <= 0:
 			continue
 		var placement := _station_place_target(observation, station_name)
 		if not placement.is_empty():
@@ -2645,12 +2648,15 @@ func _required_station_action(station_name: String, observation: Dictionary, leg
 	if _station_is_available(observation, station_name):
 		return {}
 	var inventory := _inventory(observation)
+	var confirmed_inventory: Dictionary = observation.get("host_confirmed_inventory_summary", inventory) if observation.get("host_confirmed_inventory_summary", inventory) is Dictionary else inventory
 	# Reuse/pursue an already placed station before crafting a duplicate. If it is
 	# not currently near enough for the recipe, route toward the observed station.
 	var existing_station := _nearest_station_target(observation, station_name)
 	if not existing_station.is_empty() and Contract.ACTION_MOVE_TO in legal:
 		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, existing_station, 1800, 0.9)
 	if int(inventory.get(station_name, 0)) > 0:
+		if int(confirmed_inventory.get(station_name, 0)) <= 0:
+			return {}
 		var placement := _station_place_target(observation, station_name)
 		if not placement.is_empty() and Contract.ACTION_PLACE in legal:
 			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, placement, 900, 0.97)
