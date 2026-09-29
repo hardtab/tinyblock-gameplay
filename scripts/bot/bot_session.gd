@@ -141,6 +141,7 @@ var _terrain_tiles: Dictionary = {}
 var _jump_landing_cache: Dictionary = {}
 var _terrain_revision := 0
 var _last_flee_route_diagnostic_msec := -1
+var _last_flee_motion_diagnostic_msec := -1
 var _last_pursuit_route_diagnostic_msec := -1
 ## Fully replicated procedural chunks prove that omitted cells are air. Static
 ## worlds instead use a small bounded area from their complete initial snapshot.
@@ -394,6 +395,7 @@ func join_session(record: Dictionary) -> void:
 	_emoji_reply_inflight = false
 	_last_player_snapshot_msec = -1
 	_last_player_input_msec = -1
+	_last_flee_motion_diagnostic_msec = -1
 	_live_one_block_mined = 0
 	_live_challenge_best_distance = 0
 	_desired_input = {"left": false, "right": false, "jump": false}
@@ -923,6 +925,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	var target_id := str(decision.get("target_id", ""))
 	var player_target := false
 	var emergency_fluid_escape_jump := false
+	var flee_selected_support: Variant = []
 	if target_id != "":
 		for raw_player in observation.get("players", []):
 			if raw_player is Dictionary and str((raw_player as Dictionary).get("id", "")) == target_id:
@@ -1041,6 +1044,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# the hostile without ever reaching this jump continuation.
 	var active_landing: Variant = _active_air_transition.get("to")
 	if action == Contract.ACTION_FLEE_FROM and _jump_active and typeof(active_landing) == TYPE_VECTOR2I:
+		_log_flee_motion(origin, target, {"support_tile": active_landing}, "jump_continuation", self_state)
 		return _jump_step(self_state, _world_position_for_support_tile(active_landing), delta)
 
 	var destination := target
@@ -1098,14 +1102,17 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 				# A falling avatar has no standable origin for the ground-route search.
 				# This is a transient physics state, not proof that escape is impossible.
 				if _should_settle_airborne(self_state, origin):
+					_log_flee_motion(origin, target, {}, "airborne_settling", self_state)
 					_set_desired_input(false, false, false)
 					_advance_local_physics(self_state, delta, false)
 					_world_snapshot["self"] = self_state
 					return {"done": false, "reason": "airborne_settling"}
+				_log_flee_motion(origin, target, {}, "no_safe_waypoint", self_state)
 				_set_desired_input(false, false, false)
 				_advance_local_physics(self_state, delta, false)
 				_world_snapshot["self"] = self_state
 				return {"done": true, "reason": "flee_no_safe_waypoint"}
+			flee_selected_support = flee_waypoint.get("support_tile", [])
 			if bool(flee_waypoint.get("emergency_closure", false)):
 				# Tier 3 is intentionally a single, host-known adjacent step. Validate
 				# the same limited closure again while executing it; do not route past
@@ -1156,6 +1163,8 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	# exploration destination unreachable merely because this frame is airborne.
 	# Do not invent horizontal steering over an unverified gap.
 	if _should_settle_airborne(self_state, origin):
+		if action == Contract.ACTION_FLEE_FROM:
+			_log_flee_motion(origin, target, {"position": [destination.x, destination.y]}, "airborne_settling_after_waypoint", self_state)
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
 		_world_snapshot["self"] = self_state
@@ -1182,6 +1191,8 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		if _is_pvp_world() or emergency_lava_escape
 		else _physics_route_step(origin, destination, target_id, physics_first_step_guard, explicit_target_tile)
 	)
+	if action == Contract.ACTION_FLEE_FROM:
+		_log_flee_motion(origin, target, {"position": [destination.x, destination.y], "support_tile": flee_selected_support, "route_step": route_step}, "route_step", self_state)
 	if bool(route_step.get("unreachable", false)) and _host_rejected_transition_blocks_origin(_support_tile_for_position(origin)):
 		_set_desired_input(false, false, false)
 		_advance_local_physics(self_state, delta, false)
@@ -1786,6 +1797,42 @@ func _safe_flee_emergency_step_filter(self_state: Dictionary, origin: Vector2, t
 		if first_distance < origin_distance - FLEE_EMERGENCY_MAX_CLOSURE:
 			return false
 		return kind != "jump" or _jump_route_has_safe_landing(self_state, first_position)
+
+
+func _log_flee_motion(origin: Vector2, threat: Vector2, waypoint: Dictionary, phase: String, self_state: Dictionary) -> void:
+	var now_msec := Time.get_ticks_msec()
+	if _last_flee_motion_diagnostic_msec >= 0 and now_msec - _last_flee_motion_diagnostic_msec < 500:
+		return
+	_last_flee_motion_diagnostic_msec = now_msec
+	var support: Variant = waypoint.get("support_tile", [])
+	var support_coords: Array = []
+	if typeof(support) == TYPE_VECTOR2I:
+		support_coords = [support.x, support.y]
+	elif support is Array:
+		support_coords = (support as Array).duplicate()
+	var planned: Variant = waypoint.get("position", [])
+	var planned_coords: Array = []
+	if typeof(planned) == TYPE_VECTOR2:
+		planned_coords = [planned.x, planned.y]
+	elif planned is Array:
+		planned_coords = (planned as Array).duplicate()
+	var route_step: Dictionary = waypoint.get("route_step", {}) if waypoint.get("route_step", {}) is Dictionary else {}
+	structured_log.emit({
+		"event": "flee_motion_probe",
+		"at_msec": now_msec,
+		"phase": phase,
+		"origin": [origin.x, origin.y],
+		"threat": [threat.x, threat.y],
+		"planned": planned_coords,
+		"support_tile": support_coords,
+		"route_kind": str(route_step.get("kind", "")),
+		"route_unreachable": bool(route_step.get("unreachable", false)),
+		"on_ground": bool(self_state.get("on_ground", false)),
+		"vx": float(self_state.get("vx", 0.0)),
+		"vy": float(self_state.get("vy", 0.0)),
+		"jump_active": _jump_active,
+		"desired_input": _desired_input.duplicate(),
+	})
 
 
 func _safe_flee_waypoint(
