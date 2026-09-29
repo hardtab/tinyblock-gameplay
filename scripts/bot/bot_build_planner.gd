@@ -96,7 +96,7 @@ static func urgent_fluid_escape_bridge_step(observation: Dictionary, threat: Dic
 ## action, not a reason to walk into a pool or dismantle an island generator.
 static func obstructing_fluid_source_step(observation: Dictionary) -> Dictionary:
 	var mode := str(observation.get("world_mode", "")).to_lower()
-	if mode in ["skyblock", "floating_islands"] or bool(observation.get("pvp_world", false)):
+	if mode in ["skyblock", "floating_islands"]:
 		return {}
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	if not bool(self_state.get("on_ground", false)):
