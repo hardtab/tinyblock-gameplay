@@ -180,6 +180,7 @@ var _host_rejected_transition_from := Vector2i(2147483647, 2147483647)
 var _host_rejected_transition_until_msec := -1
 var _physics_advanced_this_frame := false
 var _jump_active := false
+var _jump_predicted_landed := false
 var _jump_velocity := 0.0
 var _jump_ground_y := 0.0
 var _jump_start_x := 0.0
@@ -435,6 +436,7 @@ func join_session(record: Dictionary) -> void:
 	_host_rejected_transition_from = Vector2i(2147483647, 2147483647)
 	_host_rejected_transition_until_msec = -1
 	_jump_active = false
+	_jump_predicted_landed = false
 	_jump_velocity = 0.0
 	_jump_ground_y = 0.0
 	_jump_start_x = 0.0
@@ -1059,6 +1061,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 	if action == Contract.ACTION_LOOK_AT:
 		_set_desired_input(false, false, false)
 		_jump_active = false
+		_jump_predicted_landed = false
 		_jump_started_msec = -1
 		_climb_active = false
 		_advance_local_physics(self_state, delta, false)
@@ -1317,6 +1320,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		# Direct contact uses a landing proven dry by local terrain and a simulated
 		# jump arc. Reset any stale transition, then hold the jump toward that tile.
 		_jump_active = false
+		_jump_predicted_landed = false
 		_jump_started_msec = -1
 		_climb_active = false
 		_active_air_transition.clear()
@@ -1373,6 +1377,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 			"to": _support_tile_for_position(destination),
 		}
 		_jump_active = true
+		_jump_predicted_landed = false
 		_jump_start_x = float(self_state.get("x", origin.x))
 		_jump_started_msec = Time.get_ticks_msec()
 	if _jump_active:
@@ -3267,6 +3272,14 @@ func _movement_hint(origin: Vector2, destination: Vector2) -> String:
 
 func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> Dictionary:
 	var origin := Contract.target_position(self_state)
+	if _jump_predicted_landed:
+		# The private predictor is not proof that the host landed. Keep the
+		# verified transition active, but release jump/steering while waiting for
+		# the authoritative pose so a new route cannot walk into a nearby hazard.
+		_set_desired_input(false, false, false)
+		_advance_local_physics(self_state, delta, false)
+		_world_snapshot["self"] = self_state
+		return {"done": false, "reason": "await_host_landing"}
 	if not _jump_active:
 		_jump_active = true
 		_jump_start_x = origin.x
@@ -3281,9 +3294,6 @@ func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> D
 	var was_airborne := not bool(self_state.get("on_ground", false))
 	_advance_local_physics(self_state, delta, true)
 	var landed := was_airborne and bool(self_state.get("on_ground", false))
-	if landed:
-		_jump_active = false
-		_jump_started_msec = -1
 	var next_x := float(self_state.get("x", origin.x))
 	_world_snapshot["self"] = self_state
 	if landed and absf(next_x - _jump_start_x) < 4.0 and absf(destination.x - next_x) > 8.0:
@@ -3293,7 +3303,14 @@ func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> D
 		self_state["vx"] = 0.0
 		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "blocked_obstacle"}
-	return {"done": landed and absf(destination.x - next_x) <= 8.0, "reason": "jump_step"}
+	if landed and absf(destination.x - next_x) <= 8.0:
+		_jump_predicted_landed = true
+		_set_desired_input(false, false, false)
+		return {"done": false, "reason": "await_host_landing"}
+	if landed:
+		_jump_active = false
+		_jump_started_msec = -1
+	return {"done": false, "reason": "jump_step"}
 
 
 func _jump_route_has_safe_landing(
@@ -4764,9 +4781,15 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 					fresh_takeoff_echo = (
 						abs(echo_tile.x - takeoff_tile.x) <= 1
 						and echo_tile.y == takeoff_tile.y
-						and not bool(local_state.get("on_ground", false))
-						and local_position.y < takeoff_y - 1.0
-						and local_position.y >= takeoff_y - float(BlockDefs.TILE) * 4.0
+						and (not _jump_predicted_landed or echo_tile == takeoff_tile)
+						and (
+							_jump_predicted_landed
+							or (
+								not bool(local_state.get("on_ground", false))
+								and local_position.y < takeoff_y - 1.0
+								and local_position.y >= takeoff_y - float(BlockDefs.TILE) * 4.0
+							)
+						)
 						and absf(local_position.x - _jump_start_x) <= float(BlockDefs.TILE) * 3.0
 						and local_position.distance_to(host_position) <= float(BlockDefs.TILE) * 5.0
 					)
@@ -4814,11 +4837,15 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 					var host_dx := host_position.x - _jump_start_x
 					host_confirmed_near_landing = (
 						tile_distance <= 1
+						and host_tile != _active_air_transition.get("from", Vector2i(2147483647, 2147483647))
 						and absf(intended_dx) > 0.001
 						and absf(host_dx) >= 8.0
 						and intended_dx * host_dx > 0.0
 						and absf(float(entry.get("vx", 0.0))) <= 0.05
-						and local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
+						and (
+							_jump_predicted_landed
+							or local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
+						)
 						and _authoritative_support_verdict(host_tile) in ["supported", "fluid"]
 					)
 			# A support reseat normally just reconciles stale local terrain. If the
@@ -4848,12 +4875,20 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 			# When terrain proves the local predicted support is absent and the host
 			# pose is on support, this is a stale local arc, not evidence that the
 			# intended edge was rejected. Reseat without poisoning the transition.
-			var host_rejected_air_motion := (
+			var host_rejected_air_motion: bool = (
 				host_grounded
 				and not fresh_takeoff_echo
 				and (not host_support_reseat or host_rejected_transition_at_source)
 				and not host_confirmed_near_landing
-				and local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
+				and (
+					local_position.distance_to(host_position) > HOST_GROUNDED_AIR_REJECTION_TOLERANCE
+					or (
+						_jump_predicted_landed
+						and _jump_started_msec >= 0
+						and Time.get_ticks_msec() - _jump_started_msec >= HOST_JUMP_ECHO_GRACE_MSEC
+						and host_support_tile == _active_air_transition.get("from", Vector2i(2147483647, 2147483647))
+					)
+				)
 				and (
 					_jump_active
 					or (_climb_active and not bool(entry.get("climbing", false)) and not bool(entry.get("tree_ghost", false)))
@@ -4891,6 +4926,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 						})
 				_active_air_transition.clear()
 				_jump_active = false
+				_jump_predicted_landed = false
 				_jump_started_msec = -1
 				_climb_active = false
 				_physics_route.clear()
@@ -4919,6 +4955,7 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 				_harmful_fluid_damage_cooldown = 0.0
 				_guest_defeat_pending = false
 				_jump_active = false
+				_jump_predicted_landed = false
 				_jump_started_msec = -1
 				_climb_active = false
 			for field in ["x", "y", "facing", "vx", "vy", "on_ground", "health", "nourishment", "respawn_revision", "tree_ghost", "climbing", "climb_col"]:
@@ -6989,6 +7026,7 @@ func _clear_aborted_movement_transition_if_needed(decision: Dictionary, reason: 
 	# the next target; ordinary physics still resolves the current airborne pose.
 	_active_air_transition.clear()
 	_jump_active = false
+	_jump_predicted_landed = false
 	_jump_started_msec = -1
 	_jump_velocity = 0.0
 	_jump_ground_y = 0.0
