@@ -115,6 +115,14 @@ func observe_authoritative_position(self_state: Dictionary, terrain: Dictionary,
 			# staircase transition. Do not extend the return chain from it.
 			_pending_from = _invalid_tile()
 			_pending_to = _invalid_tile()
+	# Returning along an already confirmed stair is not a new descent. Shrink
+	# the protected chain to the grounded landing so subsequent return steps can
+	# still be planned instead of rejecting current != path.back().
+	var return_index := _support_path.find(support)
+	if return_index >= 0 and return_index < _support_path.size() - 1:
+		_support_path.resize(return_index + 1)
+		_pending_from = _invalid_tile()
+		_pending_to = _invalid_tile()
 	_authoritative_support = support
 	return true
 
@@ -147,6 +155,11 @@ func plan_next(self_state: Dictionary, terrain: Dictionary, coverage: Dictionary
 		result["reason"] = "return_route_unproven"
 		_last_plan = result.duplicate(true)
 		return result
+	# A safe way home remains useful even when there is no further safe lower
+	# landing. In particular, the rule provider must be able to leave a finished
+	# excavation instead of idling at the bottom of the stair.
+	result["current_support"] = _tile_array(current)
+	result["return_route"] = _route_for_observation(current_to_root)
 
 	var source := _one_block_source_for(coverage)
 	var candidates: Array[Dictionary] = []
@@ -198,7 +211,6 @@ func plan_next(self_state: Dictionary, terrain: Dictionary, coverage: Dictionary
 		candidates.append(candidate)
 	if candidates.is_empty():
 		result["reason"] = "no_proven_adjacent_landing"
-		result["return_route"] = _route_for_observation(current_to_root)
 		result["protected_supports"] = _protected_supports(current_to_root)
 		_last_plan = result.duplicate(true)
 		return result

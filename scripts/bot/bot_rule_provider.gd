@@ -66,6 +66,9 @@ var _recent_creature_world_id := ""
 ## decision loop, so an exhausted route now yields to ordinary goals until the
 ## creature shows real aggression again (hit, provocation, or an attack).
 var _creature_route_exhausted: Dictionary = {}
+var _returning_to_descent_root := false
+var _descent_suspended_until_msec := -1
+const DESCENT_RECOVERY_COOLDOWN_MSEC := 90_000
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 ## Only chase a player once they are clearly farther than the preferred gap.
@@ -204,6 +207,8 @@ func reset() -> void:
 	_recent_creature_threat_seen_msec = -1
 	_recent_creature_world_id = ""
 	_creature_route_exhausted.clear()
+	_returning_to_descent_root = false
+	_descent_suspended_until_msec = -1
 
 
 func decide(observation: Dictionary) -> Dictionary:
@@ -498,6 +503,12 @@ func decide(observation: Dictionary) -> Dictionary:
 		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.88)
 	if not aggressive_player_id.is_empty():
 		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.88)
+	if _returning_to_descent_root:
+		var return_step := _descent_return_action(observation, legal)
+		if not return_step.is_empty():
+			return return_step
+		_returning_to_descent_root = false
+		_descent_suspended_until_msec = now_msec + DESCENT_RECOVERY_COOLDOWN_MSEC
 	# Ordinary generated chests are a clear, finite world activity. Check them
 	# before progression/mining so the bot does not repeatedly pass a visible
 	# cache while harvesting whichever block happens to score first.
@@ -732,6 +743,11 @@ func decide(observation: Dictionary) -> Dictionary:
 	):
 		return _decision(Contract.GOAL_SOCIAL_FOLLOW, Contract.ACTION_LOOK_AT, social_target, 700, 0.51)
 	if Contract.ACTION_WAIT in legal:
+		if _consecutive_action_streak(observation, Contract.ACTION_WAIT) >= 2:
+			var idle_return_step := _descent_return_action(observation, legal)
+			if not idle_return_step.is_empty():
+				_returning_to_descent_root = true
+				return idle_return_step
 		return _decision(Contract.GOAL_IDLE, Contract.ACTION_WAIT, {}, _rng.randi_range(700, 1800), 0.45)
 	return _decision(Contract.GOAL_IDLE, str(legal[0]), {}, 500, 0.2)
 
@@ -2852,6 +2868,8 @@ func _one_block_source_descent_action(observation: Dictionary, legal: PackedStri
 
 
 func _safe_descent_plan_action(observation: Dictionary, legal: PackedStringArray, descent_plan: Dictionary) -> Dictionary:
+	if int(observation.get("observed_at_msec", 0)) < _descent_suspended_until_msec:
+		return {}
 	if (
 		not bool(observation.get("verified_safe_exit", false))
 		or not bool(descent_plan.get("eligible", false))
@@ -2907,6 +2925,30 @@ func _safe_descent_plan_action(observation: Dictionary, legal: PackedStringArray
 			move_decision["descent_to_support"] = to_support.duplicate(true)
 			return Contract.normalize_decision(move_decision)
 	return {}
+
+
+func _descent_return_action(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
+	if Contract.ACTION_MOVE_TO not in legal:
+		return {}
+	var descent_plan: Dictionary = observation.get("descent_plan", {}) if observation.get("descent_plan", {}) is Dictionary else {}
+	var root: Array = descent_plan.get("root_support", []) if descent_plan.get("root_support", []) is Array else []
+	var current: Array = descent_plan.get("current_support", []) if descent_plan.get("current_support", []) is Array else []
+	var route: Array = descent_plan.get("return_route", []) if descent_plan.get("return_route", []) is Array else []
+	if root.size() < 2 or current.size() < 2 or current == root or route.size() < 2:
+		return {}
+	var next: Dictionary = route[1] if route[1] is Dictionary else {}
+	var tile: Array = next.get("tile", []) if next.get("tile", []) is Array else []
+	if tile.size() < 2 or tile == current:
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var tile_x := int(tile[0])
+	var tile_y := int(tile[1])
+	var target := {
+		"id": "descent-return:%d:%d" % [tile_x, tile_y],
+		"position": [(float(tile_x) + 0.5) * 32.0 - float(self_state.get("w", 20.0)) * 0.5, float(tile_y) * 32.0 - float(self_state.get("h", 28.0))],
+		"support_tile": tile.duplicate(true),
+	}
+	return _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, target, 1_800, 0.82)
 
 
 func _descent_clear_target(observation: Dictionary, descent_plan: Dictionary) -> Dictionary:
