@@ -5648,7 +5648,7 @@ func _safe_exploration_waypoints(self_state: Dictionary) -> Array[Dictionary]:
 		and now - _safe_exploration_waypoint_cache_checked_msec < 450
 	):
 		return _safe_exploration_waypoint_cache.duplicate(true)
-	var reachable := Navigator.physics_reachable_first_steps(
+	var reachable := Navigator.physics_roundtrip_first_steps(
 		origin_tile,
 		Callable(self, "_terrain_standable_tile"),
 		Callable(self, "_terrain_climbable_tile"),

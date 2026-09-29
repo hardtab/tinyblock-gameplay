@@ -214,6 +214,57 @@ static func physics_reachable_first_steps(
 	return first_steps
 
 
+## Exploration must not treat a safe landing as a safe destination when the
+## directed physics graph has no route back. A verified six-tile drop, for
+## example, may be survivable but cannot be reversed by a one-tile jump. Build
+## the reverse edges of the bounded reachable graph once, then keep only its
+## component that can return to origin. The same transition and hypothetical
+## jump guards validate each return edge.
+static func physics_roundtrip_first_steps(
+	origin: Vector2i,
+	passable: Callable,
+	climbable: Callable = Callable(),
+	max_nodes: int = MAX_PHYSICS_ROUTE_NODES,
+	transition_allowed: Callable = Callable(),
+	first_step_allowed: Callable = Callable(),
+	later_step_allowed: Callable = Callable(),
+) -> Dictionary:
+	var forward := physics_reachable_first_steps(
+		origin, passable, climbable, max_nodes,
+		transition_allowed, first_step_allowed, later_step_allowed,
+	)
+	if forward.is_empty():
+		return {}
+	var predecessors: Dictionary = {}
+	for raw_tile in forward.keys():
+		var current: Vector2i = raw_tile
+		for candidate in _physics_candidates(current, climbable, transition_allowed.is_valid()):
+			var neighbor: Vector2i = candidate["tile"]
+			if not forward.has(neighbor):
+				continue
+			var kind := str(candidate["kind"])
+			if transition_allowed.is_valid() and not bool(transition_allowed.call(current, neighbor, kind)):
+				continue
+			if later_step_allowed.is_valid() and not bool(later_step_allowed.call(current, neighbor, kind)):
+				continue
+			if not predecessors.has(neighbor):
+				predecessors[neighbor] = []
+			(predecessors[neighbor] as Array).append(current)
+	var roundtrip: Dictionary = {origin: forward[origin]}
+	var queue: Array[Vector2i] = [origin]
+	var head := 0
+	while head < queue.size():
+		var current := queue[head]
+		head += 1
+		for raw_previous in predecessors.get(current, []):
+			var previous: Vector2i = raw_previous
+			if roundtrip.has(previous):
+				continue
+			roundtrip[previous] = forward[previous]
+			queue.append(previous)
+	return roundtrip
+
+
 static func _reconstruct_path(previous: Dictionary, origin: Vector2i, target: Vector2i) -> Array[Vector2i]:
 	var reverse: Array[Vector2i] = []
 	var current := target
