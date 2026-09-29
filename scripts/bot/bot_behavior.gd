@@ -25,6 +25,7 @@ const AGGRESSIVE_PLAYER_COMMIT_MIN_MSEC := 250
 ## legitimately re-issues travel.
 const HOSTILE_PREEMPT_COOLDOWN_MSEC := 900
 const HOSTILE_PREEMPT_MIN_COMMIT_MSEC := 1_200
+const HOSTILE_TRAVEL_REACTION_MULTIPLIER := 2.0
 const AGGRESSIVE_PLAYER_ACTIONS: PackedStringArray = [
 	Contract.ACTION_MOVE_NEAR_PLAYER,
 	Contract.ACTION_MOVE_TO,
@@ -147,9 +148,10 @@ func _combat_should_preempt_mining(observation: Dictionary) -> bool:
 ## range: without this the bot only re-evaluates safety when the leg expires,
 ## which is how it can be chipped to death while walking beside a creature.
 ## Combat approaches, dig routes and short commitments are excluded, and the
-## decision has to contain an actionable dangerous creature inside
-## `creature_attack_distance`, so ordinary exploration and distant wildlife never
-## interrupt travel.
+## decision has to contain an actionable dangerous creature close enough to
+## reach striking distance during the held leg. React before the strike itself:
+## waiting for the attack-radius boundary was too late in a live Android world.
+## Distant wildlife still does not interrupt travel.
 func _hostile_creature_should_preempt_travel(observation: Dictionary, now_msec: int) -> bool:
 	if executor == null or executor.current_action() != Contract.ACTION_MOVE_TO:
 		return false
@@ -170,7 +172,7 @@ func _hostile_creature_should_preempt_travel(observation: Dictionary, now_msec: 
 	var creature: Dictionary = provider.call("dangerous_hostile_threat", observation)
 	if creature.is_empty():
 		return false
-	if float(creature.get("distance", INF)) > float(observation.get("creature_attack_distance", 48.0)):
+	if float(creature.get("distance", INF)) > float(observation.get("creature_attack_distance", 48.0)) * HOSTILE_TRAVEL_REACTION_MULTIPLIER:
 		return false
 	_hostile_preempt_until_msec = now_msec + HOSTILE_PREEMPT_COOLDOWN_MSEC
 	return true
