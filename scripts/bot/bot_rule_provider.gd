@@ -1623,12 +1623,33 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 	var target_support_tile: Array = []
 	var target_progress := -1.0
 	var selected_direction := _explore_direction
+	# A standable tile can still be too close to hot fluid for an incremental
+	# movement leg: braking and host reconciliation may carry the avatar part of
+	# a tile past the target. Keep a one-cell buffer around observed harmful
+	# fluid for optional exploration; deliberate generator work uses its own
+	# worksite planner instead of this frontier selector.
+	var hazardous_frontiers: Dictionary = {}
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var terrain_tile := raw_tile as Dictionary
+		var block_name := str(terrain_tile.get("block_name", "")).to_lower().trim_prefix("core.")
+		if not bool(terrain_tile.get("harmful_fluid", false)) and not (bool(terrain_tile.get("fluid", false)) and float(terrain_tile.get("temperature", 0.0)) >= 0.8) and block_name != "lava":
+			continue
+		var hazard_x := int(terrain_tile.get("x", 0))
+		var hazard_y := int(terrain_tile.get("y", 0))
+		for dx in range(-1, 2):
+			for dy in range(-1, 2):
+				hazardous_frontiers["%d:%d" % [hazard_x + dx, hazard_y + dy]] = true
 	for direction in [_explore_direction, -_explore_direction]:
 		for raw_waypoint in _as_array(observation.get("safe_exploration_waypoints", [])):
 			if not raw_waypoint is Dictionary:
 				continue
 			var waypoint := raw_waypoint as Dictionary
 			if not bool(waypoint.get("reachable", false)):
+				continue
+			var waypoint_support: Array = waypoint.get("support_tile", []) if waypoint.get("support_tile", []) is Array else []
+			if waypoint_support.size() == 2 and hazardous_frontiers.has("%d:%d" % [int(waypoint_support[0]), int(waypoint_support[1])]):
 				continue
 			var position := Contract.target_position(waypoint)
 			var route_steps := int(waypoint.get("route_steps", EXPLORE_MAX_ROUTE_STEPS + 1))
