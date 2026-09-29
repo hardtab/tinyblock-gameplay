@@ -135,7 +135,11 @@ static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, obser
 		# Never excavate a cell the session deliberately constructed.  Without this
 		# guard a placed step (for example a workbench) reads back as a solid
 		# blocker and the planner places then mines the same tile forever.
-		return {}
+		# After repeated failed movement, one adjacent non-station wall block may
+		# be removed to escape a pocket the bot built around itself. Never clear a
+		# floor/support or a workbench/furnace; the descent guard below still applies.
+		if not bool(observation.get("allow_escape_clear_protected", false)) or abs(x - origin.x) != 1 or y not in [origin.y - 1, origin.y - 2] or str(_terrain_tile(observation, x, y).get("block_name", "")) not in SUPPORT_BLOCK_NAMES:
+			return {}
 	if _is_descent_return_support(observation, x, y):
 		# The generic obstacle planner must honor the same return-route invariant
 		# as the descent planner. Otherwise safety rejects this identical MINE

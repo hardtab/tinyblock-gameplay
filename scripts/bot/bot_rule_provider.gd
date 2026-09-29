@@ -68,7 +68,11 @@ var _recent_creature_world_id := ""
 var _creature_route_exhausted: Dictionary = {}
 var _returning_to_descent_root := false
 var _descent_suspended_until_msec := -1
+var _movement_stall_anchor := Vector2(INF, INF)
+var _movement_stall_since_msec := -1
 const DESCENT_RECOVERY_COOLDOWN_MSEC := 90_000
+const MOVEMENT_ESCAPE_STALL_MSEC := 8_000
+const MOVEMENT_ESCAPE_HISTORY_MSEC := 20_000
 
 const PREFERRED_PLAYER_DISTANCE := 84.0
 ## Only chase a player once they are clearly farther than the preferred gap.
@@ -209,6 +213,8 @@ func reset() -> void:
 	_creature_route_exhausted.clear()
 	_returning_to_descent_root = false
 	_descent_suspended_until_msec = -1
+	_movement_stall_anchor = Vector2(INF, INF)
+	_movement_stall_since_msec = -1
 
 
 func decide(observation: Dictionary) -> Dictionary:
@@ -224,6 +230,7 @@ func decide(observation: Dictionary) -> Dictionary:
 	var max_health := maxi(1, int(self_state.get("max_health", 10)))
 	var low_health := float(health) / float(max_health) <= SURVIVAL_HEALTH_RATIO
 	var now_msec := int(observation.get("observed_at_msec", 0))
+	var movement_stalled := _movement_stalled_for_escape(observation, Contract.target_position(self_state), now_msec)
 	# Consume any fresh terminal route failure toward the last social/search
 	# follow target before choosing this tick's action.
 	_sync_follow_route_failures(observation)
@@ -596,6 +603,10 @@ func decide(observation: Dictionary) -> Dictionary:
 		var dig_action := str(dig_step.get("action", ""))
 		if dig_action in legal:
 			return Contract.normalize_decision(dig_step)
+	if movement_stalled:
+		var stalled_escape := _blocked_exploration_dig_step(observation, legal, true)
+		if not stalled_escape.is_empty():
+			return stalled_escape
 	# Generic resource mining is disabled during an active PvP duel. The bot
 	# should pursue the opponent, not mine filler blocks. DigPlanner steps
 	# are still allowed because they excavate toward a blocked player path.
@@ -1643,7 +1654,7 @@ func _starter_wood_explore_direction(observation: Dictionary, origin: Vector2) -
 	return direction
 
 
-func _blocked_exploration_dig_step(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
+func _blocked_exploration_dig_step(observation: Dictionary, legal: PackedStringArray, allow_own_wall_clear: bool = false) -> Dictionary:
 	if bool(observation.get("pvp_world", false)) or not _as_array(observation.get("threats", [])).is_empty():
 		return {}
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
@@ -1672,10 +1683,38 @@ func _blocked_exploration_dig_step(observation: Dictionary, legal: PackedStringA
 		"w": float(self_state.get("w", 20.0)),
 		"h": float(self_state.get("h", 28.0)),
 	}
-	var step: Dictionary = DigPlanner.next_step(observation, local_target)
+	var route_observation := observation
+	if allow_own_wall_clear:
+		route_observation = observation.duplicate(true)
+		route_observation["allow_escape_clear_protected"] = true
+	var step: Dictionary = DigPlanner.next_step(route_observation, local_target)
 	if str(step.get("action", "")) not in [Contract.ACTION_MINE, Contract.ACTION_PLACE] or str(step.get("action", "")) not in legal:
 		return {}
 	return Contract.normalize_decision(step)
+
+
+func _movement_stalled_for_escape(observation: Dictionary, origin: Vector2, now_msec: int) -> bool:
+	if is_inf(_movement_stall_anchor.x) or now_msec < _movement_stall_since_msec or origin.distance_to(_movement_stall_anchor) >= ROUTE_TILE * 0.75:
+		_movement_stall_anchor = origin
+		_movement_stall_since_msec = now_msec
+		return false
+	if now_msec - _movement_stall_since_msec < MOVEMENT_ESCAPE_STALL_MSEC:
+		return false
+	var failed_moves := 0
+	var history := _as_array(observation.get("action_history", []))
+	for index in range(history.size() - 1, -1, -1):
+		if not history[index] is Dictionary:
+			continue
+		var entry := history[index] as Dictionary
+		if now_msec - int(entry.get("at_msec", 0)) > MOVEMENT_ESCAPE_HISTORY_MSEC:
+			break
+		if str(entry.get("action", "")) not in [Contract.ACTION_MOVE_TO, Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW] or str(entry.get("phase", "")) not in ["finished", "failed"]:
+			continue
+		if str(entry.get("reason", "")) in ["timeout", "blocked_obstacle", "route_unreachable", "unsafe_jump_route", "edge_guard"]:
+			failed_moves += 1
+			if failed_moves >= 2:
+				return true
+	return false
 
 
 func _note_explore_direction_failure(target_id: String, now_msec: int) -> void:
