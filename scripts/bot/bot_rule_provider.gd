@@ -4132,6 +4132,32 @@ func _terrain_occupied_map(observation: Dictionary) -> Dictionary:
 	return occupied
 
 
+func _tree_plant_site_safe(target_x: int, target_y: int, occupied: Dictionary, observation: Dictionary) -> bool:
+	# A propagated leaf can become a five-block trunk with a two-block crown.
+	# Keep that future footprint away from the living/work area, not just the
+	# one empty seed cell. Otherwise a tiny island grows into an impassable tree
+	# tower over its player, crafting station and water/lava generator.
+	for dx in range(-2, 3):
+		for dy in range(-6, 2):
+			var name := str(occupied.get("%d:%d" % [target_x + dx, target_y + dy], "")).to_lower().trim_prefix("core.")
+			if name.is_empty():
+				continue
+			if name.contains("wood") or name.contains("log") or name.contains("leaves") or name.contains("needles") or name.contains("water") or name.contains("lava") or name in ["workbench", "furnace", "chest"]:
+				return false
+	var occupants := _as_array(observation.get("players", [])).duplicate()
+	occupants.append(observation.get("self", {}))
+	for raw_player in occupants:
+		if not raw_player is Dictionary or not bool((raw_player as Dictionary).get("alive", true)):
+			continue
+		var player := raw_player as Dictionary
+		var position := Contract.target_position(player)
+		var player_x := floori((position.x + float(player.get("w", 20.0)) * 0.5) / ROUTE_TILE)
+		var player_y := floori((position.y + float(player.get("h", 28.0)) * 0.5) / ROUTE_TILE)
+		if absi(player_x - target_x) <= 2 and absi(target_y - player_y) <= 6:
+			return false
+	return true
+
+
 func _plant_target(observation: Dictionary) -> Dictionary:
 	var now_msec := int(observation.get("observed_at_msec", 0))
 	if _last_plant_msec >= 0 and now_msec - _last_plant_msec < PLANT_ACTION_COOLDOWN_MSEC:
@@ -4144,7 +4170,7 @@ func _plant_target(observation: Dictionary) -> Dictionary:
 	var occupied := _terrain_occupied_map(observation)
 	var offsets := [
 		Vector2i(1, -1), Vector2i(2, -1), Vector2i(-1, -1), Vector2i(3, -1),
-		Vector2i(1, 0), Vector2i(2, 0), Vector2i(-1, 0), Vector2i(0, -1),
+		Vector2i(1, 0), Vector2i(2, 0), Vector2i(-1, 0), Vector2i(3, 0), Vector2i(-3, 0), Vector2i(0, -1),
 	]
 	if not seed_name.is_empty():
 		for offset_index in range(offsets.size()):
@@ -4158,6 +4184,8 @@ func _plant_target(observation: Dictionary) -> Dictionary:
 			if not _is_plant_substrate(support_name):
 				continue
 			if _tile_overlaps_player(Vector2i(target_x, target_y), self_state):
+				continue
+			if not _tree_plant_site_safe(target_x, target_y, occupied, observation):
 				continue
 			_plant_step = (_plant_step + offset_index + 1) % offsets.size()
 			_last_plant_msec = now_msec
@@ -4183,6 +4211,8 @@ func _plant_target(observation: Dictionary) -> Dictionary:
 				if _is_plant_substrate(support_name):
 					continue
 				if _tile_overlaps_player(Vector2i(target_x, target_y), self_state):
+					continue
+				if not _tree_plant_site_safe(target_x, target_y, occupied, observation):
 					continue
 				_plant_step = (_plant_step + offset_index + 1) % offsets.size()
 				_last_plant_msec = now_msec
