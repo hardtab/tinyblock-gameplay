@@ -113,6 +113,7 @@ var _region_chunk_request_msec: Dictionary = {}
 var _region_received_chunks: Dictionary = {}
 var _last_region_chunk_request_msec := -1
 var _world_snapshot: Dictionary = {}
+var _first_observation_probe_pending := true
 var _roster: Dictionary = {}
 var _recent_events: Array[Dictionary] = []
 var _recent_emoji_events: Array[Dictionary] = []
@@ -489,6 +490,7 @@ func join_session(record: Dictionary) -> void:
 	_action_started_before_inventory_echo = false
 	safety.reset_session()
 	_world_snapshot.clear()
+	_first_observation_probe_pending = true
 	_equipment_slots = {"hand": "", "feet": ""}
 	session_id = str(record.get("session_id", ""))
 	world_id = str(record.get("world_id", ""))
@@ -4393,9 +4395,11 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_snapshot_retry_at_msec = -1
 	_snapshot_retry_count = 0
 	_update_human_count()
+	structured_log.emit({"event": "snapshot_post_population", "at_msec": Time.get_ticks_msec()})
 	_set_state(STATE_PLAYING)
 	_maybe_strip_progression_gear()
 	_send_inventory_snapshot()
+	structured_log.emit({"event": "snapshot_inventory_request_sent", "at_msec": Time.get_ticks_msec()})
 	_initial_inventory_request_msec = Time.get_ticks_msec()
 	_initial_inventory_last_request_msec = _initial_inventory_request_msec
 	_welcome_emoji_pending = human_player_count > 0
@@ -5284,6 +5288,9 @@ func _update_human_count() -> void:
 
 
 func _build_observation(now_msec: int) -> Dictionary:
+	var probe_start := Time.get_ticks_msec()
+	if _first_observation_probe_pending:
+		structured_log.emit({"event": "first_observation_started", "at_msec": probe_start, "terrain_tile_count": _terrain_tiles.size()})
 	_expire_stale_action_targets(now_msec)
 	_expire_stone_age_pending(now_msec)
 	_expire_achievement_goal_pending(now_msec)
@@ -5427,6 +5434,9 @@ func _build_observation(now_msec: int) -> Dictionary:
 	observation["achievement_goal_states"] = _achievement_goal_states.duplicate(true)
 	observation["build_project_state"] = _build_project_state.duplicate(true)
 	_annotate_active_build_project_route(observation, now_msec)
+	if _first_observation_probe_pending:
+		_first_observation_probe_pending = false
+		structured_log.emit({"event": "first_observation_finished", "at_msec": Time.get_ticks_msec(), "duration_msec": Time.get_ticks_msec() - probe_start})
 	return observation
 
 
