@@ -121,9 +121,33 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 		if score < best_score:
 			best = candidate
 			best_score = score
-	if best == _invalid_tile():
-		return {}
-	return next_step(observation, {"x": float(best.x * TILE + 6), "y": float(best.y * TILE - 28)})
+	if best != _invalid_tile():
+		var upward := next_step(observation, {"x": float(best.x * TILE + 6), "y": float(best.y * TILE - 28)})
+		if not upward.is_empty():
+			return upward
+	# A one-high wall can seal the only same-level floor corridor while a higher
+	# landing is still out of reach. Clear its *body* cell only when its own
+	# support remains intact and known. This opens a reversible walk route in the
+	# next authoritative snapshot; it never mines the floor under either player.
+	var directions := [1, -1]
+	if best != _invalid_tile() and best.x < origin.x:
+		directions = [-1, 1]
+	for direction in directions:
+		var side_x: int = origin.x + direction
+		var side_floor := Vector2i(side_x, origin.y)
+		var blocker := Vector2i(side_x, origin.y - 1)
+		if (
+			not _solid(terrain, side_floor.x, side_floor.y)
+			or not _solid(terrain, blocker.x, blocker.y)
+			or not _known_empty_cell(observation, terrain, side_x, origin.y - 2)
+			or _near_harmful_fluid(side_floor, observation)
+			or _overlaps_any_player(blocker, observation)
+		):
+			continue
+		var clear := _mine_step(blocker.x, blocker.y, origin, side_floor, observation)
+		if not clear.is_empty():
+			return clear
+	return {}
 
 
 static func _near_harmful_fluid(candidate: Vector2i, observation: Dictionary) -> bool:
