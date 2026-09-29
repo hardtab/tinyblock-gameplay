@@ -6,6 +6,10 @@ const BlockDefs = preload("res://gameplay/scripts/block_defs.gd")
 const Navigator = preload("res://gameplay/scripts/bot/bot_navigator.gd")
 
 const DEFAULT_RADIUS := 256.0
+## The bot may need to see a living player one terrace above it before a safe
+## return route enters ordinary interaction range. Keep resources and threats
+## at the caller's smaller observation radius.
+const NEARBY_PLAYER_RADIUS := 384.0
 const DEFAULT_MAX_EVENTS := 12
 ## Keep direct block interactions in sync with WorldSim.player_near(), which
 ## measures from the avatar centre to the block centre using a 4.5-tile radius.
@@ -19,7 +23,7 @@ static func build(snapshot: Dictionary, own_player_id: String, radius: float = D
 	# Duel snapshots deliberately include the host as the bot's pinned enemy.
 	# Outside PvP, keep the existing human-only social filter so ordinary host
 	# metadata can never become an unsolicited target.
-	var players := _normalize_entities(snapshot.get("players", []), own_player_id, self_position, radius, bool(snapshot.get("pvp_world", false)))
+	var players := _normalize_entities(snapshot.get("players", []), own_player_id, self_position, maxf(radius, NEARBY_PLAYER_RADIUS), bool(snapshot.get("pvp_world", false)))
 	var threats := _normalize_entities(snapshot.get("threats", snapshot.get("creatures", [])), "", self_position, radius, true)
 	var resources := _normalize_entities(snapshot.get("visible_resources", snapshot.get("resources", [])), "", self_position, radius, false)
 	for resource in resources:
@@ -439,7 +443,9 @@ static func _normalize_entities(raw_entities: Variant, own_player_id: String, or
 		if not hostile_default:
 			var actor_kind := str(item.get("actor_kind", "")).to_lower()
 			var role := str(item.get("role", "")).to_lower()
-			if bool(item.get("is_bot", false)) or actor_kind == "bot" or role == "host" or role == "bot":
+			# A P2P host is a real human avatar. Dedicated-server metadata hosts
+			# are removed from the roster by BotSession before this normalization.
+			if bool(item.get("is_bot", false)) or actor_kind == "bot" or role == "bot":
 				continue
 			if health <= 0 or (item.has("alive") and not bool(item.get("alive", false))):
 				continue
