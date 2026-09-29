@@ -3172,8 +3172,18 @@ func _procedural_depth_action(observation: Dictionary, legal: PackedStringArray,
 	# This is geometry-based rather than a special case for a named world.
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	var waypoints: Array = observation.get("safe_exploration_waypoints", []) if observation.get("safe_exploration_waypoints", []) is Array else []
-	if waypoints.is_empty() and DigPlanner._player_above_origin(observation, self_state):
-		return {}
+	if DigPlanner._player_above_origin(observation, self_state):
+		var support_row := floori((float(self_state.get("y", 0.0)) + float(self_state.get("h", 28.0))) / float(BlockDefs.TILE))
+		var has_rising_exit := false
+		for raw_waypoint in waypoints:
+			if not raw_waypoint is Dictionary or not bool((raw_waypoint as Dictionary).get("reachable", false)):
+				continue
+			var raw_support: Variant = (raw_waypoint as Dictionary).get("support_tile", [])
+			if raw_support is Array and (raw_support as Array).size() >= 2 and int((raw_support as Array)[1]) < support_row:
+				has_rising_exit = true
+				break
+		if not has_rising_exit:
+			return {}
 	var descent_plan: Dictionary = observation.get("descent_plan", {}) if observation.get("descent_plan", {}) is Dictionary else {}
 	if not bool(observation.get("verified_safe_exit", false)) or not bool(descent_plan.get("eligible", false)) or not bool(descent_plan.get("verified_safe_exit", false)):
 		return {}
