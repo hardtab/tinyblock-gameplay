@@ -5900,14 +5900,15 @@ func _active_blocked_action_targets(now_msec: int) -> Dictionary:
 
 
 func _physics_reachable_support_tiles(origin_tile: Vector2i, first_step_allowed: Callable = Callable()) -> Dictionary:
-	# This is a route map rather than only a boolean set: it gives the policy the
-	# actual stand tile and shortest step count from the same bounded graph used
-	# by movement execution. Both paths include host-rejected edges and unsafe
-	# first/later jumps, so a MOVE_TO can carry an executable destination.
+	# A resource approach must also have a route back. A survivable long drop
+	# onto a lower island is not a safe gathering trip when the bot cannot jump
+	# back to its origin; treating forward reachability as sufficient sent it
+	# down toward wood and lava far below the starting Floating Island.
+	# Preserve the bounded route metadata for the executable outbound leg.
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	if not first_step_allowed.is_valid():
 		first_step_allowed = _safe_jump_first_step_filter(self_state)
-	return Navigator.physics_reachable_first_steps(
+	return Navigator.physics_roundtrip_first_steps(
 		origin_tile,
 		Callable(self, "_terrain_standable_tile"),
 		Callable(self, "_terrain_climbable_tile"),

@@ -161,6 +161,8 @@ static func mine_target_is_safe(observation: Dictionary, target: Dictionary) -> 
 		return false
 	if mine_target_opens_harmful_fluid_path(observation, target):
 		return false
+	if _mine_target_undermines_player(observation, target):
+		return false
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	if self_state.is_empty():
 		return false
@@ -214,6 +216,41 @@ static func mine_target_is_safe(observation: Dictionary, target: Dictionary) -> 
 			if standable.call(return_tile) and not Navigator.physics_route(landing, return_tile, standable).is_empty():
 				return true
 		return false
+	return false
+
+
+## A mine can be safe for the bot yet remove another player's footing. The
+## layer below sand/gravel is also structural: once removed, the granular
+## support falls and can drop a stationary player into the void or lava.
+static func _mine_target_undermines_player(observation: Dictionary, target: Dictionary) -> bool:
+	var target_x := int(target.get("x", 2147483647))
+	var target_y := int(target.get("y", 2147483647))
+	if target_x == 2147483647 or target_y == 2147483647:
+		return false
+	var terrain := _terrain_cell_map(observation.get("terrain_tiles", []))
+	var target_cell: Dictionary = terrain.get(Vector2i(target_x, target_y), {}) if terrain.get(Vector2i(target_x, target_y), {}) is Dictionary else {}
+	if bool(target_cell.get("preserves_support_on_mine", false)):
+		return false
+	for raw_player in _as_array(observation.get("players", [])):
+		if not raw_player is Dictionary:
+			continue
+		var player := raw_player as Dictionary
+		if not bool(player.get("alive", true)) or not bool(player.get("on_ground", false)):
+			continue
+		var position := Contract.target_position(player)
+		var width := maxf(1.0, float(player.get("w", 20.0)))
+		var height := maxf(1.0, float(player.get("h", 28.0)))
+		var left := floori(position.x / float(BlockDefs.TILE))
+		var right := floori((position.x + width - 0.001) / float(BlockDefs.TILE))
+		var support_y := floori((position.y + height + 0.01) / float(BlockDefs.TILE))
+		if target_x < left or target_x > right:
+			continue
+		if target_y == support_y:
+			return true
+		if target_y == support_y + 1:
+			var support_cell: Dictionary = terrain.get(Vector2i(target_x, support_y), {}) if terrain.get(Vector2i(target_x, support_y), {}) is Dictionary else {}
+			if bool(support_cell.get("falls_when_unsupported", false)):
+				return true
 	return false
 
 
@@ -343,6 +380,7 @@ static func _terrain_cell_map(raw_terrain: Variant) -> Dictionary:
 			"temperature": float(tile.get("temperature", 0.0)),
 			"harmful_fluid": bool(tile.get("harmful_fluid", false)),
 			"preserves_support_on_mine": bool(tile.get("preserves_support_on_mine", false)),
+			"falls_when_unsupported": bool(tile.get("falls_when_unsupported", false)),
 		}
 	return terrain
 
