@@ -3456,6 +3456,21 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 	for _index in substeps:
 		if not is_zero_approx(vx):
 			var next_x := x + vx * substep
+			# Policy and route targets can change while a step is in flight. Guard
+			# the actual body footprint on every physics substep, not just the
+			# chosen support column, so an overshoot cannot walk into known lava.
+			var feet_row := floori((y + height + 0.01) / float(BlockDefs.TILE))
+			var next_edge_x := floori((next_x if vx < 0.0 else next_x + width - 0.001) / float(BlockDefs.TILE))
+			var current_edge_x := floori((x if vx < 0.0 else x + width - 0.001) / float(BlockDefs.TILE))
+			var new_lava_support := (
+				on_ground and not jump_pressed and next_edge_x != current_edge_x
+				and _terrain_is_lava_at(next_edge_x, feet_row)
+				and not _terrain_is_lava_at(current_edge_x, feet_row)
+			)
+			if new_lava_support or (not _position_touches_harmful_fluid(x, y, width, height) and _position_touches_harmful_fluid(next_x, y, width, height)):
+				vx = 0.0
+				_set_desired_input(false, false, bool(_desired_input.get("jump", false)))
+				continue
 			var horizontal_hit := _local_collision(next_x, y, width, height, ignore_trees)
 			if horizontal_hit.is_empty():
 				x = next_x
