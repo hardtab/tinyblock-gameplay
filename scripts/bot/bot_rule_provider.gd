@@ -584,6 +584,9 @@ func decide(observation: Dictionary) -> Dictionary:
 				observation,
 			)
 	if mode == "floating_islands":
+		var bridge_planks := _floating_bridge_plank_output(observation)
+		if not bridge_planks.is_empty() and Contract.ACTION_CRAFT in legal:
+			return _decision(Contract.GOAL_BUILD, Contract.ACTION_CRAFT, {"id": bridge_planks}, 700, 0.91)
 		var island_bridge := BuildPlanner.floating_island_bridge_step(observation)
 		var island_project_complete := _build_project_status_decision(island_bridge)
 		if not island_project_complete.is_empty():
@@ -2133,6 +2136,21 @@ func _craftable_output(observation: Dictionary) -> String:
 			if name in GENERIC_OUTPUTS and name in LOCAL_OPTIMISTIC_CRAFTS and name not in blocked_outputs and int(inventory.get(name, 0)) <= 0 and _recipe_inputs_available(recipe, inventory):
 				return name
 	return ""
+
+
+func _floating_bridge_plank_output(observation: Dictionary) -> String:
+	if BuildPlanner.floating_island_bridge_material_shortfall(observation) <= 0:
+		return ""
+	if not str(observation.get("craft_pending_output", "")).is_empty() or int(observation.get("craft_retry_after_msec", -1)) > int(observation.get("observed_at_msec", 0)):
+		return ""
+	var inventory := _inventory(observation)
+	# Keep raw logs for repairs and recipes; convert only the surplus required
+	# to make the selected route affordable.
+	if _count_named(inventory, WOOD_BLOCK_NAMES) <= 2:
+		return ""
+	var recipes: Array = observation.get("recipes", []) if observation.get("recipes", []) is Array else []
+	var blocked: Array = observation.get("craft_blocked_outputs", []) if observation.get("craft_blocked_outputs", []) is Array else []
+	return _craftable_plank_output(recipes, inventory, blocked, _max_named_stack(inventory, PLANK_OUTPUTS) + 1)
 
 
 func _progression_output_satisfied(inventory: Dictionary, output_name: String, observation: Dictionary = {}, unlocked: Array = []) -> bool:
