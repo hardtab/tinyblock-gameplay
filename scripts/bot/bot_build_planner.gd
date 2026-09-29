@@ -365,14 +365,25 @@ static func floating_island_bridge_step(observation: Dictionary) -> Dictionary:
 	var block_name := _floating_bridge_block(observation, plan.size() - confirmed)
 	if block_name.is_empty():
 		return {}
+	# A player may be standing on the nominal shore worksite. The next bridge
+	# cell remains in reach from one cell farther inland, so stage there when it
+	# is solid and clear instead of repeatedly walking into that player.
+	if _overlaps_other_player(worksite + Vector2i.UP, observation):
+		var inland_worksite := worksite + Vector2i(-direction, 0)
+		if absi(inland_worksite.x - next_tile.x) > MAX_PLACEMENT_REACH_TILES:
+			return {}
+		worksite = inland_worksite
 	if not _solid(terrain, worksite.x, worksite.y) or not _empty(terrain, worksite.x, worksite.y - 1) or not _empty(terrain, worksite.x, worksite.y - 2):
 		return {}
 	if _worksite_corridor_has_lava(terrain, origin, worksite):
 		return {}
-	if absi(origin.x - worksite.x) > MAX_PLACEMENT_REACH_TILES or origin.y != worksite.y:
+	if absi(origin.x - next_tile.x) > MAX_PLACEMENT_REACH_TILES or absi(origin.y - next_tile.y) > MAX_PLACEMENT_REACH_TILES:
+		var worksite_id := "island:worksite:%d:%d" % [worksite.x, worksite.y]
+		if _recent_build_worksite_failure(observation, worksite_id):
+			return {}
 		return {
 			"action": Contract.ACTION_MOVE_TO,
-			"id": "island:worksite:%d:%d" % [worksite.x, worksite.y],
+			"id": worksite_id,
 			"position": [float(worksite.x * TILE + 6), float(worksite.y * TILE - 28)],
 			"support_tile": [worksite.x, worksite.y],
 		}
@@ -635,6 +646,22 @@ static func _floating_bridge_candidates() -> Array[String]:
 	return ["dirt", "stone_bricks", "stone", "grass", "packed_ice", "leaves", "palm_leaves", "pine_needles", "weeping_leaves", "cobblestone", "planks", "palm_planks", "pine_planks", "weeping_planks"]
 
 
+static func _recent_build_worksite_failure(observation: Dictionary, target_id: String) -> bool:
+	var now := int(observation.get("observed_at_msec", 0))
+	for raw_entry in _as_array(observation.get("action_history", [])):
+		if not raw_entry is Dictionary:
+			continue
+		var entry := raw_entry as Dictionary
+		if str(entry.get("target_id", "")) != target_id or str(entry.get("action", "")) != Contract.ACTION_MOVE_TO:
+			continue
+		if str(entry.get("phase", "")) not in ["finished", "failed"] or str(entry.get("reason", "")) not in ["blocked_obstacle", "route_unreachable", "unsafe_jump_route", "edge_guard", "timeout"]:
+			continue
+		var age := now - int(entry.get("at_msec", -1))
+		if age >= 0 and age < 30_000:
+			return true
+	return false
+
+
 ## A monotone support path across the gap. A rise uses a horizontally attached
 ## base plus the next step above it; a descent uses a brace below the previous
 ## support plus the lower step. Every transition is reversible by a one-block
@@ -697,6 +724,9 @@ static func _skyblock_home_support_block(inventory: Dictionary) -> String:
 
 
 static func _known_safe_worksite(observation: Dictionary, tile: Vector2i) -> Dictionary:
+	var target_id := "skyblock:worksite:%d:%d" % [tile.x, tile.y]
+	if _recent_build_worksite_failure(observation, target_id):
+		return {}
 	for raw_waypoint in _as_array(observation.get("safe_exploration_waypoints", [])):
 		if not raw_waypoint is Dictionary:
 			continue
@@ -704,7 +734,7 @@ static func _known_safe_worksite(observation: Dictionary, tile: Vector2i) -> Dic
 		if waypoint.get("support_tile", []) == [tile.x, tile.y] and bool(waypoint.get("reachable", false)):
 			return {
 				"action": Contract.ACTION_MOVE_TO,
-				"id": "skyblock:worksite:%d:%d" % [tile.x, tile.y],
+				"id": target_id,
 				"position": waypoint.get("position", []),
 				"support_tile": [tile.x, tile.y],
 			}
@@ -1061,6 +1091,10 @@ static func _target_tile(target: Dictionary) -> Vector2i:
 static func _overlaps_any_player(tile: Vector2i, observation: Dictionary) -> bool:
 	if _overlaps_player(tile, observation.get("self", {})):
 		return true
+	return _overlaps_other_player(tile, observation)
+
+
+static func _overlaps_other_player(tile: Vector2i, observation: Dictionary) -> bool:
 	for raw_player in _as_array(observation.get("players", [])):
 		if raw_player is Dictionary and _overlaps_player(tile, raw_player):
 			return true
