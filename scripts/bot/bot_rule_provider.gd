@@ -299,6 +299,10 @@ func decide(observation: Dictionary) -> Dictionary:
 			if bridge_action in legal:
 				var bridge_target: Dictionary = escape_bridge.get("target", escape_bridge) if escape_bridge.get("target", escape_bridge) is Dictionary else {}
 				return _decision(Contract.GOAL_SURVIVE, bridge_action, bridge_target, 1200 if bridge_action == Contract.ACTION_MOVE_TO else 900, 0.94)
+			if Contract.ACTION_CRAFT in legal and not _is_melee_weapon(hand) and not bow_ready and creature_distance > _creature_immediate_distance(observation):
+				var emergency_weapon := _creature_emergency_weapon_craft(observation)
+				if not emergency_weapon.is_empty():
+					return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_CRAFT, {"id": emergency_weapon}, 700, 0.93)
 		if (
 			Contract.ACTION_FLEE_FROM in legal
 			and not _flee_target_on_route_cooldown(str(creature_threat.get("id", "")), now_msec)
@@ -1181,6 +1185,18 @@ func _creature_combat_tool(observation: Dictionary) -> String:
 		var name := str(raw_name)
 		if int(inventory.get(name, 0)) > 0 and _is_melee_weapon(name):
 			return name
+	return ""
+
+
+func _creature_emergency_weapon_craft(observation: Dictionary) -> String:
+	if not str(observation.get("craft_pending_output", "")).is_empty() or int(observation.get("craft_retry_after_msec", -1)) > int(observation.get("observed_at_msec", 0)):
+		return ""
+	var recipes := _as_array(observation.get("recipes", []))
+	var inventory := _inventory(observation)
+	var blocked := _as_array(observation.get("craft_blocked_outputs", []))
+	for wanted in ["stone_sword", "stone_axe"]:
+		if wanted not in blocked and int(inventory.get(wanted, 0)) <= 0 and _recipe_available(recipes, inventory, wanted):
+			return wanted
 	return ""
 
 
