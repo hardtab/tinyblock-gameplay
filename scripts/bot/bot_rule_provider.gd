@@ -54,6 +54,8 @@ var _pending_follow_route_recovery: Dictionary = {}
 var _last_flee_target_id := ""
 var _last_flee_route_outcome_key := ""
 var _flee_target_route_cooldown_until: Dictionary = {}
+var _flee_route_failure_poses: Dictionary = {}
+var _last_decision_pose: Dictionary = {}
 var _last_aggressive_player_id := ""
 var _last_enemy_player_id := ""
 var _last_creature_threat_id := ""
@@ -204,6 +206,8 @@ func reset() -> void:
 	_last_flee_target_id = ""
 	_last_flee_route_outcome_key = ""
 	_flee_target_route_cooldown_until.clear()
+	_flee_route_failure_poses.clear()
+	_last_decision_pose.clear()
 	_last_aggressive_player_id = ""
 	_last_enemy_player_id = ""
 	_last_creature_threat_id = ""
@@ -226,6 +230,11 @@ func decide(observation: Dictionary) -> Dictionary:
 	if bool(observation.get("pvp_world", false)) and not bool(observation.get("duel_started", true)):
 		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_WAIT, {}, 700, 0.99)
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	_refresh_flee_route_failures_for_pose(self_state)
+	_last_decision_pose = {
+		"position": Contract.target_position(self_state),
+		"on_ground": bool(self_state.get("on_ground", false)),
+	}
 	var health := int(self_state.get("health", 10))
 	var max_health := maxi(1, int(self_state.get("max_health", 10)))
 	var low_health := float(health) / float(max_health) <= SURVIVAL_HEALTH_RATIO
@@ -1901,6 +1910,25 @@ func _flee_target_on_route_cooldown(target_id: String, now_msec: int) -> bool:
 	return until_msec > 0 and now_msec < until_msec
 
 
+func _refresh_flee_route_failures_for_pose(self_state: Dictionary) -> void:
+	if self_state.is_empty():
+		return
+	var position := Contract.target_position(self_state)
+	var grounded := bool(self_state.get("on_ground", false))
+	for raw_target_id in _flee_route_failure_poses.keys():
+		var target_id := str(raw_target_id)
+		var failed_pose: Dictionary = _flee_route_failure_poses[target_id]
+		var failed_position: Vector2 = failed_pose.get("position", position)
+		if position.distance_to(failed_position) < float(BlockDefs.TILE) * 0.75 and grounded == bool(failed_pose.get("on_ground", grounded)):
+			continue
+		# A route failure is about one origin pose. Landing after an airborne
+		# correction or moving one support over gives the graph a new start cell;
+		# keeping the old cooldown turns an active attack into repeated WAIT.
+		_flee_route_failure_poses.erase(target_id)
+		_flee_target_route_cooldown_until.erase(target_id)
+		_creature_route_exhausted.erase(target_id)
+
+
 ## The executor can finish a terminal movement step after the observation for
 ## this tick was built. Record its result directly so the immediate follow-up
 ## decision cannot see stale history and issue one more identical flee.
@@ -1926,6 +1954,8 @@ func _arm_flee_target_route_cooldown(target_id: String, reason: String, at_msec:
 		int(_flee_target_route_cooldown_until.get(target_id, 0)),
 		at_msec + retry_msec,
 	)
+	if not _last_decision_pose.is_empty():
+		_flee_route_failure_poses[target_id] = _last_decision_pose.duplicate(true)
 	# Remember that this creature has no verified escape route. The bounded
 	# cooldown alone only postponed the next identical FLEE_FROM, so a distant
 	# hostile that was neither attacking nor provoked kept reclaiming the
