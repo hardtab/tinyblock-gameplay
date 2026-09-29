@@ -3290,7 +3290,10 @@ func _descent_clear_target(observation: Dictionary, descent_plan: Dictionary) ->
 		return {}
 	var tile_x := int((raw_tile as Array)[0])
 	var tile_y := int((raw_tile as Array)[1])
-	if _tile_retry_cooldown_active(observation, tile_x, tile_y):
+	# A social bridge or home project may have just placed this very block.
+	# Replanning a descent through it creates an endless PLACE -> MINE loop and
+	# destroys the bot's only constructed footing.
+	if _tile_retry_cooldown_active(observation, tile_x, tile_y) or _recent_build_cells(observation).has("%d:%d" % [tile_x, tile_y]):
 		return {}
 	for raw_terrain in _as_array(observation.get("terrain_tiles", [])):
 		if not raw_terrain is Dictionary:

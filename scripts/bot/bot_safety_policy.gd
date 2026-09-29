@@ -400,7 +400,22 @@ func _valid_descent_clear(decision: Dictionary, observation: Dictionary) -> bool
 		return false
 	var expected := _tile_pair(plan.get("clear_tile", []))
 	var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
-	return expected != Vector2i(2147483647, 2147483647) and target.has("x") and target.has("y") and expected == Vector2i(int(target.get("x", 0)), int(target.get("y", 0)))
+	if expected == Vector2i(2147483647, 2147483647) or not target.has("x") or not target.has("y") or expected != Vector2i(int(target.get("x", 0)), int(target.get("y", 0))):
+		return false
+	var key := "%d:%d" % [expected.x, expected.y]
+	var protected: Dictionary = observation.get("protected_build_cells", {}) if observation.get("protected_build_cells", {}) is Dictionary else {}
+	if protected.has(key):
+		return false
+	for raw_entry in _as_array(observation.get("action_history", [])):
+		if not raw_entry is Dictionary:
+			continue
+		var entry := raw_entry as Dictionary
+		if str(entry.get("action", "")) != Contract.ACTION_PLACE:
+			continue
+		var parts := str(entry.get("target_id", "")).split(":")
+		if parts.size() >= 3 and parts[-2].is_valid_int() and parts[-1].is_valid_int() and int(parts[-2]) == expected.x and int(parts[-1]) == expected.y:
+			return false
+	return true
 
 
 func _valid_descent_transition(decision: Dictionary, observation: Dictionary) -> bool:
