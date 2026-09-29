@@ -58,10 +58,9 @@ static func next_step(observation: Dictionary, explicit_route_target: Dictionary
 			return _mine_step(next_x, origin.y - 2, origin, target, observation)
 		# An isolated block is still a valid landing one tile above the bot. Mining
 		# it merely because the cell beneath is empty deletes the only stair and
-		# drops the bot farther into a pit. If a ceiling truly blocks takeoff,
-		# clear that ceiling instead (subject to the usual protection guards).
-		if _solid(terrain, origin.x, origin.y - 3):
-			return _mine_step(origin.x, origin.y - 3, origin, target, observation)
+		# drops the bot farther into a pit. A ceiling three tiles above the support
+		# is outside the safety policy's mining reach, so neither can be cleared by
+		# this one-step route planner.
 		return {}
 	if target.y > origin.y:
 		# A lower destination needs a one-step descending landing, not a bridge
@@ -198,6 +197,12 @@ static func _target_tile(observation: Dictionary, origin: Vector2i, explicit_rou
 
 static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, observation: Dictionary) -> Dictionary:
 	if _retry_cooldown_active(observation, x, y) or not _can_clear_route_block(observation, x, y):
+		return {}
+	# Match BotSafetyPolicy's two-tile reach from the *actual* body centre, not
+	# the re-anchored support cell. A high ceiling above a pit can otherwise be
+	# proposed and rejected on every policy tick without ever making progress.
+	var body_tile := _support_tile(observation.get("self", {}))
+	if absi(x - body_tile.x) > 2 or absi(y - body_tile.y) > 2:
 		return {}
 	# A functional station is not expendable route filler, including after a
 	# reconnect when the short action history no longer remembers who placed it.
