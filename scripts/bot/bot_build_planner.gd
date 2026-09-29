@@ -150,9 +150,10 @@ static func obstructing_fluid_source_step(observation: Dictionary) -> Dictionary
 ## exterior edge, keep a material reserve, and stop after a bounded project.
 ## A chest on the new pad makes the extension a functional outpost rather than
 ## a directionless bridge. The host still validates every placement.
-static func skyblock_home_step(observation: Dictionary) -> Dictionary:
-	if str(observation.get("world_mode", "")).to_lower() != "skyblock" or bool(observation.get("placement_pending", false)):
+static func skyblock_home_step(observation: Dictionary, island_mode: String = "skyblock") -> Dictionary:
+	if island_mode not in ["skyblock", "floating_islands"] or str(observation.get("world_mode", "")).to_lower() != island_mode or bool(observation.get("placement_pending", false)):
 		return {}
+	var expansion_reason := "skyblock_expand" if island_mode == "skyblock" else "floating_island_expand"
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
 	if not bool(self_state.get("on_ground", false)):
 		return {}
@@ -166,7 +167,7 @@ static func skyblock_home_step(observation: Dictionary) -> Dictionary:
 	var completed: Array[Vector2i] = []
 	for raw_key in protected:
 		var record: Dictionary = protected[raw_key] if protected[raw_key] is Dictionary else {}
-		if str(record.get("reason", "")) != "skyblock_expand" or not bool(record.get("confirmed", false)):
+		if str(record.get("reason", "")) != expansion_reason or not bool(record.get("confirmed", false)):
 			continue
 		var parts := str(raw_key).split(":")
 		if parts.size() == 2:
@@ -185,7 +186,7 @@ static func skyblock_home_step(observation: Dictionary) -> Dictionary:
 			if int(blocked.get("tile:%d:%d" % [chest_tile.x, chest_tile.y], 0)) > now:
 				continue
 			if absi(foundation.x - origin.x) <= MAX_PLACEMENT_REACH_TILES and absi(foundation.y - origin.y) <= MAX_PLACEMENT_REACH_TILES:
-				var chest := _placement(chest_tile, origin, _invalid_tile(), "chest", "skyblock_home_chest")
+				var chest := _placement(chest_tile, origin, _invalid_tile(), "chest", "skyblock_home_chest" if island_mode == "skyblock" else "floating_island_home_chest")
 				chest["action"] = Contract.ACTION_PLACE
 				return chest
 			var chest_route := _known_safe_worksite(observation, foundation)
@@ -240,11 +241,19 @@ static func skyblock_home_step(observation: Dictionary) -> Dictionary:
 				continue
 			best_score = score
 			if absi(worksite.x - origin.x) <= MAX_PLACEMENT_REACH_TILES and absi(worksite.y - origin.y) <= MAX_PLACEMENT_REACH_TILES:
-				best = _placement(target, origin, _invalid_tile(), block_name, "skyblock_expand")
+				best = _placement(target, origin, _invalid_tile(), block_name, expansion_reason)
 				best["action"] = Contract.ACTION_PLACE
 			else:
 				best = _known_safe_worksite(observation, worksite)
 	return best
+
+
+## When a full inter-island span is not yet affordable, use expendable local
+## material for a small anchored work pad instead of waiting indefinitely.
+## This shares the same dry-ground, return-route and material-reserve guards as
+## Skyblock; it does not claim to have completed a bridge to another island.
+static func floating_island_home_step(observation: Dictionary) -> Dictionary:
+	return skyblock_home_step(observation, "floating_islands")
 
 
 ## A bridge has a real destination, unlike a decorative edge extension.  For
@@ -602,7 +611,10 @@ static func island_stone_generator_step(observation: Dictionary) -> Dictionary:
 
 static func _floating_bridge_block(observation: Dictionary, remaining: int) -> String:
 	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
-	if _floating_bridge_usable_support_count(inventory) < remaining + FLOATING_BRIDGE_RETURN_RESERVE:
+	# Every segment is reversible. Start a directed span with only the next
+	# expendable block, keeping a fixed repair/return reserve; requiring the full
+	# span up front stranded small islands with useful materials and no action.
+	if remaining <= 0 or _floating_bridge_usable_support_count(inventory) <= FLOATING_BRIDGE_RETURN_RESERVE:
 		return ""
 	for name in _floating_bridge_candidates():
 		var recipe_reserve := 8 if name == "cobblestone" or name.ends_with("planks") else 0
@@ -731,7 +743,7 @@ static func _ground_anchored_worksite(terrain: Dictionary, protected: Dictionary
 	if below in ["grass", "dirt", "stone", "cobblestone", "stone_bricks", "ice", "packed_ice", "sand", "snow"]:
 		return true
 	var record: Dictionary = protected.get("%d:%d" % [tile.x, tile.y], {}) if protected.get("%d:%d" % [tile.x, tile.y], {}) is Dictionary else {}
-	if depth >= SKYBLOCK_HOME_EXPANSION_LIMIT or str(record.get("reason", "")) != "skyblock_expand" or not bool(record.get("confirmed", false)):
+	if depth >= SKYBLOCK_HOME_EXPANSION_LIMIT or str(record.get("reason", "")) not in ["skyblock_expand", "floating_island_expand"] or not bool(record.get("confirmed", false)):
 		return false
 	for direction in [-1, 1]:
 		if _ground_anchored_worksite(terrain, protected, tile + Vector2i(direction, 0), depth + 1):

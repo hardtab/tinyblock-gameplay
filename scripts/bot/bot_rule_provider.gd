@@ -648,6 +648,18 @@ func decide(observation: Dictionary) -> Dictionary:
 				_decision(Contract.GOAL_BUILD, island_action, island_bridge, 900 if island_action == Contract.ACTION_PLACE else 2200, 0.86),
 				observation,
 			)
+		# With no safe island span, a small local work pad is still useful. Do
+		# not sidetrack an active bridge project just because its next segment is
+		# briefly unaffordable or awaiting a host confirmation.
+		var active_island_project: Dictionary = observation.get("build_project_state", {}) if observation.get("build_project_state", {}) is Dictionary else {}
+		if str(active_island_project.get("status", "")) != "active":
+			var island_home := BuildPlanner.floating_island_home_step(observation)
+			var island_home_action := str(island_home.get("action", ""))
+			if island_home_action in legal:
+				return _tag_useful_home_placement(
+					_decision(Contract.GOAL_BUILD, island_home_action, island_home, 900 if island_home_action == Contract.ACTION_PLACE else 2200, 0.84),
+					observation,
+				)
 	# After Stone Age and the active mode objective, continue through real
 	# mid-tier tool recipes one verified dependency at a time. If a required
 	# resource is not currently reachable, the helper yields to other behaviour
