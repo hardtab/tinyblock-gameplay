@@ -282,6 +282,7 @@ const BUILD_PROJECT_ROUTE_REPLAN_MSEC := 500
 const ACTION_RETRY_BLOCK_MSEC := 8_000
 const DESCENT_RETURN_ROUTE_RETRY_MSEC := 12_000
 const MINE_REJECTION_RETRY_MSEC := 60_000
+const DIG_ROUTE_CLEAR_REVISIT_MSEC := 20_000
 const HARMFUL_FLUID_MINE_RETRY_MSEC := 300_000
 const STATION_ROUTE_RETRY_BLOCK_MSEC := 30_000
 const CONTAINER_RETRY_BLOCK_MSEC := 30_000
@@ -6692,6 +6693,7 @@ func _on_decision_started(decision: Dictionary) -> void:
 		var key := "%d:%d" % [int(target.get("x", 0)), int(target.get("y", 0))]
 		var pending_target := {
 			"action": action,
+			"dig_route": action == Contract.ACTION_MINE and bool(target.get("dig_route", false)),
 			"block": str(decision.get("block", "")),
 			"x": int(target.get("x", 0)),
 			"y": int(target.get("y", 0)),
@@ -7198,7 +7200,16 @@ func _handle_action_result(payload: Dictionary) -> void:
 	var key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
 	var target: Dictionary = _pending_action_targets.get(key, {}) if _pending_action_targets.get(key, {}) is Dictionary else {}
 	_pending_action_targets.erase(key)
-	_blocked_action_targets.erase("tile:%s" % key)
+	# A successful obstacle mine may immediately regrow (ice over moving
+	# water, granular refill, etc.). Do not reinterpret that same cell as a
+	# fresh route obstruction every few seconds. Ordinary resource mining and
+	# the deliberate renewable-stone generator remain repeatable.
+	if action == "mine_block" and bool(target.get("dig_route", false)):
+		_blocked_action_targets["tile:%s" % key] = Time.get_ticks_msec() + DIG_ROUTE_CLEAR_REVISIT_MSEC
+	elif not (action == "mine_block" and target.is_empty()):
+		# A duplicate acknowledgement has no pending decision and must not erase
+		# the cooldown established by the first accepted result.
+		_blocked_action_targets.erase("tile:%s" % key)
 	if action == "place_block":
 		var protected_cell: Dictionary = _protected_build_cells.get(key, {}) if _protected_build_cells.get(key, {}) is Dictionary else {}
 		protected_cell["confirmed"] = true
