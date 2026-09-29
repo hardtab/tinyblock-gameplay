@@ -707,6 +707,13 @@ func decide(observation: Dictionary) -> Dictionary:
 		var explore_target := _exploration_target(observation)
 		if not explore_target.is_empty():
 			return _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, explore_target, EXPLORE_COMMIT_MSEC, 0.72)
+		# When both supported frontiers end at an obstacle, a distant live player
+		# still gives us a useful heading. Ask the bounded dig-route planner for
+		# just one local clearing step in that direction; never move directly
+		# through unknown terrain or mine the support under our feet.
+		var escape_step := _blocked_exploration_dig_step(observation, legal)
+		if not escape_step.is_empty():
+			return escape_step
 
 	# Social proximity is a context, not the bot's whole job.  Only follow after
 	# the nearby achievement, gathering, and building opportunities have been
@@ -1634,6 +1641,41 @@ func _starter_wood_explore_direction(observation: Dictionary, origin: Vector2) -
 		nearest_distance = origin.distance_to(position)
 		direction = -1 if delta_x < 0.0 else 1
 	return direction
+
+
+func _blocked_exploration_dig_step(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
+	if bool(observation.get("pvp_world", false)) or not _as_array(observation.get("threats", [])).is_empty():
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var origin := Contract.target_position(self_state)
+	var nearest_player := {}
+	var nearest_distance := INF
+	for raw_player in _as_array(observation.get("players", [])):
+		if not raw_player is Dictionary:
+			continue
+		var player := raw_player as Dictionary
+		if not bool(player.get("alive", true)) or bool(player.get("stale", player.get("last_known", false))):
+			continue
+		var distance := origin.distance_to(Contract.target_position(player))
+		if distance < ROUTE_TILE * 2.0 or distance >= nearest_distance:
+			continue
+		nearest_player = player
+		nearest_distance = distance
+	if nearest_player.is_empty():
+		return {}
+	var toward_player := signf(Contract.target_position(nearest_player).x - origin.x)
+	if is_zero_approx(toward_player):
+		return {}
+	var local_target := {
+		"x": origin.x + toward_player * ROUTE_TILE * 4.0,
+		"y": origin.y,
+		"w": float(self_state.get("w", 20.0)),
+		"h": float(self_state.get("h", 28.0)),
+	}
+	var step: Dictionary = DigPlanner.next_step(observation, local_target)
+	if str(step.get("action", "")) not in [Contract.ACTION_MINE, Contract.ACTION_PLACE] or str(step.get("action", "")) not in legal:
+		return {}
+	return Contract.normalize_decision(step)
 
 
 func _note_explore_direction_failure(target_id: String, now_msec: int) -> void:
