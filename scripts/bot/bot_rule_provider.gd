@@ -57,6 +57,9 @@ var _flee_target_route_cooldown_until: Dictionary = {}
 var _last_aggressive_player_id := ""
 var _last_enemy_player_id := ""
 var _last_creature_threat_id := ""
+var _recent_creature_threat: Dictionary = {}
+var _recent_creature_threat_seen_msec := -1
+var _recent_creature_world_id := ""
 ## Creature ids whose verified escape route already failed while the creature was
 ## not actually attacking. Re-issuing FLEE_FROM every time the short retry
 ## cooldown expired kept a hostile standing behind terrain in charge of the whole
@@ -85,6 +88,7 @@ const FOLLOW_ROUTE_RECOVERY_REASONS := [
 ]
 const FLEE_ROUTE_FAILURE_COOLDOWN_MSEC := 5_000
 const FLEE_TIMEOUT_RETRY_MSEC := 500
+const CREATURE_THREAT_MEMORY_MSEC := 3_000
 const FLEE_ROUTE_FAILURE_REASONS := [
 	"blocked_obstacle", "edge_guard", "unsafe_jump_route", "unsafe_drop_route",
 	"route_unreachable", "flee_no_safe_waypoint", "timeout",
@@ -196,6 +200,9 @@ func reset() -> void:
 	_last_aggressive_player_id = ""
 	_last_enemy_player_id = ""
 	_last_creature_threat_id = ""
+	_recent_creature_threat.clear()
+	_recent_creature_threat_seen_msec = -1
+	_recent_creature_world_id = ""
 	_creature_route_exhausted.clear()
 
 
@@ -228,6 +235,18 @@ func decide(observation: Dictionary) -> Dictionary:
 	# so the bot does not keep mining/wandering while standing in a pool.
 	if not lava_threat.is_empty() and Contract.ACTION_FLEE_FROM in legal:
 		return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, lava_threat, 1400, 0.99)
+	# A pursuing creature can disappear from one streamed snapshot while the bot
+	# is still on the same escape route. Do not immediately resume a wood/chest
+	# objective toward its last position after a timed-out flee. The remembered
+	# point is only used for verified retreat, never for a stale attack.
+	if creature_threat.is_empty() and not bool(observation.get("pvp_world", false)) and _last_aggressive_player_id.is_empty():
+		var recent_threat := _recent_creature_threat_for_escape(observation, now_msec)
+		if not recent_threat.is_empty():
+			var recent_id := str(recent_threat.get("id", ""))
+			if Contract.ACTION_FLEE_FROM in legal and not _flee_target_on_route_cooldown(recent_id, now_msec):
+				return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_FLEE_FROM, recent_threat, 1600, 0.9)
+			if Contract.ACTION_WAIT in legal:
+				return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_WAIT, {}, FLEE_TIMEOUT_RETRY_MSEC, 0.82)
 	if (
 		low_health
 		and not creature_threat.is_empty()
@@ -752,6 +771,10 @@ func _dangerous_creature_threat(observation: Dictionary, threats: Array) -> Dict
 		if not raw_threat is Dictionary:
 			continue
 		var threat := raw_threat as Dictionary
+		if str(threat.get("id", "")) == str(_recent_creature_threat.get("id", "")) and (not bool(threat.get("alive", true)) or int(threat.get("health", 1)) <= 0):
+			_recent_creature_threat.clear()
+			_recent_creature_threat_seen_msec = -1
+			_recent_creature_world_id = ""
 		if not bool(threat.get("alive", true)) or int(threat.get("health", 1)) <= 0:
 			continue
 		var threat_id := str(threat.get("id", ""))
@@ -799,7 +822,34 @@ func _dangerous_creature_threat(observation: Dictionary, threats: Array) -> Dict
 	if not pinned.is_empty():
 		best = pinned
 	_last_creature_threat_id = str(best.get("id", ""))
+	if not best.is_empty() and not str(observation.get("world_id", "")).is_empty():
+		_recent_creature_threat = best.duplicate(true)
+		_recent_creature_threat_seen_msec = int(observation.get("observed_at_msec", 0))
+		_recent_creature_world_id = str(observation.get("world_id", ""))
 	return best
+
+
+func _recent_creature_threat_for_escape(observation: Dictionary, now_msec: int) -> Dictionary:
+	if _recent_creature_threat.is_empty() or _recent_creature_threat_seen_msec < 0:
+		return {}
+	if str(observation.get("world_id", "")) != _recent_creature_world_id:
+		_recent_creature_threat.clear()
+		_recent_creature_threat_seen_msec = -1
+		_recent_creature_world_id = ""
+		return {}
+	if now_msec < _recent_creature_threat_seen_msec or now_msec - _recent_creature_threat_seen_msec > CREATURE_THREAT_MEMORY_MSEC:
+		_recent_creature_threat.clear()
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if not bool(self_state.get("alive", true)) or int(self_state.get("health", 1)) <= 0:
+		return {}
+	var distance := Contract.distance_between(self_state, _recent_creature_threat)
+	if distance > float(observation.get("creature_danger_distance", CREATURE_DANGER_RADIUS)):
+		return {}
+	var remembered := _recent_creature_threat.duplicate(true)
+	remembered["distance"] = distance
+	remembered["stale"] = true
+	return remembered
 
 
 ## Distance at which a hostile creature is treated as an immediate, striking
