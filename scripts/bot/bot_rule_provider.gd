@@ -2351,6 +2351,7 @@ func _stone_age_gather_wood_action(observation: Dictionary, legal: PackedStringA
 func _stone_age_cobblestone_target(observation: Dictionary) -> Dictionary:
 	var best := {}
 	var best_distance := INF
+	var recent_build_cells := _recent_build_cells(observation)
 	for raw_resource in _as_array(observation.get("visible_resources", [])):
 		if not raw_resource is Dictionary:
 			continue
@@ -2358,6 +2359,10 @@ func _stone_age_cobblestone_target(observation: Dictionary) -> Dictionary:
 		if not _resource_has_proven_approach(resource, observation):
 			continue
 		if not _is_cobblestone_source(str(resource.get("block_name", ""))):
+			continue
+		if recent_build_cells.has("%d:%d" % [int(resource.get("x", 2147483647)), int(resource.get("y", 2147483647))]):
+			# Mining the newly placed home/bridge block to satisfy Stone Age
+			# destroys the very route the bot just built.
 			continue
 		if int(resource.get("harvest_tier", 1)) > 1 or not Perception.mine_target_is_safe(observation, resource):
 			continue

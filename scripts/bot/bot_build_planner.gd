@@ -94,6 +94,8 @@ static func skyblock_home_step(observation: Dictionary) -> Dictionary:
 	for worksite in worksites:
 		if not _solid(terrain, worksite.x, worksite.y) or not _empty(terrain, worksite.x, worksite.y - 1) or not _empty(terrain, worksite.x, worksite.y - 2):
 			continue
+		if _worksite_corridor_has_lava(terrain, origin, worksite):
+			continue
 		for direction in [-1, 1]:
 			var target := worksite + Vector2i(direction, 0)
 			if not _empty(terrain, target.x, target.y) or not _empty(terrain, target.x, target.y + 1) or not _empty(terrain, target.x, target.y + 2):
@@ -117,14 +119,20 @@ static func skyblock_home_step(observation: Dictionary) -> Dictionary:
 
 
 static func _skyblock_home_support_block(inventory: Dictionary) -> String:
-	for name in SUPPORT_BLOCK_NAMES:
+	# Soil and excess foliage are expendable here; cobblestone and planks are
+	# ingredients for the stone pickaxe, furnace and chest, not free filler.
+	for name in ["dirt", "grass", "packed_ice", "stone_bricks"]:
 		if int(inventory.get(name, 0)) > 1:
-			return name
-	for name in PLANK_BLOCK_NAMES:
-		if int(inventory.get(name, 0)) > 4:
 			return name
 	for name in ["leaves", "palm_leaves", "pine_needles", "weeping_leaves"]:
 		if int(inventory.get(name, 0)) > SKYBLOCK_LEAF_RESERVE:
+			return name
+	if int(inventory.get("cobblestone", 0)) > 6:
+		return "cobblestone"
+	if int(inventory.get("stone", 0)) > 2:
+		return "stone"
+	for name in PLANK_BLOCK_NAMES:
+		if int(inventory.get(name, 0)) > 6:
 			return name
 	return ""
 
@@ -148,6 +156,17 @@ static func _lava_near(terrain: Dictionary, tile: Vector2i, radius: int) -> bool
 	for dy in range(-radius, radius + 1):
 		for dx in range(-radius, radius + 1):
 			if str(terrain.get("%d:%d" % [tile.x + dx, tile.y + dy], "")).to_lower().contains("lava"):
+				return true
+	return false
+
+
+static func _worksite_corridor_has_lava(terrain: Dictionary, origin: Vector2i, worksite: Vector2i) -> bool:
+	# A waypoint can be topologically reachable yet the live motion guard
+	# refuses its jump over the source pool. Island maintenance need not cross
+	# that hazard; leave long crossings to a dedicated bridge project.
+	for x in range(mini(origin.x, worksite.x), maxi(origin.x, worksite.x) + 1):
+		for y in range(mini(origin.y, worksite.y) - 1, maxi(origin.y, worksite.y) + 2):
+			if str(terrain.get("%d:%d" % [x, y], "")).to_lower().contains("lava"):
 				return true
 	return false
 
