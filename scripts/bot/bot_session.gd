@@ -970,7 +970,11 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		# Containers are solid blocks. Route to a supported interaction position,
 		# then use a proven intermediate waypoint when the chest is farther than
 		# the bounded route graph can solve in one action.
-		if origin.distance_to(target) <= float(BlockDefs.TILE) * 4.5:
+		# An already verified jump/drop can span two short decision windows. Let
+		# the shared movement executor finish that transition before asking the
+		# grounded route graph for another waypoint from its airborne midpoint.
+		var continuing_verified_transition := _jump_active or not _active_verified_drop_step(origin, self_state).is_empty()
+		if not continuing_verified_transition and origin.distance_to(target) <= float(BlockDefs.TILE) * 4.5:
 			_set_desired_input(false, false, false)
 			return {"done": true, "reason": "already_at_target"}
 		# The generic airborne settling guard below runs *after* this branch, so
@@ -978,20 +982,21 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		# timeout) would make container routing report route_unreachable and then
 		# cool the chest for the full container retry window. Settle gravity
 		# first and let the same route be replanned on the next tick.
-		if _should_settle_airborne(self_state, origin):
+		if not continuing_verified_transition and _should_settle_airborne(self_state, origin):
 			_set_desired_input(false, false, false)
 			_advance_local_physics(self_state, delta, false)
 			_world_snapshot["self"] = self_state
 			return {"done": false, "reason": "airborne_settling"}
-		var container_stand := _reachable_stand_position_for_block(origin, decision_target)
-		if not container_stand.is_empty():
-			target = Contract.target_position(container_stand)
-		else:
-			var container_waypoint := _safe_pursuit_waypoint(origin, target, _safe_jump_first_step_filter(self_state))
-			if container_waypoint.is_empty():
-				_set_desired_input(false, false, false)
-				return {"done": true, "reason": "route_unreachable"}
-			target = Contract.target_position(container_waypoint)
+		if not continuing_verified_transition:
+			var container_stand := _reachable_stand_position_for_block(origin, decision_target)
+			if not container_stand.is_empty():
+				target = Contract.target_position(container_stand)
+			else:
+				var container_waypoint := _safe_pursuit_waypoint(origin, target, _safe_jump_first_step_filter(self_state))
+				if container_waypoint.is_empty():
+					_set_desired_input(false, false, false)
+					return {"done": true, "reason": "route_unreachable"}
+				target = Contract.target_position(container_waypoint)
 	if (
 		action == Contract.ACTION_MOVE_TO
 		and target_id.begins_with("tile:")
