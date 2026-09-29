@@ -2204,6 +2204,8 @@ func _station_place_target(observation: Dictionary, station_name: String) -> Dic
 	)
 	for offset_x in [1, -1, 2, -2, 3, -3]:
 		var target := Vector2i(center_x + offset_x, support_y - 1)
+		if _reserved_island_generator_cell(observation, target):
+			continue
 		# A host rejection or a missed placement acknowledgement already cooled
 		# this exact cell. Re-picking it deterministically every tick produced an
 		# endless PLACE loop instead of trying another supported cell.
@@ -2223,6 +2225,33 @@ func _station_place_target(observation: Dictionary, station_name: String) -> Dic
 			"reason": "place_station",
 		}
 	return {}
+
+
+func _reserved_island_generator_cell(observation: Dictionary, target: Vector2i) -> bool:
+	if str(observation.get("world_mode", "")).to_lower() not in ["skyblock", "floating_islands"]:
+		return false
+	var sources: Array[Dictionary] = []
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		var name := str(tile.get("block_name", "")).to_lower().trim_prefix("core.")
+		if name in ["water", "lava"] and int(tile.get("fluid_level", -1)) == 0:
+			sources.append({"x": int(tile.get("x", 0)), "y": int(tile.get("y", 0)), "name": name})
+	for water in sources:
+		if str(water.get("name", "")) != "water":
+			continue
+		for lava in sources:
+			if str(lava.get("name", "")) != "lava" or int(lava.get("y", 0)) != int(water.get("y", 0)):
+				continue
+			var water_x := int(water.get("x", 0))
+			var lava_x := int(lava.get("x", 0))
+			if absi(lava_x - water_x) != 4 or target.y != int(lava.get("y", 0)) - 1:
+				continue
+			var hot_work_x := lava_x + signi(lava_x - water_x)
+			if target.x >= mini(water_x, hot_work_x) and target.x <= maxi(water_x, hot_work_x):
+				return true
+	return false
 
 
 func _stable_station_support(block_name: String) -> bool:
