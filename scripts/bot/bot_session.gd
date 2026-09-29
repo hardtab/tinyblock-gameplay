@@ -985,10 +985,15 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 				_set_desired_input(false, false, false)
 				return {"done": true, "reason": "route_unreachable"}
 			target = Contract.target_position(container_waypoint)
-	if action == Contract.ACTION_MOVE_TO and target_id.begins_with("tile:") and not _jump_active:
+	if (
+		action == Contract.ACTION_MOVE_TO
+		and target_id.begins_with("tile:")
+		and not _jump_active
+		and _active_verified_drop_step(origin, self_state).is_empty()
+	):
 		# A previously verified jump must reach its planned landing before the
-		# resource interaction side is replanned. Mid-air has no standable route
-		# origin and would falsely cool this resource as route_unreachable.
+		# resource interaction side is replanned. The same applies to an already
+		# verified drop: its in-air support cell is not a new ground-route origin.
 		if _should_settle_airborne(self_state, origin):
 			_set_desired_input(false, false, false)
 			_advance_local_physics(self_state, delta, false)
