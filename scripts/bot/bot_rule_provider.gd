@@ -527,6 +527,15 @@ func decide(observation: Dictionary) -> Dictionary:
 	var opened_chest_action := _opened_generated_chest_action(observation, legal)
 	if not opened_chest_action.is_empty():
 		return opened_chest_action
+	# In ordinary worlds a nearby source can be picked up instead of letting its
+	# water/lava obstruct a dry work area. Island sources belong to the renewable
+	# stone project and are deliberately excluded by the planner.
+	if Contract.ACTION_MINE in legal:
+		var fluid_clear_step := BuildPlanner.obstructing_fluid_source_step(observation)
+		if str(fluid_clear_step.get("action", "")) == Contract.ACTION_MINE:
+			var fluid_target: Dictionary = fluid_clear_step.get("target", {}) if fluid_clear_step.get("target", {}) is Dictionary else {}
+			if not fluid_target.is_empty() and Perception.mine_target_is_safe(observation, fluid_target):
+				return _decision(Contract.GOAL_GATHER, Contract.ACTION_MINE, fluid_target, 1400, 0.92)
 	# A previously failed ordinary follow may have a safe one-step route fix. Run
 	# that target-pinned repair after all survival/combat decisions but before
 	# progression can fall through to another action or re-issue the failed move.

@@ -29,6 +29,59 @@ const SKYBLOCK_LAVA_CLEARANCE_TILES := 2
 const FLOATING_BRIDGE_RETURN_RESERVE := 4
 
 
+## Pick up a nearby *source*, never flowing fluid. This is a local clearance
+## action, not a reason to walk into a pool or dismantle an island generator.
+static func obstructing_fluid_source_step(observation: Dictionary) -> Dictionary:
+	var mode := str(observation.get("world_mode", "")).to_lower()
+	if mode in ["skyblock", "floating_islands"] or bool(observation.get("pvp_world", false)):
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if not bool(self_state.get("on_ground", false)):
+		return {}
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var origin := _supported_origin(self_state, terrain)
+	if not _solid(terrain, origin.x, origin.y):
+		return {}
+	var body_x := floori((float(self_state.get("x", 0.0)) + float(self_state.get("w", 20.0)) * 0.5) / float(TILE))
+	var body_y := floori((float(self_state.get("y", 0.0)) + float(self_state.get("h", 28.0)) * 0.5) / float(TILE))
+	var body_left := floori(float(self_state.get("x", 0.0)) / float(TILE))
+	var body_right := floori((float(self_state.get("x", 0.0)) + float(self_state.get("w", 20.0)) - 0.001) / float(TILE))
+	if not _empty(terrain, body_x, body_y) or not _empty(terrain, origin.x, origin.y - 1):
+		return {}
+	var blocked: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	var now := int(observation.get("observed_at_msec", 0))
+	var best: Dictionary = {}
+	var best_priority := -1
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		var name := str(tile.get("block_name", "")).to_lower().trim_prefix("core.")
+		if name not in ["water", "lava"] or int(tile.get("fluid_level", -1)) != 0 or bool(tile.get("regenerates_on_mine", false)):
+			continue
+		var x := int(tile.get("x", 0))
+		var y := int(tile.get("y", 0))
+		if y != origin.y or absi(x - origin.x) != 1 or not _solid(terrain, x, y + 1) or (x >= body_left and x <= body_right):
+			continue
+		var retreat_x := origin.x - signi(x - origin.x)
+		if not _solid(terrain, retreat_x, origin.y) or not _empty(terrain, retreat_x, origin.y - 1) or not _empty(terrain, retreat_x, origin.y - 2):
+			continue
+		if int(blocked.get("tile:%d:%d" % [x, y], 0)) > now:
+			continue
+		var priority := 2 if name == "lava" else 1
+		if priority > best_priority:
+			best_priority = priority
+			best = {
+				"id": "tile:%d:%d" % [x, y], "x": x, "y": y,
+				"block_name": name, "content_id": "core.%s" % name,
+				"fluid_level": 0, "harvest_tier": 0,
+				"hardness": float(tile.get("hardness", 5.0 if name == "lava" else 4.0)),
+				"position": [float(x * TILE + TILE / 2), float(y * TILE + TILE / 2)],
+				"reachable": true, "reason": "obstructing_fluid_source",
+			}
+	return {"action": Contract.ACTION_MINE, "target": best} if not best.is_empty() else {}
+
+
 ## A finite Skyblock island needs a usable work area even when no distant
 ## resource/player supplies a route destination. Build only from a reachable
 ## exterior edge, keep a material reserve, and stop after a bounded project.

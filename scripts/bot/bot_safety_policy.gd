@@ -3,6 +3,7 @@ extends RefCounted
 
 const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
 const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
+const BuildPlanner = preload("res://gameplay/scripts/bot/bot_build_planner.gd")
 const EmojiReactions = preload("res://gameplay/scripts/emoji_reactions.gd")
 
 const DEFAULT_RETALIATION_WINDOW_MSEC := 10_000
@@ -147,7 +148,16 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 				if not _valid_dig_route_target(decision, observation):
 					return _rejected(decision, "dig_target_unsafe")
 			else:
-				if not _reachable_resource_exists(observation.get("visible_resources", []), target_id):
+				var safe_fluid_step := BuildPlanner.obstructing_fluid_source_step(observation) if str(mine_target.get("reason", "")) == "obstructing_fluid_source" else {}
+				var safe_fluid_target: Dictionary = safe_fluid_step.get("target", {}) if safe_fluid_step.get("target", {}) is Dictionary else {}
+				if str(mine_target.get("reason", "")) == "obstructing_fluid_source" and (
+					str(safe_fluid_target.get("id", "")) != target_id
+					or int(safe_fluid_target.get("x", 2147483647)) != int(mine_target.get("x", 0))
+					or int(safe_fluid_target.get("y", 2147483647)) != int(mine_target.get("y", 0))
+					or str(safe_fluid_target.get("block_name", "")) != str(mine_target.get("block_name", ""))
+				):
+					return _rejected(decision, "fluid_source_not_safe")
+				if not _reachable_resource_exists(observation.get("visible_resources", []), target_id) and str(safe_fluid_target.get("id", "")) != target_id:
 					return _rejected(decision, "mine_target_not_reachable")
 				if not _target_has_required_tool(observation, mine_target):
 					return _rejected(decision, "required_mining_tool_missing")
