@@ -583,6 +583,17 @@ func decide(observation: Dictionary) -> Dictionary:
 				_decision(Contract.GOAL_BUILD, skyblock_action, skyblock_home, 900 if skyblock_action == Contract.ACTION_PLACE else 2200, 0.86),
 				observation,
 			)
+	if mode == "floating_islands":
+		var island_bridge := BuildPlanner.floating_island_bridge_step(observation)
+		var island_project_complete := _build_project_status_decision(island_bridge)
+		if not island_project_complete.is_empty():
+			return island_project_complete
+		var island_action := str(island_bridge.get("action", ""))
+		if island_action in legal:
+			return _tag_useful_home_placement(
+				_decision(Contract.GOAL_BUILD, island_action, island_bridge, 900 if island_action == Contract.ACTION_PLACE else 2200, 0.86),
+				observation,
+			)
 	# After Stone Age and the active mode objective, continue through real
 	# mid-tier tool recipes one verified dependency at a time. If a required
 	# resource is not currently reachable, the helper yields to other behaviour
@@ -2544,6 +2555,7 @@ func _tag_useful_home_placement(decision: Dictionary, observation: Dictionary) -
 		or reason == "station_work_area"
 		or (reason == "expand_platform" and str(observation.get("world_mode", "")).to_lower() == "one_block")
 		or (reason in ["skyblock_expand", "skyblock_home_chest"] and str(observation.get("world_mode", "")).to_lower() == "skyblock")
+		or (reason == "bridge_to_island" and str(observation.get("world_mode", "")).to_lower() == "floating_islands" and not project.is_empty())
 	)
 	if not useful_placement or _open_achievement(observation, "here_will_be_home").is_empty():
 		return decision

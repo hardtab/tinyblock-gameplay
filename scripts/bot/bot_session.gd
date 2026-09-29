@@ -86,6 +86,7 @@ var _achievement_goal_unlocked_baseline: Dictionary = {}
 ## observed destination across placement steps and finish only when it becomes
 ## reachable according to the next authoritative observation.
 var _build_project_state: Dictionary = {}
+var _visited_floating_islands: Dictionary = {}
 var _build_project_route_cache_key := ""
 var _build_project_route_checked_msec := -1
 var _build_project_route_reachable := false
@@ -474,6 +475,7 @@ func join_session(record: Dictionary) -> void:
 	_achievement_goal_states.clear()
 	_achievement_goal_unlocked_baseline.clear()
 	_build_project_state.clear()
+	_visited_floating_islands.clear()
 	_build_project_route_cache_key = ""
 	_build_project_route_checked_msec = -1
 	_build_project_route_reachable = false
@@ -5452,6 +5454,13 @@ func _build_observation(now_msec: int) -> Dictionary:
 	observation["mid_tier_tool_goal"] = _mid_tier_tool_goal_state.duplicate(true)
 	observation["achievement_goal_states"] = _achievement_goal_states.duplicate(true)
 	observation["build_project_state"] = _build_project_state.duplicate(true)
+	if str(snapshot.get("world_mode", "")) == "floating_islands":
+		var island_layout: Variant = generation.get("floating_islands", [])
+		if island_layout is Array:
+			# The layout was supplied by the authoritative host. Policy sees only
+			# island geometry, never a guessed biome from raw coordinates.
+			observation["floating_islands"] = (island_layout as Array).duplicate(true)
+			observation["visited_floating_islands"] = _visited_floating_islands.duplicate(true)
 	_annotate_active_build_project_route(observation, now_msec)
 	if _first_observation_probe_pending:
 		_first_observation_probe_pending = false
@@ -8067,6 +8076,17 @@ func _record_world_state_achievements() -> void:
 ## are likewise taken from the authoritative state; procedural depth is not
 ## inferred in other modes such as Skyblock or One Block.
 func _record_authoritative_location_achievements(biome_id: String, player_state: Dictionary) -> void:
+	if _session_world_mode == "floating_islands" and bool(player_state.get("on_ground", false)) and player_state.has("x") and player_state.has("y"):
+		var generation: Dictionary = _world_snapshot.get("generation", {}) if _world_snapshot.get("generation", {}) is Dictionary else {}
+		var row := floori((float(player_state.get("y", 0.0)) + float(player_state.get("h", 28.0)) + 1.5) / float(BlockDefs.TILE))
+		var column := floori((float(player_state.get("x", 0.0)) + float(player_state.get("w", 20.0)) * 0.5) / float(BlockDefs.TILE))
+		var raw_layout: Array = generation.get("floating_islands", []) if generation.get("floating_islands", []) is Array else []
+		for raw_island in raw_layout:
+			if not raw_island is Dictionary:
+				continue
+			var island := raw_island as Dictionary
+			if row == int(island.get("y", 2147483647)) and absi(column - int(island.get("x", 0))) <= int(island.get("half_width", 0)) and biome_id == str(island.get("biome", "")):
+				_visited_floating_islands["%d:%d" % [int(island.get("x", 0)), row]] = true
 	var achievements := get_node_or_null("/root/Achievements")
 	if achievements == null:
 		return
