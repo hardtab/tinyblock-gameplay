@@ -1563,7 +1563,14 @@ func _arm_flee_target_route_cooldown(target_id: String, reason: String, at_msec:
 	if outcome_key == _last_flee_route_outcome_key:
 		return
 	_last_flee_route_outcome_key = outcome_key
-	_flee_target_route_cooldown_until[target_id] = at_msec + FLEE_ROUTE_FAILURE_COOLDOWN_MSEC
+	# The current executor result is recorded after this tick's observation was
+	# built. Its direct callback can arm a fresh cooldown, then history replay in
+	# decide() can still contain an older failure for the same creature. Never let
+	# that stale history move the retry deadline back into the past.
+	_flee_target_route_cooldown_until[target_id] = maxi(
+		int(_flee_target_route_cooldown_until.get(target_id, 0)),
+		at_msec + FLEE_ROUTE_FAILURE_COOLDOWN_MSEC,
+	)
 	# Remember that this creature has no verified escape route. The bounded
 	# cooldown alone only postponed the next identical FLEE_FROM, so a distant
 	# hostile that was neither attacking nor provoked kept reclaiming the
