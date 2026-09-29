@@ -1536,6 +1536,15 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 		_explore_suspended_until_msec = -1
 		_last_explore_left_failure_msec = -1
 		_last_explore_right_failure_msec = -1
+	# A visible log can lack a proven mining stand position across a gap or
+	# ledge. It is still a useful direction for *safe* incremental exploration;
+	# otherwise an old random heading can carry starter tooling away from the
+	# only known tree. Route failures retain precedence for their retry window.
+	var resource_heading := _starter_wood_explore_direction(observation, origin)
+	if resource_heading != 0:
+		var failed_at := _last_explore_left_failure_msec if resource_heading < 0 else _last_explore_right_failure_msec
+		if failed_at < 0 or now_msec - failed_at >= EXPLORE_BOTH_SIDES_COOLDOWN_MSEC:
+			_explore_direction = resource_heading
 	if _explore_direction == 0:
 		_explore_direction = -1 if _rng.randf() < 0.5 else 1
 	var target_position := Vector2(INF, INF)
@@ -1604,6 +1613,27 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 		"support_tile": target_support_tile,
 		"reason": "safe_surface_frontier",
 	}
+
+
+func _starter_wood_explore_direction(observation: Dictionary, origin: Vector2) -> int:
+	var goal: Dictionary = observation.get("stone_age_goal", {}) if observation.get("stone_age_goal", {}) is Dictionary else {}
+	if str(goal.get("status", "")) != "active" or str(goal.get("stage", "")) != "gather_wood":
+		return 0
+	var nearest_distance := INF
+	var direction := 0
+	for raw_resource in _as_array(observation.get("visible_resources", [])):
+		if not raw_resource is Dictionary:
+			continue
+		var resource := raw_resource as Dictionary
+		if not _is_wood_log_name(str(resource.get("block_name", "")).to_lower()):
+			continue
+		var position := Contract.target_position(resource)
+		var delta_x := position.x - origin.x
+		if absf(delta_x) < ROUTE_TILE or origin.distance_to(position) >= nearest_distance:
+			continue
+		nearest_distance = origin.distance_to(position)
+		direction = -1 if delta_x < 0.0 else 1
+	return direction
 
 
 func _note_explore_direction_failure(target_id: String, now_msec: int) -> void:
