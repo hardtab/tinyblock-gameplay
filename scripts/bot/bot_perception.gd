@@ -294,7 +294,13 @@ static func mine_target_opens_harmful_fluid_path(observation: Dictionary, target
 		or target_y > support_y + 2
 	):
 		return false
-	var source_offsets: Array[Vector2i] = [Vector2i(0, -1), Vector2i(-1, 0), Vector2i(1, 0)]
+	# Hot fluid one cell diagonally above a dug support can spill sideways and
+	# then descend into the opening on the next fluid tick. In a thin island this
+	# reaches a nearby miner before the next terrain observation/decision.
+	var source_offsets: Array[Vector2i] = [
+		Vector2i(0, -1), Vector2i(-1, -1), Vector2i(1, -1),
+		Vector2i(-1, 0), Vector2i(1, 0),
+	]
 	for offset in source_offsets:
 		var source: Dictionary = terrain.get(Vector2i(target_x + offset.x, target_y + offset.y), {}) if terrain.get(Vector2i(target_x + offset.x, target_y + offset.y), {}) is Dictionary else {}
 		if not _is_harmful_fluid_cell(source):
