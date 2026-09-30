@@ -6925,6 +6925,18 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 		"at_msec": now_msec,
 		"world_mode": mode,
 		"on_ground": bool((observation.get("self", {}) as Dictionary).get("on_ground", false)),
+		"self_pose": {
+			"x": self_position.x,
+			"y": self_position.y,
+			"vx": float((observation.get("self", {}) as Dictionary).get("vx", 0.0)),
+			"vy": float((observation.get("self", {}) as Dictionary).get("vy", 0.0)),
+			"support_below": _local_collision(
+				self_position.x,
+				self_position.y + 1.5,
+				float((observation.get("self", {}) as Dictionary).get("w", 20.0)),
+				float((observation.get("self", {}) as Dictionary).get("h", 28.0)),
+			),
+		},
 		"equipped_hand": str((observation.get("equipment_slots", {}) as Dictionary).get("hand", "")),
 		"visible_resources": (observation.get("visible_resources", []) as Array).size(),
 		"safe_waypoints": (observation.get("safe_exploration_waypoints", []) as Array).size(),
