@@ -196,30 +196,33 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 		var clear := _mine_step(blocker.x, blocker.y, origin, side_floor, side_observation)
 		if not clear.is_empty():
 			return clear
-	# Clearing one wall can expose only a one-cell lateral pocket, with an owned
-	# station sealing the next column. Build a supported step in that open cell
-	# rather than alternating forever between two reachable floor tiles. The
-	# existing station stays intact and becomes part of the climbable route.
-	if only_pocket_waypoints:
+	# Clearing one wall can expose a short lateral pocket with owned stations at
+	# its ends. The bot may be standing at either end of that pocket when it
+	# replans, so inspect its bounded walls rather than only the immediately
+	# next column. Build a supported stair in the open middle cell.
+	var bounded_left := false
+	var bounded_right := false
+	for offset in range(1, 4):
+		bounded_left = bounded_left or _solid(terrain, origin.x - offset, origin.y - 1)
+		bounded_right = bounded_right or _solid(terrain, origin.x + offset, origin.y - 1)
+	if only_pocket_waypoints and bounded_left and bounded_right:
 		for direction in directions:
 			var side_x: int = origin.x + direction
-			var outer_x: int = origin.x + direction * 2
 			var side_floor := Vector2i(side_x, origin.y)
 			if (
 				not _solid(terrain, side_x, origin.y)
 				or not _known_empty_cell(observation, terrain, side_x, origin.y - 1)
-				or not _solid(terrain, outer_x, origin.y - 1)
 				or _near_harmful_fluid(side_floor, observation)
 			):
 				continue
 			# A low ceiling over the new stair would leave insufficient headroom.
 			# Clear it first using the ordinary reach/tool/player safety checks.
 			if _solid(terrain, side_x, origin.y - 3):
-				var roof_clear := _mine_step(side_x, origin.y - 3, origin, Vector2i(outer_x, origin.y - 1), observation)
+				var roof_clear := _mine_step(side_x, origin.y - 3, origin, Vector2i(side_x, origin.y - 1), observation)
 				if not roof_clear.is_empty():
 					return roof_clear
 				continue
-			var step := _place_step(side_x, origin.y - 1, origin, Vector2i(outer_x, origin.y - 1), observation, terrain)
+			var step := _place_step(side_x, origin.y - 1, origin, Vector2i(side_x, origin.y - 1), observation, terrain)
 			if not step.is_empty():
 				return step
 	return {}
