@@ -6842,6 +6842,33 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 	var pit_terrain: Dictionary = DigPlanner._terrain_map(observation.get("terrain_tiles", []))
 	var pit_origin: Vector2i = DigPlanner._grounded_support_tile(observation.get("self", {}), pit_terrain)
 	var self_position := Contract.target_position(observation.get("self", {}))
+	var pit_stair_probe: Dictionary = {}
+	if str(pit_escape.get("target_id", "")).begins_with("pit-stair:"):
+		var stair_position := Contract.target_position(pit_escape.get("target", {}))
+		var stair_tile := _support_tile_for_position(stair_position)
+		var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+		var nearby: Array = []
+		for ty in range(pit_origin.y - 5, pit_origin.y):
+			for tx in range(mini(pit_origin.x, stair_tile.x), maxi(pit_origin.x, stair_tile.x) + 1):
+				if _terrain_solid_at(tx, ty):
+					nearby.append({"x": tx, "y": ty, "block": str(_terrain_tiles.get("%d:%d" % [tx, ty], ""))})
+		pit_stair_probe = {
+			"position": [self_position.x, self_position.y],
+			"target": [stair_position.x, stair_position.y],
+			"standable": _terrain_standable_tile(stair_tile),
+			"jump_safe": _jump_route_has_safe_landing(self_state, stair_position),
+			"route": Navigator.physics_route(
+				_route_origin_support_tile(self_position, self_state),
+				stair_tile,
+				Callable(self, "_terrain_standable_tile"),
+				Callable(self, "_terrain_climbable_tile"),
+				Navigator.MAX_PHYSICS_ROUTE_NODES,
+				Callable(self, "_physics_transition_allowed"),
+				_safe_jump_first_step_filter(self_state),
+				_safe_jump_later_step_filter(self_state),
+			),
+			"nearby_solids": nearby,
+		}
 	var nearest_player_distance := 999999.0
 	var nearest_player_vertical_gap := 0.0
 	for raw_player in observation.get("players", []):
@@ -6906,6 +6933,7 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 		"pit_origin": [pit_origin.x, pit_origin.y],
 		"pit_escape_action": str(pit_escape.get("action", "")),
 		"pit_escape_target_id": str(pit_escape.get("target_id", "")),
+		"pit_stair_probe": pit_stair_probe,
 		"nearest_player_distance": nearest_player_distance,
 		"nearest_player_vertical_gap": nearest_player_vertical_gap,
 		"pit_sides": pit_sides,
