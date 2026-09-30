@@ -626,6 +626,115 @@ static func island_stone_generator_step(observation: Dictionary) -> Dictionary:
 	return {}
 
 
+## Build a short, reversible raised crossing over an intact lava source when
+## the bot starts on the cool side of an island generator. The adjacent dry
+## support is built first, so the over-lava tile is structurally attached. A
+## host-proven waypoint, not the placement itself, authorizes the final move.
+static func island_stone_generator_crossing_step(observation: Dictionary) -> Dictionary:
+	var mode := str(observation.get("world_mode", "")).to_lower()
+	if mode not in ["skyblock", "floating_islands"] or bool(observation.get("pvp_world", false)) or bool(observation.get("placement_pending", false)):
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if not bool(self_state.get("on_ground", false)):
+		return {}
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var origin := _supported_origin(self_state, terrain)
+	if not _solid(terrain, origin.x, origin.y):
+		return {}
+	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	if int(inventory.get("cobblestone", 0)) >= 12:
+		return {}
+	var has_tool := false
+	for tool_name in ["wooden_pickaxe", "stone_pickaxe", "copper_pickaxe", "iron_pickaxe"]:
+		if int(inventory.get(tool_name, 0)) > 0:
+			has_tool = true
+			break
+	if not has_tool:
+		return {}
+	var has_station := false
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if raw_tile is Dictionary and str((raw_tile as Dictionary).get("block_name", "")).to_lower().trim_prefix("core.") == "workbench":
+			has_station = true
+			break
+	if not has_station:
+		return {}
+	var blocked: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	var now := int(observation.get("observed_at_msec", 0))
+	for raw_water in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_water is Dictionary:
+			continue
+		var water := raw_water as Dictionary
+		if str(water.get("block_name", "")).to_lower().trim_prefix("core.") != "water" or int(water.get("fluid_level", -1)) != 0:
+			continue
+		for raw_lava in _as_array(observation.get("terrain_tiles", [])):
+			if not raw_lava is Dictionary:
+				continue
+			var lava := raw_lava as Dictionary
+			var water_x := int(water.get("x", 0))
+			var lava_x := int(lava.get("x", 0))
+			var row := int(lava.get("y", 0))
+			if str(lava.get("block_name", "")).to_lower().trim_prefix("core.") != "lava" or int(lava.get("fluid_level", -1)) != 0 or row != int(water.get("y", 0)) or absi(lava_x - water_x) != 4 or origin.y != row:
+				continue
+			var direction := signi(lava_x - water_x)
+			var dry_x := lava_x - direction
+			var staging_x := dry_x - direction
+			var hot_x := lava_x + direction
+			if (origin.x - water_x) * direction <= 0 or (origin.x - lava_x) * direction >= 0:
+				continue
+			if not _solid(terrain, dry_x, row) or not _solid(terrain, staging_x, row) or not _solid(terrain, hot_x, row):
+				continue
+			var lined := true
+			for gap_x in range(mini(water_x, lava_x) + 1, maxi(water_x, lava_x)):
+				if not _solid(terrain, gap_x, row + 1):
+					lined = false
+					break
+			if not lined:
+				continue
+			var brace := Vector2i(dry_x, row - 1)
+			var bridge := Vector2i(lava_x, row - 1)
+			var known: Dictionary = observation.get("terrain_known_cells", {}) if observation.get("terrain_known_cells", {}) is Dictionary else {}
+			if not known.is_empty() and (not bool(known.get("%d:%d" % [brace.x, brace.y], false)) or not bool(known.get("%d:%d" % [bridge.x, bridge.y], false))):
+				continue
+			if not _empty(terrain, dry_x, row - 2) or not _empty(terrain, lava_x, row - 2) or not _empty(terrain, hot_x, row - 1):
+				continue
+			var next_tile := brace if not _solid(terrain, brace.x, brace.y) else bridge
+			if _solid(terrain, bridge.x, bridge.y):
+				return _known_safe_worksite(observation, Vector2i(hot_x, row))
+			if next_tile == brace and _generator_crossing_block_count(inventory) < 2:
+				continue
+			if not _empty(terrain, next_tile.x, next_tile.y) or _overlaps_any_player(next_tile, observation) or int(blocked.get("tile:%d:%d" % [next_tile.x, next_tile.y], 0)) > now:
+				continue
+			var worksite := Vector2i(staging_x, row)
+			if origin != worksite:
+				var waypoint := _known_safe_worksite(observation, worksite)
+				if not waypoint.is_empty():
+					return waypoint
+				continue
+			var block_name := _generator_crossing_block(inventory)
+			if block_name.is_empty():
+				return {}
+			var placement := _placement(next_tile, origin, Vector2i(hot_x, row), block_name, "island_generator_crossing")
+			placement["action"] = Contract.ACTION_PLACE
+			return placement
+	return {}
+
+
+static func _generator_crossing_block(inventory: Dictionary) -> String:
+	for name in ["dirt", "stone", "cobblestone", "planks", "palm_planks", "pine_planks", "weeping_planks"]:
+		var reserve := 2 if name.ends_with("planks") else 0
+		if int(inventory.get(name, 0)) > reserve:
+			return name
+	return ""
+
+
+static func _generator_crossing_block_count(inventory: Dictionary) -> int:
+	var usable := 0
+	for name in ["dirt", "stone", "cobblestone", "planks", "palm_planks", "pine_planks", "weeping_planks"]:
+		var reserve := 2 if name.ends_with("planks") else 0
+		usable += maxi(0, int(inventory.get(name, 0)) - reserve)
+	return usable
+
+
 static func _generator_level_approach(terrain: Dictionary, origin: Vector2i, worksite: Vector2i, lava_x: int) -> bool:
 	if origin.y != worksite.y or signi(origin.x - lava_x) != signi(worksite.x - lava_x):
 		return false

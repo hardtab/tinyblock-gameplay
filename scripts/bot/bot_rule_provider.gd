@@ -603,6 +603,14 @@ func decide(observation: Dictionary) -> Dictionary:
 		var challenge_action := _mode_achievement_action(observation, legal)
 		if not challenge_action.is_empty():
 			return _tag_achievement_goal(challenge_action, "dont_look_back")
+	# Once ordinary starter tools and a station exist, secure the dry side of
+	# an island stone generator before optional cobblestone mining can lead the
+	# bot down into a pit. The crossing keeps both fluid sources in place.
+	if mode in ["skyblock", "floating_islands"] and str(observation.get("aggressive_player_id", "")).is_empty() and creature_threat.is_empty():
+		var crossing_step := BuildPlanner.island_stone_generator_crossing_step(observation)
+		var crossing_action := str(crossing_step.get("action", ""))
+		if crossing_action in legal:
+			return _decision(Contract.GOAL_BUILD, crossing_action, crossing_step, 900 if crossing_action == Contract.ACTION_PLACE else 2200, 0.91)
 	var stone_age_action := _stone_age_progression_action(observation, legal)
 	if not stone_age_action.is_empty():
 		return stone_age_action
