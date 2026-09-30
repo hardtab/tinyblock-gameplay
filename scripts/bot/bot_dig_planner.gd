@@ -152,6 +152,16 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	var directions := [1, -1]
 	if best != _invalid_tile() and best.x < origin.x:
 		directions = [-1, 1]
+	# If both side corridors are sealed, preserving every previously placed wall
+	# traps the bot forever. Only in this fully enclosed, route-less pocket may
+	# it clear one of its own adjacent support-material *walls*. _mine_step still
+	# protects stations, footing, players, fluids, reach and harvest tier.
+	var enclosed_by_walls := waypoints.is_empty()
+	for direction in directions:
+		var side_x: int = origin.x + direction
+		if not _solid(terrain, side_x, origin.y) or not _solid(terrain, side_x, origin.y - 1) or not _known_empty_cell(observation, terrain, side_x, origin.y - 2):
+			enclosed_by_walls = false
+			break
 	for direction in directions:
 		var side_x: int = origin.x + direction
 		var side_floor := Vector2i(side_x, origin.y)
@@ -164,7 +174,11 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 			or _overlaps_any_player(blocker, observation)
 		):
 			continue
-		var clear := _mine_step(blocker.x, blocker.y, origin, side_floor, observation)
+		var side_observation := observation
+		if enclosed_by_walls:
+			side_observation = observation.duplicate(false)
+			side_observation["allow_escape_clear_protected"] = true
+		var clear := _mine_step(blocker.x, blocker.y, origin, side_floor, side_observation)
 		if not clear.is_empty():
 			return clear
 	return {}
