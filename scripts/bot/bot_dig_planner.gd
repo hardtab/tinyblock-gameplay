@@ -109,6 +109,33 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	var upward_move := _upward_escape_waypoint_step(waypoints, observation, self_state, origin)
 	if not upward_move.is_empty():
 		return upward_move
+	# A newly placed route stair can precede the next waypoint snapshot. Follow
+	# that verified, adjacent support instead of treating its occupied cell as a
+	# fresh wall or waiting indefinitely for exploration to discover it.
+	for direction in [-1, 1]:
+		var step := Vector2i(origin.x + direction, origin.y - 1)
+		if (
+			not _is_route_stair_cell(observation, step.x, step.y)
+			or not _solid(terrain, step.x, step.y)
+			or not _known_empty_cell(observation, terrain, step.x, step.y - 1)
+			or not _known_empty_cell(observation, terrain, step.x, step.y - 2)
+			or _near_harmful_fluid(step, observation)
+			or _overlaps_any_player(step, observation)
+		):
+			continue
+		var move_id := "pit-stair:%d:%d" % [step.x, step.y]
+		var blocked: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+		if int(blocked.get(move_id, 0)) > int(observation.get("observed_at_msec", 0)):
+			continue
+		var destination := [float(step.x * TILE + 6), float(step.y * TILE - 28)]
+		return {
+			"action": Contract.ACTION_MOVE_TO,
+			"goal": Contract.GOAL_DIG_ROUTE,
+			"target_id": move_id,
+			"target": {"id": move_id, "position": destination, "support_tile": [step.x, step.y], "reachable": true},
+			"commit_for_ms": 2200,
+			"confidence": 0.82,
+		}
 	# One or two same-depth cells inside a sealed pocket are reachable, but do
 	# not constitute an exit. Keep recovering if the verified route graph never
 	# rises or extends beyond this local pocket.
