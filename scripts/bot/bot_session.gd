@@ -7548,6 +7548,12 @@ func _handle_action_result(payload: Dictionary) -> void:
 			_record_craft_achievement(output)
 		_sync_stone_age_goal(_achievement_observation(), Time.get_ticks_msec())
 		return
+	# The action_result carries the host's authoritative tile after both accepted
+	# and rejected edits. The actor may not receive its own tile_batch promptly;
+	# without this merge it can propose a second PLACE into an occupied stair or
+	# continue routing through a block it just mined.
+	if action in ["mine_block", "place_block"] and payload.has("block_id"):
+		_apply_tile_batch({"tiles": [payload]})
 	if not bool(payload.get("accepted", false)):
 		var rejected_key := "%d:%d" % [int(payload.get("x", 0)), int(payload.get("y", 0))]
 		var retry_delay := MINE_REJECTION_RETRY_MSEC if action == "mine_block" else ACTION_RETRY_BLOCK_MSEC
