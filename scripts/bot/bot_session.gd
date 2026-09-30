@@ -6855,14 +6855,22 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 	var pit_sides: Array = []
 	for direction in [1, -1]:
 		var side_x: int = pit_origin.x + direction
+		var wall_y: int = pit_origin.y - 1
+		var wall_tile: Dictionary = DigPlanner._terrain_tile(observation, side_x, wall_y)
 		pit_sides.append({
 			"x": side_x,
 			"floor": DigPlanner._solid(pit_terrain, side_x, pit_origin.y),
-			"wall": DigPlanner._solid(pit_terrain, side_x, pit_origin.y - 1),
+			"wall": DigPlanner._solid(pit_terrain, side_x, wall_y),
+			"wall_block": str(wall_tile.get("block_name", "")),
+			"wall_harvest_tier": int(wall_tile.get("harvest_tier", -1)),
+			"equipped_harvest_tier": DigPlanner._equipped_mining_tool_tier(observation),
+			"wall_protected": DigPlanner._is_protected_build_cell(observation, side_x, wall_y),
+			"wall_cooldown": DigPlanner._retry_cooldown_active(observation, side_x, wall_y),
+			"wall_safe_to_mine": Perception.mine_target_is_safe(observation, {"x": side_x, "y": wall_y}),
 			"headroom_known": DigPlanner._known_empty_cell(observation, pit_terrain, side_x, pit_origin.y - 2),
 			"lava_nearby": DigPlanner._near_harmful_fluid(Vector2i(side_x, pit_origin.y), observation),
 			"player_overlap": DigPlanner._overlaps_any_player(Vector2i(side_x, pit_origin.y - 1), observation),
-			"mine_action": str(DigPlanner._mine_step(side_x, pit_origin.y - 1, pit_origin, Vector2i(side_x, pit_origin.y), observation).get("action", "")),
+			"mine_action": str(DigPlanner._mine_step(side_x, wall_y, pit_origin, Vector2i(side_x, pit_origin.y), observation).get("action", "")),
 		})
 	var project: Dictionary = observation.get("build_project_state", {}) if observation.get("build_project_state", {}) is Dictionary else {}
 	structured_log.emit({
@@ -6870,6 +6878,7 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 		"at_msec": now_msec,
 		"world_mode": mode,
 		"on_ground": bool((observation.get("self", {}) as Dictionary).get("on_ground", false)),
+		"equipped_hand": str((observation.get("equipment_slots", {}) as Dictionary).get("hand", "")),
 		"visible_resources": (observation.get("visible_resources", []) as Array).size(),
 		"safe_waypoints": (observation.get("safe_exploration_waypoints", []) as Array).size(),
 		"usable_bridge_blocks": BuildPlanner._floating_bridge_usable_support_count(inventory) if mode == "floating_islands" else 0,
