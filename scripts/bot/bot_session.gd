@@ -6861,6 +6861,8 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 		var side_x: int = pit_origin.x + direction
 		var wall_y: int = pit_origin.y - 1
 		var wall_tile: Dictionary = DigPlanner._terrain_tile(observation, side_x, wall_y)
+		var roof_y: int = pit_origin.y - 3
+		var roof_tile: Dictionary = DigPlanner._terrain_tile(observation, side_x, roof_y)
 		var candidate_step: Dictionary = DigPlanner._place_step(side_x, wall_y, pit_origin, Vector2i(side_x + direction, wall_y), observation, pit_terrain)
 		pit_sides.append({
 			"x": side_x,
@@ -6876,6 +6878,9 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 			"step_action": str(candidate_step.get("action", "")),
 			"step_cell_known_empty": DigPlanner._known_empty_cell(observation, pit_terrain, side_x, wall_y),
 			"step_roof_known_empty": DigPlanner._known_empty_cell(observation, pit_terrain, side_x, wall_y - 2),
+			"roof_block": str(roof_tile.get("block_name", "")),
+			"roof_protected": DigPlanner._is_protected_build_cell(observation, side_x, roof_y),
+			"roof_mine_action": str(DigPlanner._mine_step(side_x, roof_y, pit_origin, Vector2i(side_x + direction, wall_y), observation).get("action", "")),
 			"headroom_known": DigPlanner._known_empty_cell(observation, pit_terrain, side_x, pit_origin.y - 2),
 			"lava_nearby": DigPlanner._near_harmful_fluid(Vector2i(side_x, pit_origin.y), observation),
 			"player_overlap": DigPlanner._overlaps_any_player(Vector2i(side_x, pit_origin.y - 1), observation),
