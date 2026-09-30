@@ -109,7 +109,22 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	var upward_move := _upward_escape_waypoint_step(waypoints, observation, self_state, origin)
 	if not upward_move.is_empty():
 		return upward_move
-	if not waypoints.is_empty() and not _player_above_origin(observation, self_state):
+	# One or two same-depth cells inside a sealed pocket are reachable, but do
+	# not constitute an exit. Keep recovering if the verified route graph never
+	# rises or extends beyond this local pocket.
+	var only_pocket_waypoints := true
+	for raw_waypoint in waypoints:
+		if not raw_waypoint is Dictionary:
+			only_pocket_waypoints = false
+			break
+		var support: Variant = (raw_waypoint as Dictionary).get("support_tile", [])
+		if not support is Array or (support as Array).size() < 2:
+			only_pocket_waypoints = false
+			break
+		if absi(int((support as Array)[0]) - origin.x) > 2 or int((support as Array)[1]) < origin.y:
+			only_pocket_waypoints = false
+			break
+	if not only_pocket_waypoints and not _player_above_origin(observation, self_state):
 		return {}
 	var best := _invalid_tile()
 	var best_score := 999999
@@ -156,7 +171,7 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	# traps the bot forever. Only in this fully enclosed, route-less pocket may
 	# it clear one of its own adjacent support-material *walls*. _mine_step still
 	# protects stations, footing, players, fluids, reach and harvest tier.
-	var enclosed_by_walls := waypoints.is_empty()
+	var enclosed_by_walls := only_pocket_waypoints
 	for direction in directions:
 		var side_x: int = origin.x + direction
 		if not _solid(terrain, side_x, origin.y) or not _solid(terrain, side_x, origin.y - 1) or not _known_empty_cell(observation, terrain, side_x, origin.y - 2):
@@ -185,7 +200,7 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	# station sealing the next column. Build a supported step in that open cell
 	# rather than alternating forever between two reachable floor tiles. The
 	# existing station stays intact and becomes part of the climbable route.
-	if waypoints.is_empty():
+	if only_pocket_waypoints:
 		for direction in directions:
 			var side_x: int = origin.x + direction
 			var outer_x: int = origin.x + direction * 2
