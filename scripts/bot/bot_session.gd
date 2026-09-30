@@ -3577,7 +3577,13 @@ func _jump_route_has_safe_landing(
 				y = next_y
 			else:
 				if vy < 0.0:
-					return false
+					# A normal player bumps their head, loses upward velocity, and can
+					# still land on a nearby one-block step under the low ceiling.
+					# Rejecting every ceiling contact made such verified pit stairs
+					# unreachable even though the host physics permits the jump.
+					y = float(vertical_hit.get("by", y)) + float(BlockDefs.TILE)
+					vy = 0.0
+					continue
 				y = float(vertical_hit.get("by", y)) - height
 				if _position_touches_harmful_fluid(x, y, width, height) and (not allow_starting_hazard_escape or cleared_starting_hazard):
 					return false
