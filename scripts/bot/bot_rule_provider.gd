@@ -1710,6 +1710,7 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 	# fluid for optional exploration; deliberate generator work uses its own
 	# worksite planner instead of this frontier selector.
 	var hazardous_frontiers: Dictionary = {}
+	var harmful_fluid_tiles: Array[Vector2i] = []
 	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
 		if not raw_tile is Dictionary:
 			continue
@@ -1719,6 +1720,7 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 			continue
 		var hazard_x := int(terrain_tile.get("x", 0))
 		var hazard_y := int(terrain_tile.get("y", 0))
+		harmful_fluid_tiles.append(Vector2i(hazard_x, hazard_y))
 		for dx in range(-1, 2):
 			for dy in range(-1, 2):
 				hazardous_frontiers["%d:%d" % [hazard_x + dx, hazard_y + dy]] = true
@@ -1733,6 +1735,8 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 			if waypoint_support.size() == 2 and hazardous_frontiers.has("%d:%d" % [int(waypoint_support[0]), int(waypoint_support[1])]):
 				continue
 			var position := Contract.target_position(waypoint)
+			if _exploration_corridor_near_harmful_fluid(origin, position, self_state, harmful_fluid_tiles):
+				continue
 			var route_steps := int(waypoint.get("route_steps", EXPLORE_MAX_ROUTE_STEPS + 1))
 			# Exploration is incremental. A long graph-reachable descent is still a
 			# poor short action: it can consume the whole movement window and pull the
@@ -1787,6 +1791,22 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 		"support_tile": target_support_tile,
 		"reason": "safe_surface_frontier",
 	}
+
+
+func _exploration_corridor_near_harmful_fluid(origin: Vector2, destination: Vector2, self_state: Dictionary, harmful_tiles: Array[Vector2i]) -> bool:
+	# A dry frontier on the far side of lava is not a safe optional goal. The
+	# route graph can descend toward it via tree/ledge supports while the host
+	# drops the avatar into the pool. Explicit bridge work has its own planner.
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var left := floori(minf(origin.x, destination.x) / ROUTE_TILE)
+	var right := floori((maxf(origin.x, destination.x) + width - 0.001) / ROUTE_TILE)
+	var upper := floori((minf(origin.y, destination.y) + height) / ROUTE_TILE) - 1
+	var lower := floori((maxf(origin.y, destination.y) + height) / ROUTE_TILE) + 1
+	for tile in harmful_tiles:
+		if tile.x >= left and tile.x <= right and tile.y >= upper and tile.y <= lower:
+			return true
+	return false
 
 
 func _starter_wood_explore_direction(observation: Dictionary, origin: Vector2) -> int:

@@ -1126,7 +1126,7 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 				_world_snapshot["self"] = self_state
 				return {"done": true, "reason": "flee_no_dry_fluid_landing"}
 			destination = fluid_escape.get("position", target)
-			emergency_fluid_escape_jump = true
+			emergency_fluid_escape_jump = str(fluid_escape.get("kind", "jump")) == "jump"
 		elif not _terrain_tiles.is_empty():
 			var body_center := origin + Vector2(
 				float(self_state.get("w", 20.0)) * 0.5,
@@ -2013,14 +2013,23 @@ func _flee_destination_crosses_hostile(origin: Vector2, threat: Vector2, destina
 	return absf(threat_dx) > float(BlockDefs.TILE) and threat_dx * (threat.x - destination.x) <= 0.0
 
 
-## Emergency escape from a fluid the avatar is already touching. The old direct
-## horizontal command could steer deeper into a pool or off the island. Require
-## a locally observed dry support and a simulated jump arc that clears the
-## starting hazard before considering the route executable.
+## Emergency escape from a fluid the avatar is already touching. Prefer a
+## supported dry walk when the bot is standing in a shallow pool: lava slows its
+## jump enough that there may be no valid jump arc even though it can walk out.
+## Otherwise require a simulated jump arc with a verified dry landing.
 func _safe_harmful_fluid_escape_waypoint(self_state: Dictionary, origin: Vector2, threat: Vector2) -> Dictionary:
 	if _terrain_tiles.is_empty():
 		return {}
-	var origin_tile := _route_origin_support_tile(origin, self_state)
+	# A lava-overlapped body is intentionally not a standable route node. Do not
+	# re-anchor it to the neighboring dry support before it has physically left
+	# the fluid: that changes the escape target after the first subpixel step and
+	# can reverse a safe walk straight back through the pool.
+	var origin_tile := _support_tile_for_position(origin)
+	if not _terrain_solid_at(origin_tile.x, origin_tile.y):
+		origin_tile = _route_origin_support_tile(origin, self_state)
+	var walk_escape := _safe_harmful_fluid_walk_escape(self_state, origin, threat, origin_tile)
+	if not walk_escape.is_empty():
+		return walk_escape
 	var best: Dictionary = {}
 	var best_score := -INF
 	var candidates: Array[Vector2i] = []
@@ -2048,6 +2057,54 @@ func _safe_harmful_fluid_escape_waypoint(self_state: Dictionary, origin: Vector2
 			"support_tile": landing_tile,
 			"distance_from_threat": threat_clearance,
 			"emergency_fluid_escape": true,
+			"kind": "jump",
+		}
+	return best
+
+
+func _safe_harmful_fluid_walk_escape(self_state: Dictionary, origin: Vector2, threat: Vector2, origin_tile: Vector2i) -> Dictionary:
+	if not bool(self_state.get("on_ground", false)) or not _terrain_solid_at(origin_tile.x, origin_tile.y):
+		return {}
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var best: Dictionary = {}
+	var best_score := -INF
+	# The center can enter the dry column while the body's trailing edge is
+	# still in lava. Keep walking to that column's canonical dry pose instead
+	# of declaring escape complete halfway through the overlap.
+	for direction in [0, -1, 1]:
+		var landing_tile := origin_tile + Vector2i(direction, 0)
+		if not _terrain_standable_tile(landing_tile):
+			continue
+		var landing := _world_position_for_support_tile(landing_tile)
+		if absf(landing.y - origin.y) > 2.0 or _nearest_harmful_fluid_clearance(landing, self_state) <= 0.0:
+			continue
+		var x := origin.x
+		var cleared_hazard := false
+		var traversable := true
+		while absf(landing.x - x) > 0.01:
+			x += clampf(landing.x - x, -2.0, 2.0)
+			if not _local_collision(x, origin.y, width, height).is_empty():
+				traversable = false
+				break
+			var touching_hazard := _position_touches_harmful_fluid(x, origin.y, width, height)
+			if cleared_hazard and touching_hazard:
+				traversable = false
+				break
+			if not touching_hazard:
+				cleared_hazard = true
+		if not traversable or not cleared_hazard:
+			continue
+		var score := _nearest_harmful_fluid_clearance(landing, self_state) * 2.0 + landing.distance_to(threat) * 0.1
+		if score <= best_score:
+			continue
+		best_score = score
+		best = {
+			"position": landing,
+			"support_tile": landing_tile,
+			"distance_from_threat": landing.distance_to(threat),
+			"emergency_fluid_escape": true,
+			"kind": "walk",
 		}
 	return best
 
