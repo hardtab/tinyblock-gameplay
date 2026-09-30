@@ -212,6 +212,13 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 				or _near_harmful_fluid(side_floor, observation)
 			):
 				continue
+			# A low ceiling over the new stair would leave insufficient headroom.
+			# Clear it first using the ordinary reach/tool/player safety checks.
+			if _solid(terrain, side_x, origin.y - 3):
+				var roof_clear := _mine_step(side_x, origin.y - 3, origin, Vector2i(outer_x, origin.y - 1), observation)
+				if not roof_clear.is_empty():
+					return roof_clear
+				continue
 			var step := _place_step(side_x, origin.y - 1, origin, Vector2i(outer_x, origin.y - 1), observation, terrain)
 			if not step.is_empty():
 				return step
@@ -461,7 +468,11 @@ static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, obser
 	# Match BotSafetyPolicy's two-tile reach from the *actual* body centre, not
 	# the re-anchored support cell. A high ceiling above a pit can otherwise be
 	# proposed and rejected on every policy tick without ever making progress.
-	var body_tile := _support_tile(observation.get("self", {}))
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var body_tile := Vector2i(
+		floori((float(self_state.get("x", 0.0)) + float(self_state.get("w", 20.0)) * 0.5) / float(TILE)),
+		floori((float(self_state.get("y", 0.0)) + float(self_state.get("h", 28.0)) * 0.5) / float(TILE)),
+	)
 	if absi(x - body_tile.x) > 2 or absi(y - body_tile.y) > 2:
 		return {}
 	# A functional station is not expendable route filler, including after a

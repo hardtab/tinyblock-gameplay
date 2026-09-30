@@ -315,8 +315,10 @@ func _valid_dig_route_target(decision: Dictionary, observation: Dictionary) -> b
 	var equipment: Dictionary = observation.get("equipment_slots", {}) if observation.get("equipment_slots", {}) is Dictionary else {}
 	var hand := str(equipment.get("hand", ""))
 	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
-	var origin_x := floori((float(self_state.get("x", 0.0)) + 10.0) / 32.0)
-	var origin_y := floori((float(self_state.get("y", 0.0)) + 28.0) / 32.0)
+	# Dig reach is measured from the avatar body, not the tile below its feet.
+	# Using the support tile rejected a reachable roof above a pit forever.
+	var origin_x := floori((float(self_state.get("x", 0.0)) + float(self_state.get("w", 20.0)) * 0.5) / 32.0)
+	var origin_y := floori((float(self_state.get("y", 0.0)) + float(self_state.get("h", 28.0)) * 0.5) / 32.0)
 	var target_x := int(target.get("x", 0))
 	var target_y := int(target.get("y", 0))
 	if abs(target_x - origin_x) > 2 or abs(target_y - origin_y) > 2:
