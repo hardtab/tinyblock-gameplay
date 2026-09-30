@@ -809,6 +809,7 @@ func _process(delta: float) -> void:
 	_expire_stone_age_pending(now_msec)
 	_expire_achievement_goal_pending(now_msec)
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	_settle_near_support_microbounce(self_state)
 	# Hazard contact must tick even while WAIT/idle, otherwise a bot standing in
 	# lava only takes damage when a movement action happens to run physics.
 	_apply_local_harmful_fluid(self_state, delta)
@@ -3761,6 +3762,33 @@ func _advance_local_physics_if_needed(delta: float) -> void:
 		return
 	_advance_local_physics(self_state, delta, false)
 	_world_snapshot["self"] = self_state
+
+
+func _settle_near_support_microbounce(self_state: Dictionary) -> void:
+	# Low-bounce construction blocks can keep the authoritative avatar about a
+	# pixel above the surface with a tiny negative vy. It is effectively
+	# standing, but route/idle policy otherwise sees on_ground=false forever.
+	# Snap only inside the host's normal 1.5 px support window; never recover a
+	# real jump, a fall, or an unsupported edge.
+	if self_state.is_empty() or bool(self_state.get("on_ground", false)):
+		return
+	var vy := float(self_state.get("vy", 0.0))
+	if absf(vy) > 0.5:
+		return
+	var x := float(self_state.get("x", 0.0))
+	var y := float(self_state.get("y", 0.0))
+	var width := float(self_state.get("w", 20.0))
+	var height := float(self_state.get("h", 28.0))
+	var feet := y + height
+	var hit := _local_collision(x, y + 1.5, width, height)
+	if hit.is_empty():
+		return
+	var surface_y := float(hit.get("by", -999999.0))
+	if surface_y < feet - 0.05 or surface_y > feet + 1.5:
+		return
+	self_state["y"] = surface_y - height
+	self_state["vy"] = 0.0
+	self_state["on_ground"] = true
 
 
 func _local_touches_harmful_fluid(self_state: Dictionary) -> bool:
