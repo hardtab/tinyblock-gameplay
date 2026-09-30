@@ -489,7 +489,7 @@ static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, obser
 		# After repeated failed movement, one adjacent non-station wall block may
 		# be removed to escape a pocket the bot built around itself. Never clear a
 		# floor/support or a workbench/furnace; the descent guard below still applies.
-		var upper_wall_clear: bool = bool(observation.get("allow_escape_clear_protected", false)) and abs(x - origin.x) == 1 and y in [origin.y - 1, origin.y - 2]
+		var upper_wall_clear: bool = bool(observation.get("allow_escape_clear_protected", false)) and abs(x - origin.x) == 1 and y in [origin.y - 1, origin.y - 2] and not _is_route_stair_cell(observation, x, y)
 		var adjacent_descent_clear: bool = bool(observation.get("allow_isolated_platform_descent", false)) and abs(x - origin.x) == 1 and y == origin.y and _solid(_terrain_map(observation.get("terrain_tiles", [])), x, y + 1)
 		if not (upper_wall_clear or adjacent_descent_clear) or str(_terrain_tile(observation, x, y).get("block_name", "")) not in SUPPORT_BLOCK_NAMES:
 			return {}
@@ -550,6 +550,24 @@ static func _is_protected_build_cell(observation: Dictionary, x: int, y: int) ->
 			continue
 		if int(parts[-2]) == x and int(parts[-1]) == y:
 			return true
+	return false
+
+
+static func _is_route_stair_cell(observation: Dictionary, x: int, y: int) -> bool:
+	var key := "%d:%d" % [x, y]
+	var protected_cells: Variant = observation.get("protected_build_cells", {})
+	if protected_cells is Dictionary:
+		var cell: Variant = (protected_cells as Dictionary).get(key, {})
+		if cell is Dictionary and str((cell as Dictionary).get("reason", "")).to_upper() == Contract.GOAL_DIG_ROUTE:
+			return true
+	var raw_history: Variant = observation.get("action_history", [])
+	if raw_history is Array:
+		for raw_entry in raw_history:
+			if not raw_entry is Dictionary:
+				continue
+			var entry := raw_entry as Dictionary
+			if str(entry.get("action", "")) == Contract.ACTION_PLACE and str(entry.get("target_id", "")) == "dig-step:%d:%d" % [x, y]:
+				return true
 	return false
 
 
