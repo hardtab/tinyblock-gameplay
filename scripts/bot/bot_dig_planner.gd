@@ -181,6 +181,25 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 		var clear := _mine_step(blocker.x, blocker.y, origin, side_floor, side_observation)
 		if not clear.is_empty():
 			return clear
+	# Clearing one wall can expose only a one-cell lateral pocket, with an owned
+	# station sealing the next column. Build a supported step in that open cell
+	# rather than alternating forever between two reachable floor tiles. The
+	# existing station stays intact and becomes part of the climbable route.
+	if waypoints.is_empty():
+		for direction in directions:
+			var side_x: int = origin.x + direction
+			var outer_x: int = origin.x + direction * 2
+			var side_floor := Vector2i(side_x, origin.y)
+			if (
+				not _solid(terrain, side_x, origin.y)
+				or not _known_empty_cell(observation, terrain, side_x, origin.y - 1)
+				or not _solid(terrain, outer_x, origin.y - 1)
+				or _near_harmful_fluid(side_floor, observation)
+			):
+				continue
+			var step := _place_step(side_x, origin.y - 1, origin, Vector2i(outer_x, origin.y - 1), observation, terrain)
+			if not step.is_empty():
+				return step
 	return {}
 
 
