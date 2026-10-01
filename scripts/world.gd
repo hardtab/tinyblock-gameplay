@@ -11399,8 +11399,13 @@ func move_player(move_left: bool, move_right: bool, jump: bool, delta: float = 1
 			player["y"] = y_hit["y"]
 			var landed_surface := surface_physics(find_ground_support(player["x"], player["y"], player["w"], player["h"]))
 			var rebound := float(landed_surface["bounce"])
-			if rebound > 0.0 and impact_vy > 1.0:
-				player["vy"] = -maxf(impact_vy * rebound, absf(BlockDefs.JUMP) * rebound * 0.6)
+			var rebound_speed := maxf(impact_vy * rebound, absf(BlockDefs.JUMP) * rebound * 0.6)
+			# Sub-pixel rebounds can become a permanent cycle on slower hosts:
+			# each next frame lands again, restarts the tiny rebound, and can_jump
+			# never sees a nonnegative takeoff velocity. Settle imperceptible
+			# impacts; meaningful bounce surfaces keep their ordinary rebound.
+			if rebound > 0.0 and impact_vy > 1.0 and rebound_speed > 0.5:
+				player["vy"] = -rebound_speed
 				player["on_ground"] = false
 			else:
 				player["vy"] = 0.0
