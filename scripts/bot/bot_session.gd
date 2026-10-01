@@ -3646,8 +3646,13 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 	gap.  Dedicated hosts still correct these values from their own simulation.
 	"""
 	_physics_advanced_this_frame = true
+	if delta <= 0.0:
+		return
 	_eject_local_self_from_solid(self_state)
-	var step := clampf(maxf(delta, 0.0) * NETWORK_PHYSICS_TICKS_PER_SECOND, 0.25, 2.0)
+	# Headless processing can run much faster than rendering. A minimum step
+	# invents elapsed time on each frame, accelerating the private jump until it
+	# releases controls before the authoritative host has completed takeoff.
+	var step := minf(delta * NETWORK_PHYSICS_TICKS_PER_SECOND, 2.0)
 	var width := float(self_state.get("w", 20.0))
 	var height := float(self_state.get("h", 28.0))
 	var x := float(self_state.get("x", 0.0))
