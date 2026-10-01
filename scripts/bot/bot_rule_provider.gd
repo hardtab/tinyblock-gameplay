@@ -24,6 +24,7 @@ var _last_explore_origin_y := INF
 var _last_explore_vertical_toward := 0.0
 var _last_explore_target_id := ""
 var _last_explore_support_tile: Array = []
+var _explored_support_until: Dictionary = {}
 var _last_failed_explore_frontier := ""
 var _same_explore_frontier_failures := 0
 var _last_explore_left_failure_msec := -1
@@ -190,6 +191,7 @@ func reset() -> void:
 	_last_explore_vertical_toward = 0.0
 	_last_explore_target_id = ""
 	_last_explore_support_tile.clear()
+	_explored_support_until.clear()
 	_last_failed_explore_frontier = ""
 	_same_explore_frontier_failures = 0
 	_last_explore_left_failure_msec = -1
@@ -1610,6 +1612,9 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 	var is_long_range_explore := max_distance >= EXPLORE_RADIUS
 	var now_msec := int(observation.get("observed_at_msec", 0))
 	var history: Array = _as_array(observation.get("action_history", []))
+	for key in _explored_support_until.keys():
+		if int(_explored_support_until[key]) <= now_msec:
+			_explored_support_until.erase(key)
 	for index in range(history.size() - 1, -1, -1):
 		if not history[index] is Dictionary:
 			continue
@@ -1667,6 +1672,12 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 					else:
 						_same_explore_frontier_failures = 0
 						_last_failed_explore_frontier = ""
+						# Reaching a short corridor endpoint is movement success,
+						# not fresh exploration every time we walk back to it.
+						if _last_explore_support_tile.size() == 2:
+							var reached := Vector2(float(_last_explore_support_tile[0]) * ROUTE_TILE + 6.0, float(_last_explore_support_tile[1]) * ROUTE_TILE - 28.0)
+							if origin.distance_to(reached) <= 24.0:
+								_explored_support_until[str(_last_explore_support_tile)] = now_msec + 60_000
 						# Route-failure flips above remain local recovery behavior. A
 						# successful long-range excursion reverses only after the
 						# authoritative player position reaches this leg's expanding
@@ -1732,6 +1743,8 @@ func _exploration_target(observation: Dictionary, max_distance: float = EXPLORE_
 			if not bool(waypoint.get("reachable", false)):
 				continue
 			var waypoint_support: Array = waypoint.get("support_tile", []) if waypoint.get("support_tile", []) is Array else []
+			if int(_explored_support_until.get(str(waypoint_support), 0)) > now_msec:
+				continue
 			if waypoint_support.size() == 2 and hazardous_frontiers.has("%d:%d" % [int(waypoint_support[0]), int(waypoint_support[1])]):
 				continue
 			var position := Contract.target_position(waypoint)
