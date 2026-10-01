@@ -115,7 +115,7 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	for direction in [-1, 1]:
 		var step := Vector2i(origin.x + direction, origin.y - 1)
 		if (
-			not _is_route_stair_cell(observation, step.x, step.y)
+			not (_is_route_stair_cell(observation, step.x, step.y) or (waypoints.is_empty() and not _solid(terrain, step.x, origin.y)))
 			or not _solid(terrain, step.x, step.y)
 			or not _known_empty_cell(observation, terrain, step.x, step.y - 1)
 			or not _known_empty_cell(observation, terrain, step.x, step.y - 2)
