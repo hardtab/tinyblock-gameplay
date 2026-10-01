@@ -252,6 +252,34 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 			var step := _place_step(side_x, origin.y - 1, origin, Vector2i(side_x, origin.y - 1), observation, terrain)
 			if not step.is_empty():
 				return step
+	# When all higher / pocket / bounded-wall escapes failed and the bot is
+	# stranded on a featureless platform (ice/snow biome, no player above,
+	# no higher block within scan range), mine the nearest reachable solid
+	# terrain block to create an opening.  This avoids the WAIT-forever trap
+	# while the exploration / waypoint system has no roundtrip-capable tile.
+	if only_pocket_waypoints and not _player_above_origin(observation, self_state):
+		var break_observation := observation
+		if only_pocket_waypoints:
+			break_observation = observation.duplicate(false)
+			break_observation["allow_escape_clear_protected"] = true
+		for distance in range(1, 4):
+			for dy in range(-2, 1):
+				for dx in range(-distance, distance + 1):
+					if dx == 0 and (dy == 0 or dy == -1 and absi(dx) <= 1):
+						continue
+					var break_x := origin.x + dx
+					var break_y := origin.y + dy
+					if not _solid(terrain, break_x, break_y):
+						continue
+					var tile_pos := Vector2i(break_x, break_y)
+					if _near_harmful_fluid(tile_pos, observation) or _overlaps_any_player(tile_pos, observation):
+						continue
+					var tile_entry := _terrain_tile(observation, break_x, break_y)
+					if str(tile_entry.get("block_name", "")).to_lower().trim_prefix("core.") in ["workbench", "furnace"]:
+						continue
+					var clear := _mine_step(break_x, break_y, origin, tile_pos, break_observation)
+					if not clear.is_empty():
+						return clear
 	return {}
 
 
