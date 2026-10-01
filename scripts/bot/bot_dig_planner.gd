@@ -158,7 +158,7 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 		if not support is Array or (support as Array).size() < 2:
 			only_pocket_waypoints = false
 			break
-		if absi(int((support as Array)[0]) - origin.x) > 2 or int((support as Array)[1]) < origin.y:
+		if absi(int((support as Array)[0]) - origin.x) > MAX_TARGET_DISTANCE_TILES or int((support as Array)[1]) < origin.y:
 			only_pocket_waypoints = false
 			break
 	if not only_pocket_waypoints and not _player_above_origin(observation, self_state):
