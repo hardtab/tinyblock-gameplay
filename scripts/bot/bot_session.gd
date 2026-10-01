@@ -578,12 +578,12 @@ func _connect_join_response(response: Dictionary, record: Dictionary) -> bool:
 	if network_client == null or not network_client.has_method("connect_with_ticket"):
 		_emit_left("network_unavailable")
 		return false
-	if network_client.has_method("set_session_max_players"):
-		network_client.call("set_session_max_players", int(metadata.get("max_players", 4)))
-	if network_client.has_method("set_dedicated_server_session"):
-		network_client.call("set_dedicated_server_session", dedicated_server)
-	if network_client.has_method("set_session_classification") and metadata.has("classification"):
-		network_client.call("set_session_classification", str(metadata.get("classification", "")))
+	# The adapter survives guest sessions. Retire its previous transport before
+	# installing metadata; its synchronous client_closed is not a join failure.
+	_disconnect_requested = true
+	if network_client.has_method("disconnect_from_session"):
+		network_client.call("disconnect_from_session")
+	_disconnect_requested = false
 	# Mirror the host player's achievement scoping: managed community sessions
 	# keep progression out of the shared account, official/dedicated sessions
 	# keep it. Unknown dedicated metadata is treated as community.
@@ -599,6 +599,13 @@ func _connect_join_response(response: Dictionary, record: Dictionary) -> bool:
 	if int(error) != OK:
 		_emit_left("connect_error_%d" % int(error))
 		return false
+	# connect_with_ticket resets session metadata internally.
+	if network_client.has_method("set_session_max_players"):
+		network_client.call("set_session_max_players", int(metadata.get("max_players", 4)))
+	if network_client.has_method("set_dedicated_server_session"):
+		network_client.call("set_dedicated_server_session", dedicated_server)
+	if network_client.has_method("set_session_classification") and metadata.has("classification"):
+		network_client.call("set_session_classification", str(metadata.get("classification", "")))
 	return true
 
 
@@ -7743,6 +7750,9 @@ func _emit_left(reason: String) -> void:
 		return
 	_left_emitted = true
 	_set_state(STATE_LEAVING)
+	_disconnect_requested = true
+	if network_client != null and network_client.has_method("disconnect_from_session"):
+		network_client.call("disconnect_from_session")
 	_clear_achievements_community_lock()
 	structured_log.emit({"event": "session_left", "session_id": session_id, "reason": reason, "at_msec": Time.get_ticks_msec()})
 	session_left.emit(reason)
