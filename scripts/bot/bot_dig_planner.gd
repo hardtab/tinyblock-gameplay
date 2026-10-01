@@ -197,6 +197,23 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 		var approach_floor := _restore_upward_approach_floor(origin, best, terrain, observation)
 		if not approach_floor.is_empty():
 			return approach_floor
+	# A raised solid can itself be the landing even when its column has no
+	# same-level floor. Prepare observed headroom instead of requiring an
+	# already-clear landing before ever considering this escape. Keep the
+	# landing intact; physics navigation must verify the actual jump afterward.
+	if only_pocket_waypoints and best == _invalid_tile():
+		for direction in [-1, 1]:
+			var landing := Vector2i(origin.x + direction, origin.y - 1)
+			if not _solid(terrain, landing.x, landing.y) or _solid(terrain, landing.x, origin.y) or _near_harmful_fluid(landing, observation):
+				continue
+			if (not _solid(terrain, landing.x, landing.y - 1) and not _known_empty_cell(observation, terrain, landing.x, landing.y - 1)) or (not _solid(terrain, landing.x, landing.y - 2) and not _known_empty_cell(observation, terrain, landing.x, landing.y - 2)):
+				continue
+			for roof_y in [landing.y - 1, landing.y - 2]:
+				if not _solid(terrain, landing.x, roof_y):
+					continue
+				var clear := _mine_step(landing.x, roof_y, origin, landing, observation)
+				if not clear.is_empty():
+					return clear
 	# A one-high wall can seal the only same-level floor corridor while a higher
 	# landing is still out of reach. Clear its *body* cell only when its own
 	# support remains intact and known. This opens a reversible walk route in the
