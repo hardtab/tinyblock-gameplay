@@ -199,6 +199,17 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 		var approach_floor := _restore_upward_approach_floor(origin, best, terrain, observation)
 		if not approach_floor.is_empty():
 			return approach_floor
+		# Sometimes the forward landing caps the approach column. A step on the
+		# existing floor behind the bot can still put that same landing within the
+		# normal two-column, one-row jump range. Prefer this attached stair over
+		# removing the destination platform or pacing on a newly repaired floor.
+		for direction in [-1, 1]:
+			var stair := Vector2i(origin.x + direction, origin.y - 1)
+			if absi(best.x - stair.x) > 2 or stair.y - best.y not in [0, 1] or _near_harmful_fluid(stair, observation):
+				continue
+			var stair_step := _place_step(stair.x, stair.y, origin, best, observation, terrain)
+			if not stair_step.is_empty():
+				return stair_step
 		# The nearest upper platform can cap its own approach. Consider the other
 		# observed upper platforms before idling; a clear attached step on the
 		# opposite side may be the safe start of a route out of this pocket.
@@ -509,6 +520,12 @@ static func _grounded_support_tile(raw_self: Variant, terrain: Dictionary) -> Ve
 	var foot_left := floori((left + 3.0) / float(TILE))
 	var foot_right := floori((left + width - 3.001) / float(TILE))
 	for x in range(foot_left, foot_right + 1):
+		if _solid(terrain, x, center.y):
+			return Vector2i(x, center.y)
+	# Swept body collision can ground the avatar on a 1-2px ledge even when the
+	# narrower find_ground_support probe misses it. Match the movement planner's
+	# grounded-only fallback; do not infer support for an airborne body.
+	for x in range(floori(left / float(TILE)), floori((left + width - 0.001) / float(TILE)) + 1):
 		if _solid(terrain, x, center.y):
 			return Vector2i(x, center.y)
 	return center
