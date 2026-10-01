@@ -7331,8 +7331,13 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 		# unexecutable from the current pose). Do not hammer the same return step
 		# every decision tick; allow terrain/position updates and other safe work.
 		_blocked_action_targets[target_id] = Time.get_ticks_msec() + DESCENT_RETURN_ROUTE_RETRY_MSEC
-	if target_id.begins_with("pit-return:") and reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "unsafe_drop_route", "route_unreachable", "lava_guard", "timeout"]:
+	if (target_id.begins_with("pit-return:") or target_id.begins_with("pit-stair:")) and reason in ["blocked_obstacle", "edge_guard", "unsafe_jump_route", "unsafe_drop_route", "route_unreachable", "lava_guard", "timeout"]:
+		# A placed stair can be visible yet unreachable from the authoritative
+		# pose. Let the dig planner try another escape step instead of hammering
+		# the same collision on every decision tick.
 		_blocked_action_targets[target_id] = Time.get_ticks_msec() + ACTION_RETRY_BLOCK_MSEC
+		if target_id.begins_with("pit-stair:"):
+			_log_blocked_pit_stair(decision, reason)
 	if (
 		str(decision.get("action", "")) in [Contract.ACTION_MOVE_TO, Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW]
 		and reason in [
@@ -7355,6 +7360,25 @@ func _on_executor_action_finished(decision: Dictionary, reason: String) -> void:
 		_stone_age_note_failure(decision, reason, Time.get_ticks_msec())
 		_achievement_goal_note_failure(decision, reason, Time.get_ticks_msec())
 	_record_action_history("finished", decision, reason)
+
+
+func _log_blocked_pit_stair(decision: Dictionary, reason: String) -> void:
+	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
+	var origin := _support_tile_for_position(Contract.target_position(self_state))
+	var target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+	var support: Array = target.get("support_tile", []) if target.get("support_tile", []) is Array else []
+	var nearby: Array = []
+	for y in range(origin.y - 4, origin.y + 1):
+		for x in range(origin.x - 2, origin.x + 3):
+			var key := "%d:%d" % [x, y]
+			if _terrain_tiles.has(key):
+				nearby.append({"x": x, "y": y, "block": str(_terrain_tiles[key])})
+	structured_log.emit({
+		"event": "pit_stair_blocked", "reason": reason, "target_id": str(decision.get("target_id", "")),
+		"pose": {"x": float(self_state.get("x", 0.0)), "y": float(self_state.get("y", 0.0)), "on_ground": bool(self_state.get("on_ground", false))},
+		"origin_support": [origin.x, origin.y], "target_support": support,
+		"nearby_solids": nearby, "at_msec": Time.get_ticks_msec(),
+	})
 
 
 func _log_movement_stall_probe(decision: Dictionary, reason: String) -> void:
