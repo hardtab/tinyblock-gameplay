@@ -580,6 +580,13 @@ func decide(observation: Dictionary) -> Dictionary:
 	var follow_route_recovery := _follow_route_recovery_action(observation, legal)
 	if not follow_route_recovery.is_empty():
 		return follow_route_recovery
+	# Ordinary water is not lethal, but it can leave the ground-route planner
+	# without a valid origin and strand a bot on WAIT/LOOK forever. BotSession
+	# publishes this only after proving the live pose-to-shore jump arc; combat
+	# and survival branches above retain priority, including pinned duel targets.
+	var water_shore: Dictionary = observation.get("water_shore_recovery", {}) if observation.get("water_shore_recovery", {}) is Dictionary else {}
+	if bool(water_shore.get("verified_safe_landing", false)) and Contract.ACTION_MOVE_TO in legal:
+		return _decision(Contract.GOAL_EXPLORE, Contract.ACTION_MOVE_TO, water_shore, 2200, 0.92)
 	# Recover a grounded avatar stranded below nearby supported terrain before
 	# island home/bridge projects can extend the *bottom* of its pit. Combat and
 	# urgent survival above still take precedence; PvP uses target-pinned routes.

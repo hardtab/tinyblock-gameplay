@@ -963,19 +963,48 @@ func _fluid_shore_recovery_step(
 	destination: Vector2,
 	delta: float,
 ) -> Dictionary:
+	var shore := _fluid_shore_waypoint(self_state, origin, destination)
+	if shore.is_empty():
+		return {}
+	var landing_position: Vector2 = shore.get("position", destination)
+	var origin_tile := _route_origin_support_tile(origin, self_state)
+	var landing_tile: Vector2i = shore.get("support_tile", origin_tile)
+	_active_air_transition = {"from": origin_tile, "to": landing_tile, "fluid_shore_recovery": true}
+	_jump_active = false
+	_jump_predicted_landed = false
+	_jump_started_msec = -1
+	_climb_active = false
+	_set_desired_input(signf(landing_position.x - origin.x) < 0.0, signf(landing_position.x - origin.x) > 0.0, true)
+	return _jump_step(self_state, landing_position, delta)
+
+
+## Pick a nearby dry support from the actual current water pose. This planner is
+## read-only so observation can expose its verified landing before the rule
+## provider chooses an action; the movement executor still owns all controls and
+## host-confirmed landing reconciliation.
+func _fluid_shore_waypoint(
+	self_state: Dictionary,
+	origin: Vector2,
+	destination: Vector2,
+) -> Dictionary:
 	if (
 		_terrain_tiles.is_empty()
 		or _jump_active
 		or _climb_active
+		or not _active_air_transition.is_empty()
 		or _local_touches_harmful_fluid(self_state)
 	):
 		return {}
 	var width := maxf(1.0, float(self_state.get("w", 20.0)))
 	var height := maxf(1.0, float(self_state.get("h", 28.0)))
 	var fluid := _local_fluid_physics(origin.x, origin.y, width, height)
+	var center_x := floori((origin.x + width * 0.5) / float(BlockDefs.TILE))
+	var center_y := floori((origin.y + height * 0.5) / float(BlockDefs.TILE))
+	if fluid.is_empty() or _terrain_name_at(center_x, center_y).to_lower().trim_prefix("core.") != "water":
+		return {}
 	# The host only accepts a jump from fluid after vertical speed reaches the
 	# falling side of the arc. Let gravity finish an existing upward swim first.
-	if fluid.is_empty() or float(self_state.get("vy", 0.0)) < -0.05:
+	if float(self_state.get("vy", 0.0)) < -0.05:
 		return {}
 	var origin_tile := _route_origin_support_tile(origin, self_state)
 	if not _should_settle_airborne(self_state, origin) and _terrain_standable_tile(origin_tile):
@@ -1016,15 +1045,7 @@ func _fluid_shore_recovery_step(
 	var best := best_progress if not best_progress.is_empty() else nearest_safe_shore
 	if best.is_empty():
 		return {}
-	var landing_position: Vector2 = best.get("position", destination)
-	var landing_tile: Vector2i = best.get("support_tile", origin_tile)
-	_active_air_transition = {"from": origin_tile, "to": landing_tile, "fluid_shore_recovery": true}
-	_jump_active = false
-	_jump_predicted_landed = false
-	_jump_started_msec = -1
-	_climb_active = false
-	_set_desired_input(signf(landing_position.x - origin.x) < 0.0, signf(landing_position.x - origin.x) > 0.0, true)
-	return _jump_step(self_state, landing_position, delta)
+	return best
 
 
 func _default_movement_step(action: String, decision: Dictionary, observation: Dictionary, delta: float) -> Dictionary:
@@ -3691,8 +3712,9 @@ func _jump_route_has_safe_landing(
 	var ignore_trees := _local_ignores_trees(self_state)
 	for _frame in range(90):
 		fluid = _local_fluid_physics(x, y, width, height)
-		if fluid_shore_arc and not fluid.is_empty() and vy >= -0.05:
-			# The host keeps jump held during a water escape. Since water permits
+		if not fluid.is_empty() and vy >= -0.05:
+			# The movement controller keeps jump held on every jump route, not
+			# only explicit shore recovery. Since water permits
 			# another jump once the avatar is falling, mirror those swim strokes in
 			# the bounded predictor instead of validating only the first bob.
 			vy = BlockDefs.JUMP * float(fluid.get("jump_multiplier", 1.0)) * jump_multiplier
@@ -3748,7 +3770,11 @@ func _jump_route_has_safe_landing(
 				y = float(vertical_hit.get("by", y)) - height
 				if _position_touches_harmful_fluid(x, y, width, height) and (not allow_starting_hazard_escape or cleared_starting_hazard):
 					return false
-				if _support_tile_for_position(Vector2(x, y)) != landing_support:
+				# Edge landings are supported by the same inset foot probes as
+				# WorldSim, even before the avatar's center crosses onto the ledge.
+				# A center-only lookup falsely rejects low-ceiling step-up escapes.
+				var landed_support := _local_ground_support(x, y, width, height, ignore_trees)
+				if landed_support.is_empty() or Vector2i(int(landed_support.get("tx", 0)), int(landed_support.get("ty", 0))) != landing_support:
 					return false
 				return not fluid_shore_arc or not _position_touches_any_fluid(x, y, width, height)
 			var touches_hazard := _position_touches_harmful_fluid(x, y, width, height)
@@ -6008,6 +6034,27 @@ func _build_observation(now_msec: int) -> Dictionary:
 	var observation := Perception.build(snapshot, own_player_id, perception_radius, now_msec)
 	# Perception.build whitelists keys, so attach transaction state to the final
 	# policy observation rather than only to the intermediate snapshot.
+	var self_for_shore: Dictionary = snapshot.get("self", {}) if snapshot.get("self", {}) is Dictionary else {}
+	if not _jump_active and not _climb_active and _active_air_transition.is_empty() and not self_for_shore.is_empty():
+		var shore_origin := Contract.target_position(self_for_shore)
+		var shore_width := maxf(1.0, float(self_for_shore.get("w", 20.0)))
+		var shore_height := maxf(1.0, float(self_for_shore.get("h", 28.0)))
+		var current_fluid := _local_fluid_physics(shore_origin.x, shore_origin.y, shore_width, shore_height)
+		if not current_fluid.is_empty() and not _local_touches_harmful_fluid(self_for_shore):
+			# Expose only a live, collision-simulated landing. Compute from this
+			# exact pose/terrain/equipment snapshot rather than caching stale shore
+			# geometry across water currents or host corrections.
+			var shore := _fluid_shore_waypoint(self_for_shore, shore_origin, shore_origin)
+			if not shore.is_empty():
+				var shore_position: Vector2 = shore.get("position", shore_origin)
+				var shore_tile: Vector2i = shore.get("support_tile", Vector2i.ZERO)
+				observation["water_shore_recovery"] = {
+					"id": "water_shore:%d:%d" % [shore_tile.x, shore_tile.y],
+					"position": [shore_position.x, shore_position.y],
+					"support_tile": [shore_tile.x, shore_tile.y],
+					"source_position": [shore_origin.x, shore_origin.y],
+					"verified_safe_landing": true,
+				}
 	observation["host_confirmed_inventory_summary"] = _stone_age_authoritative_inventory.duplicate(true)
 	var placement_pending := false
 	for raw_pending in _pending_action_targets.values():
