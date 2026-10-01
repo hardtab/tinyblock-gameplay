@@ -201,7 +201,7 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	# same-level floor. Prepare observed headroom instead of requiring an
 	# already-clear landing before ever considering this escape. Keep the
 	# landing intact; physics navigation must verify the actual jump afterward.
-	if only_pocket_waypoints and best == _invalid_tile():
+	if only_pocket_waypoints:
 		for direction in [-1, 1]:
 			var landing := Vector2i(origin.x + direction, origin.y - 1)
 			if not _solid(terrain, landing.x, landing.y) or _solid(terrain, landing.x, origin.y) or _near_harmful_fluid(landing, observation):
