@@ -110,17 +110,18 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	if not upward_move.is_empty():
 		return upward_move
 	# A newly placed route stair can precede the next waypoint snapshot. Follow
-	# that verified, adjacent support instead of treating its occupied cell as a
-	# fresh wall or waiting indefinitely for exploration to discover it.
+	# that adjacent support (or a natural raised landing in a route-less pocket)
+	# instead of treating its occupied cell as a fresh wall. Execution still
+	# verifies the jump using ordinary physics before applying movement input.
 	for direction in [-1, 1]:
 		var step := Vector2i(origin.x + direction, origin.y - 1)
 		if (
 			not (_is_route_stair_cell(observation, step.x, step.y) or (waypoints.is_empty() and not _solid(terrain, step.x, origin.y)))
 			or not _solid(terrain, step.x, step.y)
-			or not _known_empty_cell(observation, terrain, step.x, step.y - 1)
-			or not _known_empty_cell(observation, terrain, step.x, step.y - 2)
+			or not _known_passable_headroom(observation, terrain, step.x, step.y - 1)
+			or not _known_passable_headroom(observation, terrain, step.x, step.y - 2)
 			or _near_harmful_fluid(step, observation)
-			or _overlaps_any_player(step, observation)
+			or _overlaps_other_players(step, observation)
 		):
 			continue
 		var move_id := "pit-stair:%d:%d" % [step.x, step.y]
@@ -206,7 +207,7 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 			var landing := Vector2i(origin.x + direction, origin.y - 1)
 			if not _solid(terrain, landing.x, landing.y) or _solid(terrain, landing.x, origin.y) or _near_harmful_fluid(landing, observation):
 				continue
-			if (not _solid(terrain, landing.x, landing.y - 1) and not _known_empty_cell(observation, terrain, landing.x, landing.y - 1)) or (not _solid(terrain, landing.x, landing.y - 2) and not _known_empty_cell(observation, terrain, landing.x, landing.y - 2)):
+			if (not _solid(terrain, landing.x, landing.y - 1) and not _known_passable_headroom(observation, terrain, landing.x, landing.y - 1)) or (not _solid(terrain, landing.x, landing.y - 2) and not _known_passable_headroom(observation, terrain, landing.x, landing.y - 2)):
 				continue
 			for roof_y in [landing.y - 1, landing.y - 2]:
 				if not _solid(terrain, landing.x, roof_y):
@@ -748,9 +749,19 @@ static func _known_empty_cell(observation: Dictionary, terrain: Dictionary, x: i
 	return block_name.is_empty() or block_name in ["air", "core.air"]
 
 
+static func _known_passable_headroom(observation: Dictionary, terrain: Dictionary, x: int, y: int) -> bool:
+	# Water has no solid collision. Keep strict emptiness for placement, but
+	# don't treat melted ice as an impassable roof above an existing landing.
+	return _known_empty_cell(observation, terrain, x, y) or str(terrain.get("%d:%d" % [x, y], "")).to_lower().trim_prefix("core.") == "water"
+
+
 static func _overlaps_any_player(tile: Vector2i, observation: Dictionary) -> bool:
 	if _overlaps_player(tile, observation.get("self", {})):
 		return true
+	return _overlaps_other_players(tile, observation)
+
+
+static func _overlaps_other_players(tile: Vector2i, observation: Dictionary) -> bool:
 	var players: Array = observation.get("players", []) if observation.get("players", []) is Array else []
 	for raw_player in players:
 		if raw_player is Dictionary and _overlaps_player(tile, raw_player):
