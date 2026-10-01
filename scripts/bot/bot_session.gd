@@ -6178,7 +6178,7 @@ func _active_blocked_action_targets(now_msec: int) -> Dictionary:
 	var targets: Dictionary = {}
 	for raw_key in _blocked_action_targets.keys():
 		var key := str(raw_key)
-		if not key.begins_with("tile:") and not key.begins_with("station:") and not key.begins_with("container:") and not key.begins_with("descent-return:"):
+		if not key.begins_with("tile:") and not key.begins_with("station:") and not key.begins_with("container:") and not key.begins_with("descent-return:") and not key.begins_with("pit-return:") and not key.begins_with("pit-stair:"):
 			continue
 		var blocked_until := int(_blocked_action_targets[raw_key])
 		if blocked_until <= now_msec:

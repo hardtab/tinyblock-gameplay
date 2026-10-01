@@ -126,6 +126,16 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 		var move_id := "pit-stair:%d:%d" % [step.x, step.y]
 		var blocked: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
 		if int(blocked.get(move_id, 0)) > int(observation.get("observed_at_msec", 0)):
+			# A host-blocked jump onto this stair is often capped by a low roof
+			# over the starting cell. Clear that roof while preserving every
+			# floor/support cell, then reconsider the stair on the next snapshot.
+			var roof := Vector2i(origin.x, origin.y - 3)
+			if _solid(terrain, roof.x, roof.y) and not _near_harmful_fluid(roof, observation):
+				var roof_observation := observation.duplicate(false)
+				roof_observation["allow_escape_clear_protected"] = true
+				var roof_clear := _mine_step(roof.x, roof.y, origin, step, roof_observation)
+				if not roof_clear.is_empty():
+					return roof_clear
 			continue
 		var destination := [float(step.x * TILE + 6), float(step.y * TILE - 28)]
 		return {
@@ -530,12 +540,13 @@ static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, obser
 		# Never excavate a cell the session deliberately constructed.  Without this
 		# guard a placed step (for example a workbench) reads back as a solid
 		# blocker and the planner places then mines the same tile forever.
-		# After repeated failed movement, one adjacent non-station wall block may
-		# be removed to escape a pocket the bot built around itself. Never clear a
-		# floor/support or a workbench/furnace; the descent guard below still applies.
+		# After repeated failed movement, one adjacent non-station wall or
+		# overhead roof may be removed to escape a pocket the bot built around
+		# itself. Never clear a floor/support or a workbench/furnace.
 		var upper_wall_clear: bool = bool(observation.get("allow_escape_clear_protected", false)) and abs(x - origin.x) == 1 and y in [origin.y - 1, origin.y - 2] and not _is_route_stair_cell(observation, x, y)
+		var overhead_clear: bool = bool(observation.get("allow_escape_clear_protected", false)) and x == origin.x and y == origin.y - 3
 		var adjacent_descent_clear: bool = bool(observation.get("allow_isolated_platform_descent", false)) and abs(x - origin.x) == 1 and y == origin.y and _solid(_terrain_map(observation.get("terrain_tiles", [])), x, y + 1)
-		if not (upper_wall_clear or adjacent_descent_clear) or str(_terrain_tile(observation, x, y).get("block_name", "")) not in SUPPORT_BLOCK_NAMES:
+		if not (upper_wall_clear or overhead_clear or adjacent_descent_clear) or str(_terrain_tile(observation, x, y).get("block_name", "")) not in SUPPORT_BLOCK_NAMES:
 			return {}
 	if _is_descent_return_support(observation, x, y):
 		# The generic obstacle planner must honor the same return-route invariant
