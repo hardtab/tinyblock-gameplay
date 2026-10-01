@@ -79,6 +79,7 @@ static func physics_route(
 	transition_allowed: Callable = Callable(),
 	first_step_allowed: Callable = Callable(),
 	later_step_allowed: Callable = Callable(),
+	allow_verified_high_jumps: bool = false,
 ) -> Array[Dictionary]:
 	var empty: Array[Dictionary] = []
 	if not passable.is_valid() or max_nodes <= 0 or not bool(passable.call(origin)):
@@ -88,11 +89,12 @@ static func physics_route(
 	var queue: Array[Vector2i] = [origin]
 	var previous: Dictionary = {origin: null}
 	var edge_kind: Dictionary = {}
+	var include_verified_high_jumps := allow_verified_high_jumps and first_step_allowed.is_valid() and later_step_allowed.is_valid()
 	var head := 0
 	while head < queue.size() and queue.size() <= max_nodes:
 		var current := queue[head]
 		head += 1
-		for candidate in _physics_candidates(current, climbable, transition_allowed.is_valid()):
+		for candidate in _physics_candidates(current, climbable, transition_allowed.is_valid(), include_verified_high_jumps):
 			var next: Vector2i = candidate["tile"]
 			if previous.has(next) or not bool(passable.call(next)):
 				continue
@@ -113,13 +115,23 @@ static func physics_route(
 ## Enumerates the exact support-tile transitions physics_route expands from
 ## `current`.  Keeping this in one place lets physics_reachable_tiles prove the
 ## same route existence without re-deriving (and drifting from) the edge rules.
-static func _physics_candidates(current: Vector2i, climbable: Callable, allow_verified_drops: bool = false) -> Array[Dictionary]:
+static func _physics_candidates(
+	current: Vector2i,
+	climbable: Callable,
+	allow_verified_drops: bool = false,
+	allow_verified_high_jumps: bool = false,
+) -> Array[Dictionary]:
 	var candidates: Array[Dictionary] = []
 	for direction in [Vector2i.RIGHT, Vector2i.LEFT]:
 		candidates.append({"tile": current + direction, "kind": "walk"})
 		# A one-block step and a two-block gap are both reachable by the
 		# controller's jump arc. The actual collision solver remains final.
 		candidates.append({"tile": current + direction + Vector2i.UP, "kind": "jump"})
+		# A two-row step is only considered when the caller opts in and supplies
+		# both first-edge and later-edge collision validators. The validators still
+		# prove each concrete arc before the graph accepts the transition.
+		if allow_verified_high_jumps:
+			candidates.append({"tile": current + direction + Vector2i.UP * 2, "kind": "jump"})
 		candidates.append({"tile": current + direction * 2, "kind": "jump"})
 		candidates.append({"tile": current + direction * 2 + Vector2i.UP, "kind": "jump"})
 		var max_drop_tiles := MAX_VERIFIED_DROP_TILES if allow_verified_drops else 1
@@ -145,17 +157,19 @@ static func physics_reachable_tiles(
 	transition_allowed: Callable = Callable(),
 	first_step_allowed: Callable = Callable(),
 	later_step_allowed: Callable = Callable(),
+	allow_verified_high_jumps: bool = false,
 ) -> Dictionary:
 	var reachable: Dictionary = {}
 	if not passable.is_valid() or max_nodes <= 0 or not bool(passable.call(origin)):
 		return reachable
 	reachable[origin] = true
 	var queue: Array[Vector2i] = [origin]
+	var include_verified_high_jumps := allow_verified_high_jumps and first_step_allowed.is_valid() and later_step_allowed.is_valid()
 	var head := 0
 	while head < queue.size() and queue.size() <= max_nodes:
 		var current := queue[head]
 		head += 1
-		for candidate in _physics_candidates(current, climbable, transition_allowed.is_valid()):
+		for candidate in _physics_candidates(current, climbable, transition_allowed.is_valid(), include_verified_high_jumps):
 			var next: Vector2i = candidate["tile"]
 			if reachable.has(next) or not bool(passable.call(next)):
 				continue
@@ -183,17 +197,19 @@ static func physics_reachable_first_steps(
 	transition_allowed: Callable = Callable(),
 	first_step_allowed: Callable = Callable(),
 	later_step_allowed: Callable = Callable(),
+	allow_verified_high_jumps: bool = false,
 ) -> Dictionary:
 	var first_steps: Dictionary = {}
 	if not passable.is_valid() or max_nodes <= 0 or not bool(passable.call(origin)):
 		return first_steps
 	first_steps[origin] = {"tile": origin, "kind": "start", "steps": 0}
 	var queue: Array[Vector2i] = [origin]
+	var include_verified_high_jumps := allow_verified_high_jumps and first_step_allowed.is_valid() and later_step_allowed.is_valid()
 	var head := 0
 	while head < queue.size() and queue.size() <= max_nodes:
 		var current := queue[head]
 		head += 1
-		for candidate in _physics_candidates(current, climbable, transition_allowed.is_valid()):
+		for candidate in _physics_candidates(current, climbable, transition_allowed.is_valid(), include_verified_high_jumps):
 			var next: Vector2i = candidate["tile"]
 			if first_steps.has(next) or not bool(passable.call(next)):
 				continue
@@ -228,17 +244,19 @@ static func physics_roundtrip_first_steps(
 	transition_allowed: Callable = Callable(),
 	first_step_allowed: Callable = Callable(),
 	later_step_allowed: Callable = Callable(),
+	allow_verified_high_jumps: bool = false,
 ) -> Dictionary:
 	var forward := physics_reachable_first_steps(
 		origin, passable, climbable, max_nodes,
-		transition_allowed, first_step_allowed, later_step_allowed,
+		transition_allowed, first_step_allowed, later_step_allowed, allow_verified_high_jumps,
 	)
 	if forward.is_empty():
 		return {}
+	var include_verified_high_jumps := allow_verified_high_jumps and first_step_allowed.is_valid() and later_step_allowed.is_valid()
 	var predecessors: Dictionary = {}
 	for raw_tile in forward.keys():
 		var current: Vector2i = raw_tile
-		for candidate in _physics_candidates(current, climbable, transition_allowed.is_valid()):
+		for candidate in _physics_candidates(current, climbable, transition_allowed.is_valid(), include_verified_high_jumps):
 			var neighbor: Vector2i = candidate["tile"]
 			if not forward.has(neighbor):
 				continue

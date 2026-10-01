@@ -597,10 +597,15 @@ func decide(observation: Dictionary) -> Dictionary:
 	var mode_strategy_goals := AchievementRegistry.strategy_goal_ids(mode)
 	if "one_block_world" in mode_strategy_goals:
 		var one_block_goal := _open_achievement(observation, "one_block_world")
-		if not one_block_goal.is_empty():
-			var one_block_action := _one_block_achievement_action(observation, legal)
-			if not one_block_action.is_empty():
+		# The source is also an ordinary resource after its achievement is complete
+		# or community achievements are locked. Keep the same safety/rotation gates,
+		# but never claim achievement progress in those cases.
+		var one_block_action := _one_block_achievement_action(observation, legal)
+		if not one_block_action.is_empty():
+			if not one_block_goal.is_empty():
 				return _tag_achievement_goal(one_block_action, "one_block_world")
+			one_block_action["goal"] = Contract.GOAL_GATHER
+			return one_block_action
 	# Challenge Run is a directed course, not a general survival sandbox. Once
 	# immediate danger and combat have been handled, forward distance outranks
 	# optional recipes, mining and base-building.

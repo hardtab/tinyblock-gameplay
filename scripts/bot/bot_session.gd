@@ -980,11 +980,13 @@ func _fluid_shore_recovery_step(
 	var origin_tile := _route_origin_support_tile(origin, self_state)
 	if not _should_settle_airborne(self_state, origin) and _terrain_standable_tile(origin_tile):
 		return {}
-	var best: Dictionary = {}
-	var best_score := INF
+	var best_progress: Dictionary = {}
+	var best_progress_score := INF
+	var nearest_safe_shore: Dictionary = {}
+	var nearest_safe_shore_score := INF
 	var origin_distance := origin.distance_to(destination)
-	for dx in [-2, -1, 1, 2]:
-		for dy in [0, -1, -2]:
+	for dx in [-4, -3, -2, -1, 1, 2, 3, 4]:
+		for dy in [0, 1, -1, -2]:
 			var landing_tile := origin_tile + Vector2i(dx, dy)
 			if not _terrain_standable_tile(landing_tile):
 				continue
@@ -994,15 +996,24 @@ func _fluid_shore_recovery_step(
 			if _position_touches_any_fluid(landing.x, landing.y, width, height):
 				continue
 			var remaining_distance := landing.distance_to(destination)
-			if remaining_distance + 8.0 >= origin_distance:
-				continue
-			if not _jump_route_has_safe_landing(self_state, landing, false, 4.0):
+			if not _jump_route_has_safe_landing(self_state, landing, false, 4.0, true):
 				continue
 			var score := remaining_distance + float(absi(dx) + absi(dy)) * float(BlockDefs.TILE) * 0.2
-			if score >= best_score:
-				continue
-			best_score = score
-			best = {"position": landing, "support_tile": landing_tile, "kind": "jump"}
+			var candidate := {"position": landing, "support_tile": landing_tile, "kind": "jump"}
+			if remaining_distance + 8.0 < origin_distance:
+				if score < best_progress_score:
+					best_progress_score = score
+					best_progress = candidate
+			else:
+				# On an island, the only safe shore can be behind an exploration
+				# target. Once it is host-confirmed, ordinary routing replans toward
+				# that target from dry ground. Keep this fallback bounded to a nearby
+				# collision-proven shore; never prefer an unverified swim or drop.
+				var shore_score := origin.distance_to(landing) + float(absi(dy)) * float(BlockDefs.TILE) * 0.2
+				if shore_score < nearest_safe_shore_score:
+					nearest_safe_shore_score = shore_score
+					nearest_safe_shore = candidate
+	var best := best_progress if not best_progress.is_empty() else nearest_safe_shore
 	if best.is_empty():
 		return {}
 	var landing_position: Vector2 = best.get("position", destination)
@@ -1637,6 +1648,7 @@ func _physics_route_step(
 			Callable(self, "_physics_transition_allowed"),
 			first_step_allowed,
 			later_step_allowed,
+			target_tile.y <= origin_tile.y - 2 and first_step_allowed.is_valid() and later_step_allowed.is_valid(),
 		)
 		_physics_route_target = target_tile
 		_physics_route_target_id = target_id
@@ -2631,16 +2643,31 @@ func _resource_stand_candidates(target: Dictionary) -> Array[Vector2i]:
 
 
 func _physics_route_to_support_tile(origin_support: Vector2i, target_support: Vector2i, self_state: Dictionary) -> Array[Dictionary]:
-	return Navigator.physics_route(
+	var first_step_allowed := _safe_jump_first_step_filter(self_state)
+	var later_step_allowed := _safe_jump_later_step_filter(self_state)
+	var route := Navigator.physics_route(
 		origin_support,
 		target_support,
 		Callable(self, "_terrain_standable_tile"),
 		Callable(self, "_terrain_climbable_tile"),
 		Navigator.MAX_PHYSICS_ROUTE_NODES,
 		Callable(self, "_physics_transition_allowed"),
-		_safe_jump_first_step_filter(self_state),
-		_safe_jump_later_step_filter(self_state),
+		first_step_allowed,
+		later_step_allowed,
 	)
+	if route.is_empty() and target_support.y <= origin_support.y - 2 and first_step_allowed.is_valid() and later_step_allowed.is_valid():
+		route = Navigator.physics_route(
+			origin_support,
+			target_support,
+			Callable(self, "_terrain_standable_tile"),
+			Callable(self, "_terrain_climbable_tile"),
+			Navigator.MAX_PHYSICS_ROUTE_NODES,
+			Callable(self, "_physics_transition_allowed"),
+			first_step_allowed,
+			later_step_allowed,
+			true,
+		)
+	return route
 
 
 func _reachable_explicit_stand_position(origin: Vector2, self_state: Dictionary, raw_position: Array) -> Dictionary:
@@ -3620,16 +3647,31 @@ func _jump_route_has_safe_landing(
 	destination: Vector2,
 	allow_starting_hazard_escape: bool = false,
 	landing_x_tolerance: float = 8.0,
+	allow_fluid_shore_recovery: bool = false,
 ) -> bool:
 	var origin := Contract.target_position(self_state)
 	var origin_support := _route_origin_support_tile(origin, self_state)
 	var landing_support := _support_tile_for_position(destination)
 	var horizontal_tiles := absi(landing_support.x - origin_support.x)
-	if horizontal_tiles <= 0 or horizontal_tiles > 2:
+	var fluid_shore_arc := false
+	if allow_fluid_shore_recovery:
+		var width := maxf(1.0, float(self_state.get("w", 20.0)))
+		var height := maxf(1.0, float(self_state.get("h", 28.0)))
+		var center_x := floori((origin.x + width * 0.5) / float(BlockDefs.TILE))
+		var center_y := floori((origin.y + height * 0.5) / float(BlockDefs.TILE))
+		var fluid_name := _terrain_name_at(center_x, center_y).to_lower().trim_prefix("core.")
+		# This widened envelope is reserved for a bot demonstrably swimming in
+		# ordinary water. Every destination still passes the same frame-by-frame
+		# collision arc below, and must end with the full avatar footprint dry.
+		fluid_shore_arc = fluid_name == "water" and not _local_touches_harmful_fluid(self_state)
+		if not fluid_shore_arc or _position_touches_any_fluid(destination.x, destination.y, width, height):
+			return false
+	if horizontal_tiles <= 0 or horizontal_tiles > (4 if fluid_shore_arc else 2):
 		return false
 	# Drops are walked normally. Up to two rows can fit inside the ordinary jump
 	# arc, but every candidate still has to pass the collision simulation below.
-	if landing_support.y < origin_support.y - 2 or landing_support.y > origin_support.y:
+	var lowest_landing_row := origin_support.y + (1 if fluid_shore_arc else 0)
+	if landing_support.y < origin_support.y - 2 or landing_support.y > lowest_landing_row:
 		return false
 	if not _terrain_standable_tile(landing_support):
 		return false
@@ -3649,6 +3691,11 @@ func _jump_route_has_safe_landing(
 	var ignore_trees := _local_ignores_trees(self_state)
 	for _frame in range(90):
 		fluid = _local_fluid_physics(x, y, width, height)
+		if fluid_shore_arc and not fluid.is_empty() and vy >= -0.05:
+			# The host keeps jump held during a water escape. Since water permits
+			# another jump once the avatar is falling, mirror those swim strokes in
+			# the bounded predictor instead of validating only the first bob.
+			vy = BlockDefs.JUMP * float(fluid.get("jump_multiplier", 1.0)) * jump_multiplier
 		var support := _local_ground_support(x, y, width, height, ignore_trees)
 		var surface := _local_surface_physics_for_support(support)
 		var steering := direction if absf(destination.x - x) > landing_x_tolerance else 0.0
@@ -3701,7 +3748,9 @@ func _jump_route_has_safe_landing(
 				y = float(vertical_hit.get("by", y)) - height
 				if _position_touches_harmful_fluid(x, y, width, height) and (not allow_starting_hazard_escape or cleared_starting_hazard):
 					return false
-				return _support_tile_for_position(Vector2(x, y)) == landing_support
+				if _support_tile_for_position(Vector2(x, y)) != landing_support:
+					return false
+				return not fluid_shore_arc or not _position_touches_any_fluid(x, y, width, height)
 			var touches_hazard := _position_touches_harmful_fluid(x, y, width, height)
 			if touches_hazard:
 				if not allow_starting_hazard_escape or cleared_starting_hazard:
@@ -6102,6 +6151,18 @@ func _annotate_active_build_project_route(observation: Dictionary, now_msec: int
 				first_step_allowed,
 				later_step_allowed,
 			)
+			if route.is_empty() and target_tile.y <= origin_tile.y - 2 and first_step_allowed.is_valid() and later_step_allowed.is_valid():
+				route = Navigator.physics_route(
+					origin_tile,
+					target_tile,
+					Callable(self, "_terrain_standable_tile"),
+					Callable(self, "_terrain_climbable_tile"),
+					Navigator.MAX_PHYSICS_ROUTE_NODES,
+					Callable(self, "_physics_transition_allowed"),
+					first_step_allowed,
+					later_step_allowed,
+					true,
+				)
 			_build_project_route_reachable = not route.is_empty() and Vector2i((route.back() as Dictionary).get("tile", origin_tile)) == target_tile
 			_build_project_route_cache_key = cache_key
 			_build_project_route_checked_msec = now
@@ -6149,6 +6210,18 @@ func _reachable_world_underfoot_waypoints(snapshot: Dictionary) -> Array[Diction
 			first_step_allowed,
 			later_step_allowed,
 		)
+		if route.is_empty() and target_tile.y <= origin_tile.y - 2 and first_step_allowed.is_valid() and later_step_allowed.is_valid():
+			route = Navigator.physics_route(
+				origin_tile,
+				target_tile,
+				Callable(self, "_terrain_standable_tile"),
+				Callable(self, "_terrain_climbable_tile"),
+				Navigator.MAX_PHYSICS_ROUTE_NODES,
+				Callable(self, "_physics_transition_allowed"),
+				first_step_allowed,
+				later_step_allowed,
+				true,
+			)
 		if route.is_empty() or Vector2i((route.back() as Dictionary).get("tile", origin_tile)) != target_tile:
 			continue
 		var target_position := _world_position_for_support_tile(target_tile)
@@ -6195,8 +6268,27 @@ func _safe_exploration_waypoints(self_state: Dictionary) -> Array[Dictionary]:
 		first_step_allowed,
 		later_step_allowed,
 	)
-	var result: Array[Dictionary] = []
 	var max_horizontal_tiles := ceili(STARTER_TOOLING_RESOURCE_SCAN_RADIUS / float(BlockDefs.TILE))
+	var has_useful_destination := false
+	for raw_tile in reachable.keys():
+		if typeof(raw_tile) != TYPE_VECTOR2I:
+			continue
+		var tile: Vector2i = raw_tile
+		if tile != origin_tile and abs(tile.x - origin_tile.x) <= max_horizontal_tiles:
+			has_useful_destination = true
+			break
+	if not has_useful_destination and first_step_allowed.is_valid() and later_step_allowed.is_valid():
+		reachable = Navigator.physics_roundtrip_first_steps(
+			origin_tile,
+			Callable(self, "_terrain_standable_tile"),
+			Callable(self, "_terrain_climbable_tile"),
+			Navigator.MAX_PHYSICS_ROUTE_NODES,
+			Callable(self, "_physics_transition_allowed"),
+			first_step_allowed,
+			later_step_allowed,
+			true,
+		)
+	var result: Array[Dictionary] = []
 	for raw_tile in reachable:
 		if typeof(raw_tile) != TYPE_VECTOR2I:
 			continue
@@ -6330,13 +6422,40 @@ func _filter_blocked_resources(raw_resources: Variant, now_msec: int) -> Array:
 			needs_approach_proof = true
 			break
 	var reachable_support_tiles: Dictionary = {}
+	var resource_origin_tile := Vector2i(2147483647, 2147483647)
+	var resource_first_step_allowed := Callable()
 	if needs_approach_proof and not _terrain_tiles.is_empty():
 		var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 		var origin := Contract.target_position(self_state)
-		var first_step_allowed := _safe_jump_first_step_filter(self_state)
-		for raw_tile in _physics_reachable_support_tiles(_route_origin_support_tile(origin, self_state), first_step_allowed):
+		resource_origin_tile = _route_origin_support_tile(origin, self_state)
+		resource_first_step_allowed = _safe_jump_first_step_filter(self_state)
+		for raw_tile in _physics_reachable_support_tiles(resource_origin_tile, resource_first_step_allowed):
 			if typeof(raw_tile) == TYPE_VECTOR2I:
 				reachable_support_tiles[raw_tile] = true
+		var has_useful_resource_approach := false
+		for raw_resource in resources:
+			if not raw_resource is Dictionary or bool((raw_resource as Dictionary).get("reachable", false)):
+				continue
+			var candidate_resource := raw_resource as Dictionary
+			if int(_blocked_action_targets.get(str(candidate_resource.get("id", "")), 0)) > now_msec:
+				continue
+			if not _resource_approach_stand_position(candidate_resource, reachable_support_tiles).is_empty():
+				has_useful_resource_approach = true
+				break
+		if not has_useful_resource_approach and resource_first_step_allowed.is_valid():
+			var expanded_support_tiles: Dictionary = {}
+			for raw_tile in _physics_reachable_support_tiles(resource_origin_tile, resource_first_step_allowed, true):
+				if typeof(raw_tile) == TYPE_VECTOR2I:
+					expanded_support_tiles[raw_tile] = true
+			for raw_resource in resources:
+				if not raw_resource is Dictionary or bool((raw_resource as Dictionary).get("reachable", false)):
+					continue
+				var candidate_resource := raw_resource as Dictionary
+				if int(_blocked_action_targets.get(str(candidate_resource.get("id", "")), 0)) > now_msec:
+					continue
+				if _resource_approach_stand_position(candidate_resource, reachable_support_tiles).is_empty() and not _resource_approach_stand_position(candidate_resource, expanded_support_tiles).is_empty():
+					reachable_support_tiles = expanded_support_tiles
+					break
 	for raw_resource in resources:
 		if not raw_resource is Dictionary:
 			continue
@@ -6394,7 +6513,11 @@ func _active_blocked_action_targets(now_msec: int) -> Dictionary:
 	return targets
 
 
-func _physics_reachable_support_tiles(origin_tile: Vector2i, first_step_allowed: Callable = Callable()) -> Dictionary:
+func _physics_reachable_support_tiles(
+	origin_tile: Vector2i,
+	first_step_allowed: Callable = Callable(),
+	allow_verified_high_jumps: bool = false,
+) -> Dictionary:
 	# A resource approach must also have a route back. A survivable long drop
 	# onto a lower island is not a safe gathering trip when the bot cannot jump
 	# back to its origin; treating forward reachability as sufficient sent it
@@ -6403,6 +6526,7 @@ func _physics_reachable_support_tiles(origin_tile: Vector2i, first_step_allowed:
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	if not first_step_allowed.is_valid():
 		first_step_allowed = _safe_jump_first_step_filter(self_state)
+	var later_step_allowed := _safe_jump_later_step_filter(self_state)
 	return Navigator.physics_roundtrip_first_steps(
 		origin_tile,
 		Callable(self, "_terrain_standable_tile"),
@@ -6410,7 +6534,8 @@ func _physics_reachable_support_tiles(origin_tile: Vector2i, first_step_allowed:
 		Navigator.MAX_PHYSICS_ROUTE_NODES,
 		Callable(self, "_physics_transition_allowed"),
 		first_step_allowed,
-		_safe_jump_later_step_filter(self_state),
+		later_step_allowed,
+		allow_verified_high_jumps and first_step_allowed.is_valid() and later_step_allowed.is_valid(),
 	)
 
 
@@ -7058,7 +7183,7 @@ func _on_decision_proposed(decision: Dictionary) -> void:
 
 func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 	var mode := str(_decision_probe_observation.get("world_mode", ""))
-	if mode not in ["skyblock", "floating_islands", "procedural"] or str(decision.get("action", "")) not in [Contract.ACTION_WAIT, Contract.ACTION_LOOK_AT]:
+	if mode not in ["one_block", "skyblock", "floating_islands", "procedural"] or str(decision.get("action", "")) not in [Contract.ACTION_WAIT, Contract.ACTION_LOOK_AT]:
 		return
 	if _last_island_idle_probe_msec >= 0 and now_msec - _last_island_idle_probe_msec < 15_000:
 		return
@@ -7153,6 +7278,8 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 		"event": "procedural_idle_probe" if mode == "procedural" else "island_idle_probe",
 		"at_msec": now_msec,
 		"world_mode": mode,
+		"regenerating_block": observation.get("regenerating_block", {}).duplicate(true),
+		"visible_containers": observation.get("visible_containers", []).duplicate(true),
 		"on_ground": bool((observation.get("self", {}) as Dictionary).get("on_ground", false)),
 		"self_pose": {
 			"x": self_position.x,
