@@ -130,13 +130,14 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 			# A host-blocked jump onto this stair is often capped by a low roof
 			# over the starting cell. Clear that roof while preserving every
 			# floor/support cell, then reconsider the stair on the next snapshot.
-			var roof := Vector2i(origin.x, origin.y - 3)
-			if _solid(terrain, roof.x, roof.y) and not _near_harmful_fluid(roof, observation):
-				var roof_observation := observation.duplicate(false)
-				roof_observation["allow_escape_clear_protected"] = true
-				var roof_clear := _mine_step(roof.x, roof.y, origin, step, roof_observation)
-				if not roof_clear.is_empty():
-					return roof_clear
+			for roof_y in [origin.y - 2, origin.y - 3]:
+				var roof := Vector2i(origin.x, roof_y)
+				if _solid(terrain, roof.x, roof.y) and not _near_harmful_fluid(roof, observation):
+					var roof_observation := observation.duplicate(false)
+					roof_observation["allow_escape_clear_protected"] = true
+					var roof_clear := _mine_step(roof.x, roof.y, origin, step, roof_observation)
+					if not roof_clear.is_empty():
+						return roof_clear
 			continue
 		var destination := [float(step.x * TILE + 6), float(step.y * TILE - 28)]
 		return {
@@ -205,7 +206,7 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 	if only_pocket_waypoints:
 		for direction in [-1, 1]:
 			var landing := Vector2i(origin.x + direction, origin.y - 1)
-			if not _solid(terrain, landing.x, landing.y) or _solid(terrain, landing.x, origin.y) or _near_harmful_fluid(landing, observation):
+			if not _solid(terrain, landing.x, landing.y) or (_solid(terrain, landing.x, origin.y) and not _is_route_stair_cell(observation, landing.x, landing.y)) or _near_harmful_fluid(landing, observation):
 				continue
 			if (not _solid(terrain, landing.x, landing.y - 1) and not _known_passable_headroom(observation, terrain, landing.x, landing.y - 1)) or (not _solid(terrain, landing.x, landing.y - 2) and not _known_passable_headroom(observation, terrain, landing.x, landing.y - 2)):
 				continue
@@ -562,7 +563,7 @@ static func _mine_step(x: int, y: int, origin: Vector2i, target: Vector2i, obser
 		# overhead roof may be removed to escape a pocket the bot built around
 		# itself. Never clear a floor/support or a workbench/furnace.
 		var upper_wall_clear: bool = bool(observation.get("allow_escape_clear_protected", false)) and abs(x - origin.x) == 1 and y in [origin.y - 1, origin.y - 2] and not _is_route_stair_cell(observation, x, y)
-		var overhead_clear: bool = bool(observation.get("allow_escape_clear_protected", false)) and x == origin.x and y == origin.y - 3
+		var overhead_clear: bool = bool(observation.get("allow_escape_clear_protected", false)) and x == origin.x and y in [origin.y - 2, origin.y - 3]
 		var adjacent_descent_clear: bool = bool(observation.get("allow_isolated_platform_descent", false)) and abs(x - origin.x) == 1 and y == origin.y and _solid(_terrain_map(observation.get("terrain_tiles", [])), x, y + 1)
 		if not (upper_wall_clear or overhead_clear or adjacent_descent_clear) or str(_terrain_tile(observation, x, y).get("block_name", "")) not in SUPPORT_BLOCK_NAMES:
 			return {}
