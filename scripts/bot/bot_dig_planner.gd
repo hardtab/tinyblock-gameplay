@@ -199,6 +199,21 @@ static func trapped_upward_step(observation: Dictionary) -> Dictionary:
 		var approach_floor := _restore_upward_approach_floor(origin, best, terrain, observation)
 		if not approach_floor.is_empty():
 			return approach_floor
+		# The nearest upper platform can cap its own approach. Consider the other
+		# observed upper platforms before idling; a clear attached step on the
+		# opposite side may be the safe start of a route out of this pocket.
+		for raw_tile in observation.get("terrain_tiles", []):
+			if not raw_tile is Dictionary:
+				continue
+			var alternative := Vector2i(int(raw_tile.get("x", 0)), int(raw_tile.get("y", 0)))
+			var rise := origin.y - alternative.y
+			if alternative == best or absi(alternative.x - origin.x) < 1 or absi(alternative.x - origin.x) > 4 or rise < 1 or rise > 3:
+				continue
+			if not _solid(terrain, alternative.x, alternative.y) or not _known_empty_cell(observation, terrain, alternative.x, alternative.y - 1) or not _known_empty_cell(observation, terrain, alternative.x, alternative.y - 2) or _near_harmful_fluid(alternative, observation) or _overlaps_any_player(alternative, observation):
+				continue
+			var alternative_floor := _restore_upward_approach_floor(origin, alternative, terrain, observation)
+			if not alternative_floor.is_empty():
+				return alternative_floor
 	# A raised solid can itself be the landing even when its column has no
 	# same-level floor. Prepare observed headroom instead of requiring an
 	# already-clear landing before ever considering this escape. Keep the
@@ -310,7 +325,7 @@ static func _restore_upward_approach_floor(origin: Vector2i, target: Vector2i, t
 	if (
 		_solid(terrain, floor_tile.x, floor_tile.y)
 		or not _known_empty_cell(observation, terrain, floor_tile.x, floor_tile.y)
-		or not _solid(terrain, floor_tile.x, floor_tile.y + 1)
+		or not (_solid(terrain, floor_tile.x, floor_tile.y + 1) or _solid(terrain, origin.x, origin.y))
 		or not _known_empty_cell(observation, terrain, floor_tile.x, floor_tile.y - 1)
 		or _near_harmful_fluid(floor_tile, observation)
 	):
@@ -319,10 +334,12 @@ static func _restore_upward_approach_floor(origin: Vector2i, target: Vector2i, t
 	# reversible route step. Clear only the observed overhead obstacle first;
 	# _mine_step checks tools, stations, protection, player support and reach.
 	if _solid(terrain, floor_tile.x, floor_tile.y - 2):
+		if floor_tile + Vector2i(0, -2) == target:
+			return {}
 		return _mine_step(floor_tile.x, floor_tile.y - 2, origin, target, observation)
 	if not _known_empty_cell(observation, terrain, floor_tile.x, floor_tile.y - 2):
 		return {}
-	return _place_step(floor_tile.x, floor_tile.y, origin, target, observation, terrain)
+	return _place_step(floor_tile.x, floor_tile.y, origin, target, observation, terrain, true)
 
 
 static func _player_above_origin(observation: Dictionary, self_state: Dictionary) -> bool:
@@ -670,10 +687,11 @@ static func _place_step(
 	target: Vector2i,
 	observation: Dictionary,
 	terrain: Dictionary,
+	allow_attached_floor: bool = false,
 ) -> Dictionary:
 	if (
 		not _known_empty_cell(observation, terrain, x, y)
-		or not _solid(terrain, x, y + 1)
+		or not (_solid(terrain, x, y + 1) or (allow_attached_floor and y == origin.y and absi(x - origin.x) == 1 and _solid(terrain, origin.x, origin.y)))
 		or not _known_empty_cell(observation, terrain, x, y - 1)
 		or not _known_empty_cell(observation, terrain, x, y - 2)
 		or _retry_cooldown_active(observation, x, y)
