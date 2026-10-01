@@ -26,7 +26,7 @@ const MINING_TOOL_NAMES: PackedStringArray = [
 ]
 const SUPPORT_BLOCK_NAMES: PackedStringArray = [
 	"planks", "palm_planks", "pine_planks", "weeping_planks",
-	"stone_bricks", "cobblestone", "stone", "dirt",
+	"stone_bricks", "cobblestone", "stone", "dirt", "packed_ice",
 ]
 
 

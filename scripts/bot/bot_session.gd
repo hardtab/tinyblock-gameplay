@@ -957,6 +957,65 @@ func _should_settle_airborne(self_state: Dictionary, origin: Vector2) -> bool:
 	)
 
 
+func _fluid_shore_recovery_step(
+	self_state: Dictionary,
+	origin: Vector2,
+	destination: Vector2,
+	delta: float,
+) -> Dictionary:
+	if (
+		_terrain_tiles.is_empty()
+		or _jump_active
+		or _climb_active
+		or _local_touches_harmful_fluid(self_state)
+	):
+		return {}
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var fluid := _local_fluid_physics(origin.x, origin.y, width, height)
+	# The host only accepts a jump from fluid after vertical speed reaches the
+	# falling side of the arc. Let gravity finish an existing upward swim first.
+	if fluid.is_empty() or float(self_state.get("vy", 0.0)) < -0.05:
+		return {}
+	var origin_tile := _route_origin_support_tile(origin, self_state)
+	if not _should_settle_airborne(self_state, origin) and _terrain_standable_tile(origin_tile):
+		return {}
+	var best: Dictionary = {}
+	var best_score := INF
+	var origin_distance := origin.distance_to(destination)
+	for dx in [-2, -1, 1, 2]:
+		for dy in [0, -1]:
+			var landing_tile := origin_tile + Vector2i(dx, dy)
+			if not _terrain_standable_tile(landing_tile):
+				continue
+			if not _physics_transition_allowed(origin_tile, landing_tile, "jump"):
+				continue
+			var landing := _world_position_for_support_tile(landing_tile)
+			if _position_touches_any_fluid(landing.x, landing.y, width, height):
+				continue
+			var remaining_distance := landing.distance_to(destination)
+			if remaining_distance + 8.0 >= origin_distance:
+				continue
+			if not _jump_route_has_safe_landing(self_state, landing, false, 4.0):
+				continue
+			var score := remaining_distance + float(absi(dx) + absi(dy)) * float(BlockDefs.TILE) * 0.2
+			if score >= best_score:
+				continue
+			best_score = score
+			best = {"position": landing, "support_tile": landing_tile, "kind": "jump"}
+	if best.is_empty():
+		return {}
+	var landing_position: Vector2 = best.get("position", destination)
+	var landing_tile: Vector2i = best.get("support_tile", origin_tile)
+	_active_air_transition = {"from": origin_tile, "to": landing_tile, "fluid_shore_recovery": true}
+	_jump_active = false
+	_jump_predicted_landed = false
+	_jump_started_msec = -1
+	_climb_active = false
+	_set_desired_input(signf(landing_position.x - origin.x) < 0.0, signf(landing_position.x - origin.x) > 0.0, true)
+	return _jump_step(self_state, landing_position, delta)
+
+
 func _default_movement_step(action: String, decision: Dictionary, observation: Dictionary, delta: float) -> Dictionary:
 	var self_state: Dictionary = _world_snapshot.get("self", {}) if _world_snapshot.get("self", {}) is Dictionary else {}
 	var origin := Contract.target_position(self_state)
@@ -1000,6 +1059,14 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 			var approach_gap := clampf(float(decision_target.get("combat_approach_gap", 32.0)), 16.0, 48.0)
 			target = Vector2(live_threat_position.x + approach_side * approach_gap, live_threat_position.y)
 			break
+	# Water has no solid route origin. Give a bot that is actually swimming one
+	# bounded, physics-verified chance to jump to dry support before the ordinary
+	# airborne guard settles it in place. The active transition then follows the
+	# same held input and host-confirmed landing path as any other jump.
+	if action in [Contract.ACTION_MOVE_TO, Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW] and not _jump_active:
+		var fluid_shore_step := _fluid_shore_recovery_step(self_state, origin, target, delta)
+		if not fluid_shore_step.is_empty():
+			return fluid_shore_step
 	if action == Contract.ACTION_MOVE_TO and target_id.begins_with("container:"):
 		# Containers are solid blocks. Route to a supported interaction position,
 		# then use a proven intermediate waypoint when the chest is farther than
@@ -3496,11 +3563,12 @@ func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> D
 		_jump_start_x = origin.x
 		_jump_started_msec = Time.get_ticks_msec()
 	var direction := signf(destination.x - origin.x)
+	var landing_tolerance := 4.0 if bool(_active_air_transition.get("fluid_shore_recovery", false)) else 8.0
 	# Preserve the actual jump/hold controls, but release horizontal steering once
 	# the requested landing column is reached. Holding left/right for the entire
 	# arc overshoots one-block steps (especially step-ups) because jump airtime is
 	# much longer than the 32 px support-tile transition.
-	var landing_column_reached := absf(destination.x - origin.x) <= 8.0
+	var landing_column_reached := absf(destination.x - origin.x) <= landing_tolerance
 	_set_desired_input(not landing_column_reached and direction < 0.0, not landing_column_reached and direction > 0.0, true)
 	var was_airborne := not bool(self_state.get("on_ground", false))
 	_advance_local_physics(self_state, delta, true)
@@ -3514,7 +3582,7 @@ func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> D
 		self_state["vx"] = 0.0
 		_world_snapshot["self"] = self_state
 		return {"done": true, "reason": "blocked_obstacle"}
-	if landed and absf(destination.x - next_x) <= 8.0:
+	if landed and absf(destination.x - next_x) <= landing_tolerance:
 		_jump_predicted_landed = true
 		_set_desired_input(false, false, false)
 		return {"done": false, "reason": "await_host_landing"}
@@ -3528,6 +3596,7 @@ func _jump_route_has_safe_landing(
 	self_state: Dictionary,
 	destination: Vector2,
 	allow_starting_hazard_escape: bool = false,
+	landing_x_tolerance: float = 8.0,
 ) -> bool:
 	var origin := Contract.target_position(self_state)
 	var origin_support := _route_origin_support_tile(origin, self_state)
@@ -3556,7 +3625,7 @@ func _jump_route_has_safe_landing(
 		var substeps := maxi(1, int(ceil(maxf(absf(vx), absf(vy)) / 6.0)))
 		var substep := 1.0 / float(substeps)
 		for _substep_index in substeps:
-			var horizontal_direction := direction if absf(destination.x - x) > 8.0 else 0.0
+			var horizontal_direction := direction if absf(destination.x - x) > landing_x_tolerance else 0.0
 			var next_x := x + horizontal_direction * (BlockDefs.MOVE * float(fluid.get("move_speed_multiplier", 1.0))) * substep
 			var horizontal_hit := _local_collision(next_x, y, width, height)
 			if horizontal_hit.is_empty():
@@ -3812,6 +3881,19 @@ func _local_touches_harmful_fluid(self_state: Dictionary) -> bool:
 		width,
 		height,
 	)
+
+
+func _position_touches_any_fluid(x: float, y: float, width: float, height: float) -> bool:
+	var left := floori(x / float(BlockDefs.TILE))
+	var right := floori((x + width - 0.001) / float(BlockDefs.TILE))
+	var top := floori(y / float(BlockDefs.TILE))
+	var bottom := floori((y + height - 0.001) / float(BlockDefs.TILE))
+	for tile_y in range(top, bottom + 1):
+		for tile_x in range(left, right + 1):
+			var entry := _block_entry(_terrain_name_at(tile_x, tile_y).to_lower())
+			if bool(entry.get("fluid", false)):
+				return true
+	return false
 
 
 func _position_touches_harmful_fluid(x: float, y: float, width: float, height: float) -> bool:
@@ -6888,16 +6970,21 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 	var pit_terrain: Dictionary = DigPlanner._terrain_map(observation.get("terrain_tiles", []))
 	var pit_origin: Vector2i = DigPlanner._grounded_support_tile(observation.get("self", {}), pit_terrain)
 	var self_position := Contract.target_position(observation.get("self", {}))
+	var pit_floor_tile: Dictionary = DigPlanner._terrain_tile(observation, pit_origin.x, pit_origin.y)
+	var nearby_solids: Array = []
+	for ty in range(pit_origin.y - 4, pit_origin.y + 2):
+		for tx in range(pit_origin.x - 4, pit_origin.x + 5):
+			if DigPlanner._solid(pit_terrain, tx, ty):
+				nearby_solids.append({
+					"x": tx,
+					"y": ty,
+					"block": str(pit_terrain.get("%d:%d" % [tx, ty], "")),
+				})
 	var pit_stair_probe: Dictionary = {}
 	if str(pit_escape.get("target_id", "")).begins_with("pit-stair:"):
 		var stair_position := Contract.target_position(pit_escape.get("target", {}))
 		var stair_tile := _support_tile_for_position(stair_position)
 		var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
-		var nearby: Array = []
-		for ty in range(pit_origin.y - 5, pit_origin.y):
-			for tx in range(mini(pit_origin.x, stair_tile.x), maxi(pit_origin.x, stair_tile.x) + 1):
-				if _terrain_solid_at(tx, ty):
-					nearby.append({"x": tx, "y": ty, "block": str(_terrain_tiles.get("%d:%d" % [tx, ty], ""))})
 		pit_stair_probe = {
 			"position": [self_position.x, self_position.y],
 			"target": [stair_position.x, stair_position.y],
@@ -6913,7 +7000,7 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 				_safe_jump_first_step_filter(self_state),
 				_safe_jump_later_step_filter(self_state),
 			),
-			"nearby_solids": nearby,
+			"nearby_solids": nearby_solids.duplicate(true),
 		}
 	var nearest_player_distance := 999999.0
 	var nearest_player_vertical_gap := 0.0
@@ -6982,7 +7069,9 @@ func _log_island_idle_probe(decision: Dictionary, now_msec: int) -> void:
 		"safe_waypoints": (observation.get("safe_exploration_waypoints", []) as Array).size(),
 		"waypoints": pit_waypoints,
 		"usable_bridge_blocks": BuildPlanner._floating_bridge_usable_support_count(inventory) if mode == "floating_islands" else 0,
-		"pit_support_block": DigPlanner._support_block(observation),
+		"pit_inventory_support_block": DigPlanner._support_block(observation),
+		"pit_floor_block": str(pit_floor_tile.get("block_name", "")),
+		"nearby_solids": nearby_solids,
 		"pit_wood_count": int(inventory.get("wood", 0)),
 		"bridge_shortfall": BuildPlanner.floating_island_bridge_material_shortfall(observation) if mode == "floating_islands" else 0,
 		"bridge_action": str(bridge.get("action", "")),

@@ -587,6 +587,9 @@ func decide(observation: Dictionary) -> Dictionary:
 		var pit_escape_step := DigPlanner.trapped_upward_step(observation)
 		if not pit_escape_step.is_empty() and str(pit_escape_step.get("action", "")) in legal:
 			return Contract.normalize_decision(pit_escape_step)
+		var escape_material := _trapped_route_material_craft(observation, legal)
+		if not escape_material.is_empty():
+			return escape_material
 	# Achievement goals are advisory progression, never a survival or combat
 	# override. One Block is the exception to ordinary progression order because
 	# its authoritative source is renewable and is the world's central resource.
@@ -2332,6 +2335,38 @@ func _nearest_station_target(observation: Dictionary, station_name: String) -> D
 			"distance": distance,
 		}
 	return best
+
+
+## Craft only a material that unlocks a concrete, safe escape placement. This
+## works from advertised recipes (including packed ice), not world-name rules;
+## raw melting ice remains unsuitable as permanent footing.
+func _trapped_route_material_craft(observation: Dictionary, legal: Array) -> Dictionary:
+	if Contract.ACTION_CRAFT not in legal or Contract.ACTION_PLACE not in legal:
+		return {}
+	if not str(observation.get("craft_pending_output", "")).is_empty() or int(observation.get("craft_retry_after_msec", -1)) > int(observation.get("observed_at_msec", 0)):
+		return {}
+	var inventory := _inventory(observation)
+	if not DigPlanner._support_block(observation).is_empty():
+		return {}
+	var blocked: Array = _as_array(observation.get("craft_blocked_outputs", []))
+	for raw_recipe in _as_array(observation.get("recipes", [])):
+		if not raw_recipe is Dictionary or not _recipe_inputs_available(raw_recipe, inventory):
+			continue
+		var outputs: Dictionary = raw_recipe.get("out", {}) if raw_recipe.get("out", {}) is Dictionary else {}
+		for raw_name in outputs:
+			var name := str(raw_name)
+			if name not in DigPlanner.SUPPORT_BLOCK_NAMES or name in blocked or int(outputs[name]) <= 0:
+				continue
+			var candidate := observation.duplicate(true)
+			var candidate_inventory := inventory.duplicate(true)
+			for input_name in raw_recipe.get("in", {}):
+				candidate_inventory[input_name] = int(candidate_inventory.get(input_name, 0)) - int(raw_recipe["in"][input_name])
+			candidate_inventory[name] = int(candidate_inventory.get(name, 0)) + int(outputs[name])
+			candidate["inventory_summary"] = candidate_inventory
+			var route_step := DigPlanner.trapped_upward_step(candidate)
+			if str(route_step.get("action", "")) == Contract.ACTION_PLACE and str(route_step.get("block", "")) == name:
+				return _decision(Contract.GOAL_DIG_ROUTE, Contract.ACTION_CRAFT, {"id": name}, 900, 0.9)
+	return {}
 
 
 func _craftable_output(observation: Dictionary) -> String:
