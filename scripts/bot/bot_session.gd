@@ -984,7 +984,7 @@ func _fluid_shore_recovery_step(
 	var best_score := INF
 	var origin_distance := origin.distance_to(destination)
 	for dx in [-2, -1, 1, 2]:
-		for dy in [0, -1]:
+		for dy in [0, -1, -2]:
 			var landing_tile := origin_tile + Vector2i(dx, dy)
 			if not _terrain_standable_tile(landing_tile):
 				continue
@@ -3550,11 +3550,35 @@ func _movement_hint(origin: Vector2, destination: Vector2) -> String:
 
 func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> Dictionary:
 	var origin := Contract.target_position(self_state)
+	var landing_tolerance := 4.0 if bool(_active_air_transition.get("fluid_shore_recovery", false)) else 8.0
 	if _jump_predicted_landed:
 		# The private predictor is not proof that the host landed. Keep the
-		# verified transition active, but release jump/steering while waiting for
-		# the authoritative pose so a new route cannot walk into a nearby hazard.
-		_set_desired_input(false, false, false)
+		# verified transition active while waiting for the authoritative pose. On
+		# slippery ground, neutral input barely slows the avatar; counter-steer
+		# only after local support confirms landing so the host can validate the
+		# pose without the bot sliding off its platform.
+		var landing_support := _local_ground_support(
+			origin.x,
+			origin.y,
+			float(self_state.get("w", 20.0)),
+			float(self_state.get("h", 28.0)),
+			_local_ignores_trees(self_state),
+		)
+		var brake_direction := 0.0
+		var current_vx := float(self_state.get("vx", 0.0))
+		if not landing_support.is_empty():
+			var landing_surface := _local_surface_physics_for_support(landing_support)
+			if float(landing_surface.get("friction", 1.0)) < 0.3:
+				var brake_sign := int(_active_air_transition.get("landing_brake_sign", 0))
+				if brake_sign == 0 and absf(current_vx) > 0.05:
+					brake_sign = int(signf(current_vx))
+					_active_air_transition["landing_brake_sign"] = brake_sign
+				# Apply one counter-input until it slows or reverses the original
+				# momentum. After that, neutral input lets friction bleed off the
+				# small residual without alternating left/right on 20fps hosts.
+				if brake_sign != 0 and absf(current_vx) > 0.05 and int(signf(current_vx)) == brake_sign:
+					brake_direction = -float(brake_sign)
+		_set_desired_input(brake_direction < 0.0, brake_direction > 0.0, false)
 		_advance_local_physics(self_state, delta, false)
 		_world_snapshot["self"] = self_state
 		return {"done": false, "reason": "await_host_landing"}
@@ -3563,7 +3587,6 @@ func _jump_step(self_state: Dictionary, destination: Vector2, delta: float) -> D
 		_jump_start_x = origin.x
 		_jump_started_msec = Time.get_ticks_msec()
 	var direction := signf(destination.x - origin.x)
-	var landing_tolerance := 4.0 if bool(_active_air_transition.get("fluid_shore_recovery", false)) else 8.0
 	# Preserve the actual jump/hold controls, but release horizontal steering once
 	# the requested landing column is reached. Holding left/right for the entire
 	# arc overshoots one-block steps (especially step-ups) because jump airtime is
@@ -3604,9 +3627,9 @@ func _jump_route_has_safe_landing(
 	var horizontal_tiles := absi(landing_support.x - origin_support.x)
 	if horizontal_tiles <= 0 or horizontal_tiles > 2:
 		return false
-	# The navigator only advertises same-level and one-block-up jumps. Drops are
-	# walked normally; larger climbs need a dig/climb route rather than hope.
-	if landing_support.y < origin_support.y - 1 or landing_support.y > origin_support.y:
+	# Drops are walked normally. Up to two rows can fit inside the ordinary jump
+	# arc, but every candidate still has to pass the collision simulation below.
+	if landing_support.y < origin_support.y - 2 or landing_support.y > origin_support.y:
 		return false
 	if not _terrain_standable_tile(landing_support):
 		return false
@@ -3618,16 +3641,30 @@ func _jump_route_has_safe_landing(
 	var x := float(self_state.get("x", origin.x))
 	var y := float(self_state.get("y", origin.y))
 	var cleared_starting_hazard := not _position_touches_harmful_fluid(x, y, width, height)
+	var movement_multiplier := _local_equipment_effect_multiplier("movement_speed_multiplier", 1.0, 1.6)
+	var jump_multiplier := _local_equipment_effect_multiplier("jump_power_multiplier", 1.0, 1.4)
 	var fluid := _local_fluid_physics(x, y, width, height)
-	var vx := direction * (BlockDefs.MOVE * float(fluid.get("move_speed_multiplier", 1.0)))
-	var vy := BlockDefs.JUMP * float(fluid.get("jump_multiplier", 1.0))
+	var vx := float(self_state.get("vx", 0.0))
+	var vy := BlockDefs.JUMP * float(fluid.get("jump_multiplier", 1.0)) * jump_multiplier
+	var ignore_trees := _local_ignores_trees(self_state)
 	for _frame in range(90):
+		fluid = _local_fluid_physics(x, y, width, height)
+		var support := _local_ground_support(x, y, width, height, ignore_trees)
+		var surface := _local_surface_physics_for_support(support)
+		var steering := direction if absf(destination.x - x) > landing_x_tolerance else 0.0
+		var fluid_speed := float(fluid.get("move_speed_multiplier", 1.0)) if not fluid.is_empty() else float(surface.get("movement_speed_multiplier", 1.0))
+		var target_vx := steering * BlockDefs.MOVE * fluid_speed * movement_multiplier
+		if not fluid.is_empty():
+			vx = target_vx
+		elif not support.is_empty():
+			vx = lerpf(vx, target_vx, clampf(float(surface.get("friction", 1.0)), 0.0, 1.0))
+		else:
+			vx = target_vx
 		var substeps := maxi(1, int(ceil(maxf(absf(vx), absf(vy)) / 6.0)))
 		var substep := 1.0 / float(substeps)
 		for _substep_index in substeps:
-			var horizontal_direction := direction if absf(destination.x - x) > landing_x_tolerance else 0.0
-			var next_x := x + horizontal_direction * (BlockDefs.MOVE * float(fluid.get("move_speed_multiplier", 1.0))) * substep
-			var horizontal_hit := _local_collision(next_x, y, width, height)
+			var next_x := x + vx * substep
+			var horizontal_hit := _local_collision(next_x, y, width, height, ignore_trees)
 			if horizontal_hit.is_empty():
 				x = next_x
 			else:
@@ -3636,8 +3673,8 @@ func _jump_route_has_safe_landing(
 				# made the body-width overlap at a one-block ledge look like a blocked
 				# jump, so flee/pathfinding discarded the only safe step-up route.
 				var block_x := float(horizontal_hit.get("bx", 0.0))
-				var resolved_x := block_x - width if horizontal_direction > 0.0 else block_x + float(BlockDefs.TILE)
-				if not _local_collision(resolved_x, y, width, height).is_empty():
+				var resolved_x := block_x - width if vx > 0.0 else block_x + float(BlockDefs.TILE)
+				if not _local_collision(resolved_x, y, width, height, ignore_trees).is_empty():
 					# The face is only resolved for the row the avatar occupies before
 					# this substep's rise. While the lower few pixels still overlap a
 					# one-block ledge the pre-rise probe keeps hitting it, yet the same
@@ -3645,11 +3682,11 @@ func _jump_route_has_safe_landing(
 					# re-testing the resolved face at the risen row. Only a pose that is
 					# still blocked after the rise is real side penetration.
 					var risen_y := y + vy * substep
-					if vy >= 0.0 or not _local_collision(resolved_x, risen_y, width, height).is_empty():
+					if vy >= 0.0 or not _local_collision(resolved_x, risen_y, width, height, ignore_trees).is_empty():
 						return false
 				x = resolved_x
 			var next_y := y + vy * substep
-			var vertical_hit := _local_collision(x, next_y, width, height)
+			var vertical_hit := _local_collision(x, next_y, width, height, ignore_trees)
 			if vertical_hit.is_empty():
 				y = next_y
 			else:
@@ -3673,18 +3710,65 @@ func _jump_route_has_safe_landing(
 				cleared_starting_hazard = true
 		# Re-evaluate the center-tile fluid each frame so an arc that enters or
 		# leaves water tracks the same speed/gravity the authoritative host uses.
-		fluid = _local_fluid_physics(x, y, width, height)
-		vx = direction * (BlockDefs.MOVE * float(fluid.get("move_speed_multiplier", 1.0)))
 		vy = minf(float(fluid.get("max_fall", LOCAL_MAX_FALL_SPEED)), vy + BlockDefs.GRAVITY * float(fluid.get("gravity_multiplier", 1.0)))
 		if y > origin.y + float(BlockDefs.TILE) * 4.0:
 			return false
 	return false
 
 
+## Mirrors WorldSim.find_ground_support's inset foot probes and 1.5px snap
+## window. Returning the actual support cell lets local movement use the same
+## surface material that the authoritative host sees beneath the avatar.
+func _local_ground_support(x: float, y: float, width: float, height: float, ignore_trees: bool = false) -> Dictionary:
+	const SNAP := 1.5
+	var feet := y + height
+	var foot_left := x + 3.0
+	var foot_right := x + width - 3.0
+	var row := floori((feet + SNAP) / float(BlockDefs.TILE))
+	var top := float(row * BlockDefs.TILE)
+	if feet < top - 0.05 or feet > top + SNAP:
+		return {}
+	var left := floori(foot_left / float(BlockDefs.TILE))
+	var right := floori((foot_right - 0.001) / float(BlockDefs.TILE))
+	for tile_x in range(left, right + 1):
+		if not _terrain_solid_at(tile_x, row):
+			continue
+		if ignore_trees and _terrain_climbable_at(tile_x, row):
+			continue
+		var block_left := float(tile_x * BlockDefs.TILE)
+		if foot_right <= block_left or foot_left >= block_left + float(BlockDefs.TILE):
+			continue
+		return {"tx": tile_x, "ty": row, "bx": block_left, "by": top}
+	return {}
+
+
+func _local_surface_physics_for_support(support: Dictionary) -> Dictionary:
+	if support.is_empty():
+		return {"movement_speed_multiplier": 1.0, "friction": 1.0, "bounce": 0.0}
+	var block_name := _terrain_name_at(int(support.get("tx", 0)), int(support.get("ty", 0)))
+	var block := _block_entry(block_name)
+	return {
+		"movement_speed_multiplier": clampf(float(block.get("movement_speed_multiplier", 1.0)), 0.35, 1.75),
+		"friction": clampf(float(block.get("friction", 1.0)), 0.0, 1.0),
+		"bounce": clampf(float(block.get("bounce", 0.0)), 0.0, 1.0),
+	}
+
+
+func _local_equipment_effect_multiplier(effect_name: String, minimum: float, maximum: float) -> float:
+	var inventory: Dictionary = _world_snapshot.get("inventory_summary", {}) if _world_snapshot.get("inventory_summary", {}) is Dictionary else {}
+	var item_name := str(_equipment_slots.get("feet", ""))
+	if item_name.is_empty() or int(inventory.get(item_name, 0)) <= 0:
+		return 1.0
+	var item := _block_entry(item_name)
+	var definition: Dictionary = item.get("definition", {}) if item.get("definition", {}) is Dictionary else {}
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	return clampf(float(effects.get(effect_name, 1.0)), minimum, maximum)
+
+
 ## Mirrors WorldSim.move_player's center-tile fluid modifiers so the private
 ## predictor and the route validator stay in lockstep with the authoritative
 ## host. Returns an empty dictionary when the avatar's center tile is not a
-## fluid, which keeps land movement on the original constants.
+## fluid.
 func _local_fluid_physics(x: float, y: float, width: float, height: float) -> Dictionary:
 	var center_x := floori((x + width * 0.5) / float(BlockDefs.TILE))
 	var center_y := floori((y + height * 0.5) / float(BlockDefs.TILE))
@@ -3721,7 +3805,7 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 	# Headless processing can run much faster than rendering. A minimum step
 	# invents elapsed time on each frame, accelerating the private jump until it
 	# releases controls before the authoritative host has completed takeoff.
-	var step := minf(delta * NETWORK_PHYSICS_TICKS_PER_SECOND, 2.0)
+	var step := minf(delta * NETWORK_PHYSICS_TICKS_PER_SECOND, 3.0)
 	var width := float(self_state.get("w", 20.0))
 	var height := float(self_state.get("h", 28.0))
 	var x := float(self_state.get("x", 0.0))
@@ -3733,17 +3817,22 @@ func _advance_local_physics(self_state: Dictionary, delta: float, jump_pressed: 
 	_update_local_tree_ghost(self_state, direction)
 	var ignore_trees := _local_ignores_trees(self_state)
 	var fluid := _local_fluid_physics(x, y, width, height)
+	var support := _local_ground_support(x, y, width, height, ignore_trees)
+	var surface := _local_surface_physics_for_support(support)
 	var in_fluid := not fluid.is_empty()
 	var gravity := BlockDefs.GRAVITY * float(fluid.get("gravity_multiplier", 1.0))
-	var jump_power := BlockDefs.JUMP * float(fluid.get("jump_multiplier", 1.0))
+	var movement_multiplier := _local_equipment_effect_multiplier("movement_speed_multiplier", 1.0, 1.6)
+	var jump_multiplier := _local_equipment_effect_multiplier("jump_power_multiplier", 1.0, 1.4)
+	var jump_power := BlockDefs.JUMP * float(fluid.get("jump_multiplier", 1.0)) * jump_multiplier
 	var max_fall := float(fluid.get("max_fall", LOCAL_MAX_FALL_SPEED))
-	var target_vx := direction * (BlockDefs.MOVE * float(fluid.get("move_speed_multiplier", 1.0)))
+	var surface_speed := float(surface.get("movement_speed_multiplier", 1.0)) if not in_fluid else 1.0
+	var target_vx := direction * BlockDefs.MOVE * surface_speed * movement_multiplier * float(fluid.get("move_speed_multiplier", 1.0))
 	if in_fluid:
 		# WorldSim drops friction in fluids and writes the target velocity
 		# directly; matching that keeps grounded-host reconciliation exact.
 		vx = target_vx
-	elif on_ground:
-		vx = lerpf(vx, target_vx, clampf(step, 0.0, 1.0))
+	elif not support.is_empty():
+		vx = lerpf(vx, target_vx, clampf(float(surface.get("friction", 1.0)) * step, 0.0, 1.0))
 	else:
 		vx = target_vx
 	# Match WorldSim.can_jump(): fluid permits a jump from mid-water, but only
@@ -5317,6 +5406,19 @@ func _apply_players_snapshot(payload: Dictionary) -> void:
 					continue
 				local_state[field] = entry[field]
 			_world_snapshot["self"] = local_state
+			if (
+				host_confirmed_near_landing
+				and behavior != null
+				and behavior.executor != null
+				and behavior.executor.is_busy()
+				and behavior.executor.current_action() in [Contract.ACTION_MOVE_TO, Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW, Contract.ACTION_FLEE_FROM]
+			):
+				# The host can land on a nearby, valid support row when the local
+				# trajectory slightly overshoots (notably on low-friction ice). That
+				# pose is authoritative progress: finish this movement leg so the next
+				# decision replans from the host's actual support instead of steering
+				# back toward the stale predicted tile.
+				behavior.executor.cancel("route_progress")
 			if entry.has("x") and entry.has("y") and entry.has("on_ground"):
 				_descent_planner.set_world_context(
 					_session_world_mode,
