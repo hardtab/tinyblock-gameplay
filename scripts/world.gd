@@ -3501,7 +3501,7 @@ func _generate_underground_ore_deposits(chunk_x: int) -> int:
 		var pick := int(_structure_random("ore-position:%d:%d" % [chunk_x, cluster_index]) * float(exposed_stone.size())) % exposed_stone.size()
 		var origin: Vector2i = exposed_stone[pick]
 		var ore_roll := _structure_random("ore-kind:%d:%d" % [chunk_x, cluster_index])
-		var ore_name := "copper_ore" if ore_roll < 0.55 else ("moonstone_ore" if ore_roll < 0.82 else "emerald_crystal")
+		var ore_name := _underground_ore_name_for_roll(ore_roll)
 		var offsets: Array[Vector2i] = [Vector2i.ZERO, Vector2i.RIGHT, Vector2i.DOWN, Vector2i.LEFT]
 		var size := 1 + int(_structure_random("ore-size:%d:%d" % [chunk_x, cluster_index]) * 4.0)
 		for offset_index in range(size):
@@ -3511,6 +3511,16 @@ func _generate_underground_ore_deposits(chunk_x: int) -> int:
 			_set_generated_block(pos.x, pos.y, ore_name)
 			placed += 1
 	return placed
+
+
+func _underground_ore_name_for_roll(ore_roll: float) -> String:
+	if ore_roll < 0.28:
+		return "copper_ore"
+	if ore_roll < 0.55:
+		return "charcoal"
+	if ore_roll < 0.82:
+		return "moonstone_ore"
+	return "emerald_crystal"
 
 
 func _cave_structure_site(chunk_x: int) -> Dictionary:
