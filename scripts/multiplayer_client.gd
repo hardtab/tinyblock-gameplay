@@ -105,6 +105,18 @@ func is_p2p() -> bool:
 	return false
 
 
+func guest_peer_ids() -> Array[String]:
+	var result: Array[String] = []
+	if role != "host":
+		return result
+	for raw_player_id in _known_players:
+		var player_id := str(raw_player_id)
+		if not player_id.is_empty() and str(_known_players[raw_player_id]) == "guest":
+			result.append(player_id)
+	result.sort()
+	return result
+
+
 func player_count() -> int:
 	var count := _known_players.size()
 	if _dedicated_server_session:
