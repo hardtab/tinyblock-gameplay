@@ -60,6 +60,7 @@ var tree_growth: Dictionary = {}
 var plant_growth: Dictionary = {}
 var plant_cells: Dictionary = {}
 var creatures: Dictionary = {}
+var resonant_deep_respawn_until_tick: Dictionary = {}
 var creature_tick: int = 0
 var burning_tiles: Dictionary = {}
 var containers: Dictionary = {}
@@ -195,6 +196,10 @@ const CREATURE_MAX_SPAWN_DISTANCE := 30
 const CREATURE_LOCAL_CAP_RADIUS := 40.0
 const CREATURE_DORMANT_DISTANCE := 48.0
 const CREATURE_MAX_NATURAL_STORED := 48
+const RESONANT_DEEP_ACTIVE_CREATURE_CAP := 6
+const RESONANT_DEEP_RESPAWN_COOLDOWN_TICKS := 60 * 60 * 5
+const RESONANT_DEEP_SPAWN_MIN_PLAYER_DISTANCE := 12.0
+const RESONANT_DEEP_SPAWN_MIN_CREATURE_DISTANCE := 3.0
 const CREATURE_GRAVITY := 8.0
 const CREATURE_MAX_FALL_SPEED := 6.0
 const CREATURE_JUMP_SPEED := 5.5
@@ -534,6 +539,7 @@ func create_island() -> void:
 	plant_growth.clear()
 	plant_cells.clear()
 	creatures.clear()
+	resonant_deep_respawn_until_tick.clear()
 	containers.clear()
 	creature_tick = 0
 	world_time_tick = 0
@@ -5116,6 +5122,16 @@ func serialize_state(stable_order: bool = true) -> Dictionary:
 		var saved_creature: Dictionary = (creatures[creature_id] as Dictionary).duplicate(true)
 		saved_creature["id"] = creature_id
 		creature_entries.append(saved_creature)
+	var deep_respawn_cooldown_entries: Array[Dictionary] = []
+	var respawn_cooldown_keys: Array = resonant_deep_respawn_until_tick.keys()
+	if stable_order:
+		respawn_cooldown_keys.sort()
+	for raw_key in respawn_cooldown_keys:
+		var key := str(raw_key)
+		var until_tick := int(resonant_deep_respawn_until_tick[raw_key])
+		if key.is_empty() or until_tick <= creature_tick:
+			continue
+		deep_respawn_cooldown_entries.append({"key": key, "until_tick": until_tick})
 
 	var burning_entries: Array[Dictionary] = []
 	var burning_positions: Array = burning_tiles.keys()
@@ -5280,6 +5296,7 @@ func serialize_state(stable_order: bool = true) -> Dictionary:
 		"plant_growth": plant_entries,
 		"creatures": creature_entries,
 		"creature_spawn_policy_version": CREATURE_SPAWN_POLICY_VERSION,
+		"resonant_deep_respawn_cooldowns": deep_respawn_cooldown_entries,
 		"burning_tiles": burning_entries,
 		"containers": container_entries,
 		"inventory": saved_inventory,
@@ -6086,6 +6103,18 @@ func deserialize_state(state: Dictionary) -> bool:
 	fluid_tick = maxi(0, int(state.get("fluid_tick", 0)))
 	tree_tick = maxi(0, int(state.get("tree_tick", 0)))
 	creature_tick = maxi(0, int(state.get("creature_tick", 0)))
+	resonant_deep_respawn_until_tick.clear()
+	var raw_deep_respawn_cooldowns = state.get("resonant_deep_respawn_cooldowns", [])
+	if raw_deep_respawn_cooldowns is Array:
+		for raw_cooldown in raw_deep_respawn_cooldowns:
+			if not raw_cooldown is Dictionary:
+				continue
+			var cooldown := raw_cooldown as Dictionary
+			var key := str(cooldown.get("key", ""))
+			var until_tick := int(cooldown.get("until_tick", 0))
+			if key.is_empty() or until_tick <= creature_tick or until_tick > creature_tick + RESONANT_DEEP_RESPAWN_COOLDOWN_TICKS:
+				continue
+			resonant_deep_respawn_until_tick[key] = until_tick
 	world_time_tick = posmod(int(state.get("world_time_tick", 0)), DAY_LENGTH_TICKS)
 	granular_tick = maxi(0, int(state.get("granular_tick", 0)))
 	fire_tick = maxi(0, int(state.get("fire_tick", 0)))
@@ -8694,6 +8723,190 @@ func _player_creature_position() -> Vector2:
 	)
 
 
+func _active_creature_player_positions() -> Array[Vector2]:
+	var positions: Array[Vector2] = []
+	if weather_uses_local_player:
+		positions.append(_player_creature_position())
+	var player_ids: Array = multiplayer_player_targets.keys()
+	player_ids.sort()
+	for raw_player_id in player_ids:
+		if not multiplayer_player_targets[raw_player_id] is Dictionary:
+			continue
+		var candidate := multiplayer_player_targets[raw_player_id] as Dictionary
+		if int(candidate.get("health", MAX_PLAYER_HEALTH)) <= 0:
+			continue
+		positions.append(Vector2(
+			(float(candidate.get("x", 0.0)) + float(candidate.get("w", 20.0)) * 0.5) / BlockDefs.TILE,
+			(float(candidate.get("y", 0.0)) + float(candidate.get("h", 28.0)) * 0.5) / BlockDefs.TILE
+		))
+	if positions.is_empty():
+		positions.append(_player_creature_position())
+	return positions
+
+
+func _creature_spawn_clearance_ok(position: Vector2, minimum_player_distance: float = RESONANT_DEEP_SPAWN_MIN_PLAYER_DISTANCE) -> bool:
+	for player_position in _active_creature_player_positions():
+		if position.distance_to(player_position) < minimum_player_distance:
+			return false
+	for creature: Dictionary in creatures.values():
+		if bool(creature.get("dead", false)):
+			continue
+		var creature_position := Vector2(float(creature.get("x", 0.0)), float(creature.get("y", 0.0)))
+		if position.distance_to(creature_position) < RESONANT_DEEP_SPAWN_MIN_CREATURE_DISTANCE:
+			return false
+	return true
+
+
+func _resonant_deep_natural_spawn_allowed(content_id: String, tile_position: Vector2i) -> bool:
+	var region_index := _resonant_deep_region_index(tile_position)
+	if region_index == COORD_LIMIT + 1:
+		return true
+	if _resonant_deep_active_creature_count(region_index) >= RESONANT_DEEP_ACTIVE_CREATURE_CAP:
+		return false
+	if _resonant_deep_respawn_blocked(region_index, content_id):
+		return false
+	return _creature_spawn_clearance_ok(Vector2(tile_position) + Vector2.ONE * 0.5)
+
+
+func _resonant_deep_region_index(pos: Vector2i) -> int:
+	if not _world_supports_resonant_deep() or pos.y < RESONANT_DEEP_TOP_Y:
+		return COORD_LIMIT + 1
+	return floori(float(pos.x) / float(CHUNK_WIDTH * RESONANT_BIOME_SPAN_CHUNKS))
+
+
+func _resonant_deep_respawn_key(region_index: int, content_id: String) -> String:
+	return "%d:%s" % [region_index, content_id]
+
+
+func _resonant_deep_respawn_blocked(region_index: int, content_id: String) -> bool:
+	var key := _resonant_deep_respawn_key(region_index, content_id)
+	var until_tick := int(resonant_deep_respawn_until_tick.get(key, 0))
+	if until_tick <= creature_tick:
+		resonant_deep_respawn_until_tick.erase(key)
+		return false
+	return true
+
+
+func _record_natural_deep_creature_removal(creature: Dictionary) -> void:
+	if not bool(creature.get("natural", false)):
+		return
+	var pos := Vector2i(floori(float(creature.get("x", 0.0))), floori(float(creature.get("y", 0.0))))
+	var region_index := _resonant_deep_region_index(pos)
+	if region_index == COORD_LIMIT + 1:
+		return
+	var content_id := str(creature.get("content_id", ""))
+	if content_id.is_empty():
+		content_id = BlockDefs.content_id_for_name(str(creature.get("block_name", "")))
+	if content_id.is_empty():
+		return
+	var key := _resonant_deep_respawn_key(region_index, content_id)
+	var deadline := creature_tick + RESONANT_DEEP_RESPAWN_COOLDOWN_TICKS
+	resonant_deep_respawn_until_tick[key] = maxi(int(resonant_deep_respawn_until_tick.get(key, 0)), deadline)
+
+
+func _resonant_deep_creature_count(region_index: int, content_id: String = "") -> int:
+	var count := 0
+	for creature: Dictionary in creatures.values():
+		if bool(creature.get("dead", false)):
+			continue
+		var pos := Vector2i(floori(float(creature.get("x", 0.0))), floori(float(creature.get("y", 0.0))))
+		if _resonant_deep_region_index(pos) != region_index:
+			continue
+		if not content_id.is_empty() and str(creature.get("content_id", "")) != content_id:
+			continue
+		count += 1
+	return count
+
+
+func _resonant_deep_active_creature_count(region_index: int) -> int:
+	var count := 0
+	for creature: Dictionary in creatures.values():
+		if bool(creature.get("dead", false)):
+			continue
+		var pos := Vector2i(floori(float(creature.get("x", 0.0))), floori(float(creature.get("y", 0.0))))
+		if _resonant_deep_region_index(pos) != region_index:
+			continue
+		if _creature_distance_to_active_player(creature) <= CREATURE_DORMANT_DISTANCE:
+			count += 1
+	return count
+
+
+func _prune_redundant_natural_deep_role(region_index: int, role_content_ids: Array) -> bool:
+	var role_counts: Dictionary = {}
+	for content_id in role_content_ids:
+		role_counts[str(content_id)] = _resonant_deep_creature_count(region_index, str(content_id))
+	var redundant: Array[Dictionary] = []
+	for creature_id: String in creatures.keys():
+		var creature: Dictionary = creatures[creature_id]
+		if bool(creature.get("dead", false)) or not bool(creature.get("natural", false)):
+			continue
+		var pos := Vector2i(floori(float(creature.get("x", 0.0))), floori(float(creature.get("y", 0.0))))
+		var content_id := str(creature.get("content_id", ""))
+		if _resonant_deep_region_index(pos) != region_index or int(role_counts.get(content_id, 0)) <= 1:
+			continue
+		if _creature_distance_to_active_player(creature) > CREATURE_DORMANT_DISTANCE:
+			continue
+		redundant.append({"id": creature_id, "distance": _creature_distance_to_active_player(creature)})
+	if redundant.is_empty():
+		return false
+	redundant.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if not is_equal_approx(float(a["distance"]), float(b["distance"])):
+			return float(a["distance"]) > float(b["distance"])
+		return str(a["id"]) < str(b["id"])
+	)
+	var creature_id := str(redundant[0]["id"])
+	_record_natural_deep_creature_removal(creatures[creature_id] as Dictionary)
+	creatures.erase(creature_id)
+	return true
+
+
+func _prune_excess_resonant_deep_creatures(region_index: int) -> void:
+	var natural_creatures: Array[Dictionary] = []
+	var protected_count := 0
+	for creature_id: String in creatures.keys():
+		var creature: Dictionary = creatures[creature_id]
+		if bool(creature.get("dead", false)):
+			continue
+		var pos := Vector2i(floori(float(creature.get("x", 0.0))), floori(float(creature.get("y", 0.0))))
+		if _resonant_deep_region_index(pos) != region_index or _creature_distance_to_active_player(creature) > CREATURE_DORMANT_DISTANCE:
+			continue
+		if not bool(creature.get("natural", false)):
+			protected_count += 1
+			continue
+		natural_creatures.append({"id": creature_id, "distance": _creature_distance_to_active_player(creature)})
+	var natural_limit := maxi(0, RESONANT_DEEP_ACTIVE_CREATURE_CAP - protected_count)
+	if natural_creatures.size() <= natural_limit:
+		return
+	natural_creatures.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if not is_equal_approx(float(a["distance"]), float(b["distance"])):
+			return float(a["distance"]) > float(b["distance"])
+		return str(a["id"]) < str(b["id"])
+	)
+	for index in natural_creatures.size() - natural_limit:
+		var creature_id := str(natural_creatures[index]["id"])
+		if creatures.has(creature_id):
+			_record_natural_deep_creature_removal(creatures[creature_id] as Dictionary)
+			creatures.erase(creature_id)
+
+
+func _resonant_deep_spawn_position(origin: Vector2, definition: Dictionary, region_index: int, radius: int = 14) -> Variant:
+	var center := Vector2i(floori(origin.x), floori(origin.y))
+	for distance in range(radius + 1):
+		for y in range(center.y - distance, center.y + distance + 1):
+			for x in range(center.x - distance, center.x + distance + 1):
+				if distance > 0 and absi(x - center.x) != distance and absi(y - center.y) != distance:
+					continue
+				if _resonant_deep_region_index(Vector2i(x, y)) != region_index:
+					continue
+				var candidate := Vector2(x + 0.5, y + 0.5)
+				if not _creature_position_matches(candidate, definition) or not _creature_has_exit(candidate, definition):
+					continue
+				if not _creature_spawn_clearance_ok(candidate):
+					continue
+				return candidate
+	return null
+
+
 func _creature_distance_to_player(creature: Dictionary) -> float:
 	return _player_creature_position().distance_to(Vector2(float(creature.get("x", 0.0)), float(creature.get("y", 0.0))))
 
@@ -8725,6 +8938,21 @@ func _creature_distance_to_nearest_player(creature: Dictionary) -> float:
 	var position := Vector2(float(creature.get("x", 0.0)), float(creature.get("y", 0.0)))
 	var target := _nearest_player_target(position)
 	return position.distance_to(target.position)
+
+
+func _creature_distance_to_active_player(creature: Dictionary) -> float:
+	var position := Vector2(float(creature.get("x", 0.0)), float(creature.get("y", 0.0)))
+	var nearest_distance := INF
+	for player_position in _active_creature_player_positions():
+		nearest_distance = minf(nearest_distance, position.distance_to(player_position))
+	return nearest_distance
+
+
+func _natural_creature_prune_distance(creature: Dictionary) -> float:
+	var pos := Vector2i(floori(float(creature.get("x", 0.0))), floori(float(creature.get("y", 0.0))))
+	if _resonant_deep_region_index(pos) != COORD_LIMIT + 1:
+		return _creature_distance_to_active_player(creature)
+	return _creature_distance_to_player(creature)
 
 
 func _creature_count_for(block_name: String, local_only: bool = false) -> int:
@@ -8772,7 +9000,7 @@ func _local_natural_creature_count(group: String = "all") -> int:
 func _local_shagot_count() -> int:
 	var count := 0
 	for creature: Dictionary in creatures.values():
-		if bool(creature.get("dead", false)) or _creature_distance_to_player(creature) > CREATURE_LOCAL_CAP_RADIUS:
+		if bool(creature.get("dead", false)) or _creature_distance_to_active_player(creature) > CREATURE_LOCAL_CAP_RADIUS:
 			continue
 		var definition := _creature_definition(str(creature.get("block_name", "")))
 		if "shagot" in (definition.get("tags", []) as Array):
@@ -8785,7 +9013,7 @@ func _prune_excess_local_shagots() -> void:
 	var protected_count := 0
 	for creature_id: String in creatures.keys():
 		var creature: Dictionary = creatures[creature_id]
-		if bool(creature.get("dead", false)) or _creature_distance_to_player(creature) > CREATURE_LOCAL_CAP_RADIUS:
+		if bool(creature.get("dead", false)) or _creature_distance_to_active_player(creature) > CREATURE_LOCAL_CAP_RADIUS:
 			continue
 		var definition := _creature_definition(str(creature.get("block_name", "")))
 		if "shagot" not in (definition.get("tags", []) as Array):
@@ -8795,7 +9023,7 @@ func _prune_excess_local_shagots() -> void:
 			continue
 		local_shagots.append({
 			"id": creature_id,
-			"distance": _creature_distance_to_player(creature),
+			"distance": _creature_distance_to_active_player(creature),
 			"following": str(creature.get("shagot_activity", "")) == "follow",
 		})
 	var natural_limit := maxi(0, SHAGOT_LOCAL_POPULATION_CAP - protected_count)
@@ -8809,7 +9037,10 @@ func _prune_excess_local_shagots() -> void:
 		return float(a["distance"]) > float(b["distance"])
 	)
 	for index in local_shagots.size() - natural_limit:
-		creatures.erase(str(local_shagots[index]["id"]))
+		var creature_id := str(local_shagots[index]["id"])
+		if creatures.has(creature_id):
+			_record_natural_deep_creature_removal(creatures[creature_id] as Dictionary)
+			creatures.erase(creature_id)
 
 
 func _natural_spawn_chance(definition: Dictionary) -> float:
@@ -8874,6 +9105,8 @@ func _try_spawn_creatures(group: String = "all") -> void:
 		var allowed_creatures: Array = ecology.get("creature_content_ids", []) if ecology.get("creature_content_ids", []) is Array else []
 		if not _generated_living_content_allowed(content_id, definition, biome_id, allowed_creatures):
 			continue
+		if not _resonant_deep_natural_spawn_allowed(content_id, pos):
+			continue
 		viable.append({"block_name": block_name, "definition": definition, "position": pos})
 	viable.shuffle()
 	for option: Dictionary in viable:
@@ -8911,10 +9144,11 @@ func _try_spawn_ambient_firefly() -> void:
 func _remove_distant_natural_hostiles() -> void:
 	for creature_id: String in creatures.keys():
 		var creature: Dictionary = creatures[creature_id]
-		if not bool(creature.get("natural", false)) or _creature_distance_to_player(creature) <= CREATURE_DORMANT_DISTANCE:
+		if not bool(creature.get("natural", false)) or _natural_creature_prune_distance(creature) <= CREATURE_DORMANT_DISTANCE:
 			continue
 		var definition := _creature_definition(str(creature.get("block_name", "")))
 		if _creature_spawn_group(definition) == "hostile":
+			_record_natural_deep_creature_removal(creature)
 			creatures.erase(creature_id)
 
 
@@ -8925,13 +9159,17 @@ func _prune_distant_natural_creatures() -> void:
 	var distant: Array[Dictionary] = []
 	for creature_id: String in creatures.keys():
 		var creature: Dictionary = creatures[creature_id]
-		if bool(creature.get("natural", false)) and _creature_distance_to_player(creature) > CREATURE_DORMANT_DISTANCE:
-			distant.append({"id": creature_id, "distance": _creature_distance_to_player(creature)})
+		var distance := _natural_creature_prune_distance(creature)
+		if bool(creature.get("natural", false)) and distance > CREATURE_DORMANT_DISTANCE:
+			distant.append({"id": creature_id, "distance": distance})
 	distant.sort_custom(func(a: Dictionary, b: Dictionary): return float(a["distance"]) > float(b["distance"]))
 	for entry: Dictionary in distant:
 		if excess <= 0:
 			break
-		creatures.erase(str(entry["id"]))
+		var creature_id := str(entry["id"])
+		if creatures.has(creature_id):
+			_record_natural_deep_creature_removal(creatures[creature_id] as Dictionary)
+			creatures.erase(creature_id)
 		excess -= 1
 
 
@@ -9659,7 +9897,7 @@ func _shagot_floor_y(x: int) -> int:
 	return _resonant_floor_y(x)
 
 
-func _shagot_safe_ground_position(origin_x: int, definition: Dictionary, radius: int = 12) -> Variant:
+func _shagot_safe_ground_position(origin_x: int, definition: Dictionary, radius: int = 12, require_spawn_clearance: bool = false, required_region_index: int = -1) -> Variant:
 	for distance in range(radius + 1):
 		var offsets: Array = [0] if distance == 0 else [-distance, distance]
 		for raw_offset_x in offsets:
@@ -9671,7 +9909,11 @@ func _shagot_safe_ground_position(origin_x: int, definition: Dictionary, radius:
 			if not _is_shagot_biome(_ecology_biome_at(ground_spawn)):
 				continue
 			var candidate := Vector2(ground_spawn) + Vector2.ONE * 0.5
+			if required_region_index >= 0 and _resonant_deep_region_index(ground_spawn) != required_region_index:
+				continue
 			if _ground_creature_position_matches(candidate, definition):
+				if require_spawn_clearance and not _creature_spawn_clearance_ok(candidate):
+					continue
 				return candidate
 	return null
 
@@ -10263,13 +10505,27 @@ func _ensure_resonant_deep_population() -> void:
 	# Raiders beside the authored Worksite and Lockworks encounters.
 	if world_mode == WORLD_MODE_CHALLENGE:
 		return
-	var player_tile := _player_center_tile()
-	var biome_id := _ecology_biome_at(player_tile)
-	if not _is_shagot_biome(biome_id):
-		_ensure_resonant_deep_wildlife(player_tile, biome_id)
-		return
-	var player_chunk := floori(float(player_tile.x) / float(CHUNK_WIDTH))
-	var region_index := floori(float(player_chunk) / float(RESONANT_BIOME_SPAN_CHUNKS))
+	var region_players: Dictionary = {}
+	for player_position in _active_creature_player_positions():
+		var player_tile := Vector2i(floori(player_position.x), floori(player_position.y))
+		var region_index := _resonant_deep_region_index(player_tile)
+		if region_index == COORD_LIMIT + 1 or region_players.has(region_index):
+			continue
+		region_players[region_index] = player_tile
+	var region_indices: Array = region_players.keys()
+	region_indices.sort()
+	for raw_region_index in region_indices:
+		var region_index := int(raw_region_index)
+		var player_tile: Vector2i = region_players[region_index]
+		_prune_excess_resonant_deep_creatures(region_index)
+		var biome_id := _ecology_biome_at(player_tile)
+		if _is_shagot_biome(biome_id):
+			_ensure_resonant_deep_shagots(region_index)
+		elif _resonant_deep_active_creature_count(region_index) < RESONANT_DEEP_ACTIVE_CREATURE_CAP:
+			_ensure_resonant_deep_wildlife(player_tile, biome_id, region_index)
+
+
+func _ensure_resonant_deep_shagots(region_index: int) -> void:
 	var region_start_x := region_index * RESONANT_BIOME_SPAN_CHUNKS * CHUNK_WIDTH
 	var region_center_x := region_start_x + RESONANT_BIOME_SPAN_CHUNKS * CHUNK_WIDTH / 2
 	var role_specs: Array[Dictionary] = [
@@ -10277,9 +10533,10 @@ func _ensure_resonant_deep_population() -> void:
 		{"content_id": "core.creature.shagot_guide", "minimum": 1, "offsets": [17]},
 		{"content_id": "core.creature.shagot_raider", "minimum": 1, "offsets": [-21]},
 	]
+	var role_content_ids: Array = role_specs.map(func(spec: Dictionary) -> String: return str(spec.get("content_id", "")))
 	for spec: Dictionary in role_specs:
 		var content_id := str(spec.get("content_id", ""))
-		var nearby := 0
+		var nearby := _resonant_deep_creature_count(region_index, content_id)
 		for creature: Dictionary in creatures.values():
 			if str(creature.get("content_id", "")) != content_id:
 				continue
@@ -10288,10 +10545,8 @@ func _ensure_resonant_deep_population() -> void:
 			# keep their exact state and never receive an infinite refill.
 			if int(creature.get("built_blocks", 0)) == 0 and int(creature.get("carried_materials", 0)) == 0:
 				creature["carried_materials"] = 4
-			if Vector2(float(creature.get("x", 0.0)), float(creature.get("y", 0.0))).distance_to(Vector2(player_tile)) <= 42.0:
-				nearby += 1
 		var missing := maxi(0, int(spec.get("minimum", 0)) - nearby)
-		if missing <= 0:
+		if missing <= 0 or _resonant_deep_respawn_blocked(region_index, content_id):
 			continue
 		var block_name := BlockDefs.name_for_content_id(content_id)
 		if block_name.is_empty():
@@ -10299,8 +10554,11 @@ func _ensure_resonant_deep_population() -> void:
 		var definition := _creature_definition(block_name)
 		var offsets: Array = spec.get("offsets", []) if spec.get("offsets", []) is Array else []
 		for index in mini(missing, offsets.size()):
+			if _resonant_deep_active_creature_count(region_index) >= RESONANT_DEEP_ACTIVE_CREATURE_CAP:
+				if not _prune_redundant_natural_deep_role(region_index, role_content_ids):
+					break
 			var spawn_x := region_center_x + int(offsets[index])
-			var safe_position: Variant = _shagot_safe_ground_position(spawn_x, definition)
+			var safe_position: Variant = _shagot_safe_ground_position(spawn_x, definition, 12, true, region_index)
 			if not safe_position is Vector2:
 				continue
 			var creature_id := spawn_creature(block_name, safe_position as Vector2, true)
@@ -10310,7 +10568,7 @@ func _ensure_resonant_deep_population() -> void:
 				(creatures[creature_id] as Dictionary)["work_cooldown"] = randi_range(20, 70)
 
 
-func _ensure_resonant_deep_wildlife(player_tile: Vector2i, biome_id: String) -> void:
+func _ensure_resonant_deep_wildlife(player_tile: Vector2i, biome_id: String, region_index: int) -> void:
 	if player_tile.y < RESONANT_DEEP_TOP_Y:
 		return
 	var biome := _biome_definition(biome_id)
@@ -10318,8 +10576,6 @@ func _ensure_resonant_deep_wildlife(player_tile: Vector2i, biome_id: String) -> 
 	var available_ids: Array = ecology.get("creature_content_ids", []) if ecology.get("creature_content_ids", []) is Array else []
 	if available_ids.is_empty():
 		return
-	var player_chunk := floori(float(player_tile.x) / float(CHUNK_WIDTH))
-	var region_index := floori(float(player_chunk) / float(RESONANT_BIOME_SPAN_CHUNKS))
 	var region_start_x := region_index * RESONANT_BIOME_SPAN_CHUNKS * CHUNK_WIDTH
 	var region_center_x := region_start_x + RESONANT_BIOME_SPAN_CHUNKS * CHUNK_WIDTH / 2
 	var content_id := str(RESONANT_DEEP_WILDLIFE.get(biome_id, available_ids[0]))
@@ -10328,19 +10584,20 @@ func _ensure_resonant_deep_wildlife(player_tile: Vector2i, biome_id: String) -> 
 	var block_name := BlockDefs.name_for_content_id(content_id)
 	if block_name.is_empty():
 		return
-	var nearby := 0
-	for creature: Dictionary in creatures.values():
-		if str(creature.get("content_id", "")) == content_id and Vector2(float(creature.get("x", 0.0)), float(creature.get("y", 0.0))).distance_to(Vector2(player_tile)) <= 42.0:
-			nearby += 1
+	var nearby := _resonant_deep_creature_count(region_index, content_id)
 	var definition := _creature_definition(block_name)
 	var locomotion_type := str((definition.get("locomotion", {}) as Dictionary).get("type", "walking"))
 	var offsets := [-15, 13]
 	for index in maxi(0, 2 - nearby):
+		if _resonant_deep_active_creature_count(region_index) >= RESONANT_DEEP_ACTIVE_CREATURE_CAP:
+			break
+		if _resonant_deep_respawn_blocked(region_index, content_id):
+			break
 		var spawn_x := region_center_x + int(offsets[index])
 		var spawn_y := _resonant_floor_y(spawn_x) - 1
 		if locomotion_type == "flying":
 			spawn_y -= 4 + index
-		var safe_position: Variant = _nearest_safe_creature_position(Vector2(spawn_x + 0.5, spawn_y + 0.5), definition, 7)
+		var safe_position: Variant = _resonant_deep_spawn_position(Vector2(spawn_x + 0.5, spawn_y + 0.5), definition, region_index)
 		if safe_position is Vector2:
 			spawn_creature(block_name, safe_position as Vector2, true)
 
@@ -10366,6 +10623,7 @@ func tick_creatures() -> void:
 		_tick_creature(creature)
 	for creature_id: String in creatures.keys():
 		if bool((creatures[creature_id] as Dictionary).get("dead", false)):
+			_record_natural_deep_creature_removal(creatures[creature_id] as Dictionary)
 			creatures.erase(creature_id)
 	if creature_tick % CREATURE_BREED_CHECK_EVERY == 0:
 		_try_breed_creatures()
@@ -10701,6 +10959,7 @@ func hit_creature(creature_id: String, damage: int = 1) -> bool:
 		creature["flee_ticks"] = 60 * 10
 	if int(creature["health"]) <= 0:
 		var block_name := str(creature.get("block_name", ""))
+		_record_natural_deep_creature_removal(creature)
 		creatures.erase(creature_id)
 		if "sapient" not in (definition.get("tags", []) as Array):
 			give_to_inventory(block_name, 1)
