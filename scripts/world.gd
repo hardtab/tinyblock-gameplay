@@ -43,6 +43,7 @@ const MAX_NOURISHMENT := 100
 const COMBAT_REACH := BlockDefs.TILE * 2.0
 const COMBAT_ATTACK_COOLDOWN_MSEC := 500
 const FLINT_FROM_GRAVEL_CHANCE := 0.10
+const CREATURE_STRING_DROP_CHANCE := 0.50
 const STRUCTURE_CHEST_BOW_CHANCE := 0.085
 const NOURISHMENT_DRAIN_SECONDS := 12.0
 const NOURISHMENT_RECOVERY_THRESHOLD := 60
@@ -10948,6 +10949,24 @@ func creature_at_tile(tx: int, ty: int) -> String:
 	return ""
 
 
+func _creature_can_yield_string(definition: Dictionary) -> bool:
+	if definition.is_empty():
+		return false
+	var locomotion: Dictionary = definition.get("locomotion", {}) if definition.get("locomotion", {}) is Dictionary else {}
+	var spawning: Dictionary = definition.get("spawning", {}) if definition.get("spawning", {}) is Dictionary else {}
+	var morphology := BlockDefs.creature_morphology(definition)
+	var limbs: Dictionary = morphology.get("limbs", {}) if morphology.get("limbs", {}) is Dictionary else {}
+	var locomotion_type := str(locomotion.get("type", ""))
+	var is_crawler := locomotion_type == "crawling" or (locomotion_type == "walking" and str(morphology.get("body_plan", "")) == "crawler")
+	return is_crawler and str(spawning.get("activity_period", "")) == "night" and int(limbs.get("count", 0)) > 4
+
+
+func _creature_string_drop_count(definition: Dictionary) -> int:
+	if not _creature_can_yield_string(definition) or randf() >= CREATURE_STRING_DROP_CHANCE:
+		return 0
+	return randi_range(1, 2)
+
+
 func hit_creature(creature_id: String, damage: int = 1) -> bool:
 	if not creatures.has(creature_id):
 		return false
@@ -10966,10 +10985,9 @@ func hit_creature(creature_id: String, damage: int = 1) -> bool:
 			var tags: Array = definition.get("tags", []) if definition.get("tags", []) is Array else []
 			var visual: Dictionary = definition.get("visual", {}) if definition.get("visual", {}) is Dictionary else {}
 			var locomotion: Dictionary = definition.get("locomotion", {}) if definition.get("locomotion", {}) is Dictionary else {}
-			if "spider" in tags or "skitter" in block_name:
-				var string_count := randi_range(0, 2)
-				if string_count > 0:
-					give_to_inventory("string", string_count)
+			var string_count := _creature_string_drop_count(definition)
+			if string_count > 0:
+				give_to_inventory("string", string_count)
 			if "bird" in tags or "penguin" in block_name or str(visual.get("shape", "")) == "winged" or str(locomotion.get("type", "")) == "flying":
 				var feather_count := randi_range(0, 2)
 				if feather_count > 0:
