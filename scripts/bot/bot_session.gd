@@ -35,6 +35,10 @@ const STATE_SYNCING := "SYNCING"
 const STATE_PLAYING := "PLAYING"
 const STATE_LEAVING := "LEAVING"
 
+## One guest-auth request plus one join-ticket request can each use three
+## 20-second attempts. Leave room for those bounded requests and the initial
+## WebSocket handshake, but never leave a selected world stuck in JOINING.
+const DEFAULT_JOIN_TIMEOUT_MSEC := 150_000
 const DEFAULT_SYNC_TIMEOUT_MSEC := 45_000
 const INITIAL_INVENTORY_ECHO_RETRY_MSEC := 2_000
 const INITIAL_INVENTORY_ECHO_TIMEOUT_MSEC := 30_000
@@ -102,6 +106,7 @@ var observation_radius := DEFAULT_OBSERVATION_RADIUS
 var human_player_count := 0
 var empty_since_msec := -1
 var sync_complete := false
+var _join_started_msec := -1
 var _sync_started_msec := -1
 var _empty_emitted := false
 var _left_emitted := false
@@ -523,11 +528,13 @@ func join_session(record: Dictionary) -> void:
 	_equipment_slots = {"hand": "", "feet": ""}
 	session_id = str(record.get("session_id", ""))
 	world_id = str(record.get("world_id", ""))
+	_join_started_msec = Time.get_ticks_msec()
 	_set_state(STATE_JOINING)
 	if backend == null or not backend.has_method("join_multiplayer_session"):
 		_emit_left("backend_unavailable")
 		return
 	_join_in_flight = true
+	_log_join_phase("backend_request", true)
 	var response: Variant = await backend.call(
 		"join_multiplayer_session",
 		str(record.get("session_id", "")),
@@ -537,7 +544,9 @@ func join_session(record: Dictionary) -> void:
 	_join_in_flight = false
 	if state == STATE_LEAVING or _left_emitted:
 		return
-	if not response is Dictionary or not bool((response as Dictionary).get("ok", false)):
+	var response_ok := response is Dictionary and bool((response as Dictionary).get("ok", false))
+	_log_join_phase("backend_response", response_ok)
+	if not response_ok:
 		var failure := response as Dictionary if response is Dictionary else {}
 		structured_log.emit(join_failure_log_event(record, failure))
 		_emit_left(str(failure.get("error", "join_failed")))
@@ -596,6 +605,7 @@ func _connect_join_response(response: Dictionary, record: Dictionary) -> bool:
 		bool(body.get("relay_fallback_enabled", false)),
 		protocol_version,
 	)
+	_log_join_phase("websocket_connect", int(error) == OK)
 	if int(error) != OK:
 		_emit_left("connect_error_%d" % int(error))
 		return false
@@ -639,11 +649,14 @@ func handle_message(message: Dictionary) -> void:
 			leave("legacy_client")
 			return
 		if state in [STATE_JOINING, STATE_SYNCING]:
+			if state == STATE_JOINING:
+				_begin_snapshot_sync()
+			else:
+				# A reconnected data channel starts a fresh exchange without
+				# extending the existing hard sync deadline.
+				_snapshot_retry_count = 0
+				_snapshot_retry_at_msec = Time.get_ticks_msec() + SNAPSHOT_RETRY_INTERVAL_MSEC
 			_send_snapshot_request()
-			# A fresh connected event starts a new exchange; reset the retry
-			# cadence so the first resend happens only after the normal interval.
-			_snapshot_retry_count = 0
-			_snapshot_retry_at_msec = Time.get_ticks_msec() + SNAPSHOT_RETRY_INTERVAL_MSEC
 		return
 	if kind == "control" and message_type == "player_left":
 		var left_id := str(message.get("player_id", ""))
@@ -763,6 +776,9 @@ func _process(delta: float) -> void:
 		var transfer: Dictionary = _region_incoming_transfers[transfer_id]
 		if now_msec - int(transfer.get("started_at_msec", now_msec)) > 30_000:
 			_region_incoming_transfers.erase(transfer_id)
+	if state == STATE_JOINING:
+		_check_join_timeout(now_msec)
+		return
 	if state == STATE_SYNCING:
 		if _sync_started_msec >= 0 and now_msec - _sync_started_msec >= DEFAULT_SYNC_TIMEOUT_MSEC:
 			_emit_left("snapshot_timeout")
@@ -870,6 +886,14 @@ func _process(delta: float) -> void:
 	_check_empty_world_grace(now_msec)
 
 
+func _check_join_timeout(now_msec: int) -> bool:
+	if state != STATE_JOINING or _join_started_msec < 0 or now_msec - _join_started_msec < DEFAULT_JOIN_TIMEOUT_MSEC:
+		return false
+	_log_join_phase("join_timeout", false)
+	_emit_left("join_timeout")
+	return true
+
+
 func _check_empty_world_grace(now_msec: int) -> void:
 	if not _empty_emitted and Perception.empty_world_should_leave(sync_complete, human_player_count, empty_since_msec, now_msec, empty_grace_msec):
 		_empty_emitted = true
@@ -891,17 +915,26 @@ func _on_network_connected(role: String, player_id: String, network_session_id: 
 	if state != STATE_JOINING and state != STATE_SYNCING:
 		return
 	if role != "guest":
+		_log_join_phase("websocket_connected", false)
 		_emit_left("unexpected_role")
 		return
+	_log_join_phase("websocket_connected", true)
 	own_player_id = player_id
 	_host_player_id = _host_id_from_network()
 	if not network_session_id.is_empty():
 		session_id = network_session_id
+
+
+func _begin_snapshot_sync() -> void:
+	if state != STATE_JOINING:
+		return
+	# The WebSocket authentication signal comes before the guest RTC channel is
+	# usable. Keep the bounded join deadline until the subsequent control/connected
+	# message confirms the data channel is ready for the snapshot request.
+	_join_started_msec = -1
 	_set_state(STATE_SYNCING)
 	_sync_started_msec = Time.get_ticks_msec()
 	_snapshot_retry_count = 0
-	# The shared client suppresses a second `connected` event on RTC reconnect,
-	# so the bot arms its own retry cadence instead of trusting that message.
 	_snapshot_retry_at_msec = _sync_started_msec + SNAPSHOT_RETRY_INTERVAL_MSEC
 	sync_started.emit(session_id)
 
@@ -4771,6 +4804,8 @@ func _prepare_snapshot(payload: Dictionary) -> void:
 	var total := int(payload.get("total", 0))
 	if transfer_id.is_empty() or total <= 0 or total > 1024:
 		return
+	if _snapshot_transfer_id.is_empty() or _snapshot_transfer_id != transfer_id or _snapshot_expected_chunks != total:
+		_log_join_phase("snapshot_started", true)
 	if _snapshot_transfer_id != transfer_id or _snapshot_expected_chunks != total:
 		_snapshot_transfer_id = transfer_id
 		_snapshot_expected_chunks = total
@@ -4782,10 +4817,24 @@ func _prepare_snapshot(payload: Dictionary) -> void:
 		_snapshot_retry_at_msec = Time.get_ticks_msec() + SNAPSHOT_RETRY_INTERVAL_MSEC
 
 
-func _send_snapshot_request() -> void:
+func _send_snapshot_request() -> bool:
 	if network_client == null or not network_client.has_method("send_command"):
-		return
-	network_client.call("send_command", "snapshot_request", {})
+		_log_join_phase("snapshot_request", false)
+		return false
+	var sent := bool(network_client.call("send_command", "snapshot_request", {}))
+	_log_join_phase("snapshot_request", sent)
+	return sent
+
+
+func _log_join_phase(phase: String, ok: bool) -> void:
+	# These diagnostics deliberately exclude world/session ids, player ids,
+	# tickets, URLs, and credentials so they are safe in the bot's normal logs.
+	structured_log.emit({
+		"event": "session_join_phase",
+		"phase": phase,
+		"ok": ok,
+		"at_msec": Time.get_ticks_msec(),
+	})
 
 
 func _retry_snapshot_sync(now_msec: int) -> void:
@@ -4994,6 +5043,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_record_world_state_achievements()
 	var initial_player_biomes: Dictionary = snapshot.get("player_biomes", {}) if snapshot.get("player_biomes", {}) is Dictionary else {}
 	_record_authoritative_location_achievements(str(initial_player_biomes.get(own_player_id, "")), local_state)
+	_log_join_phase("snapshot_applied", true)
 	session_ready.emit(session_id, own_player_id)
 
 
@@ -8119,6 +8169,7 @@ func _emit_left(reason: String) -> void:
 	if _left_emitted:
 		return
 	_left_emitted = true
+	_join_started_msec = -1
 	_set_state(STATE_LEAVING)
 	_disconnect_requested = true
 	if network_client != null and network_client.has_method("disconnect_from_session"):
