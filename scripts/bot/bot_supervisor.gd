@@ -71,6 +71,10 @@ var enabled := true
 var kill_switch := false
 var response_enabled := true
 var allow_world_ids: PackedStringArray = []
+## The BareMetal bot keeps its fixed managed-community allowlist, but may also
+## join compatible public peer-hosted sessions. This remains opt-in so other
+## deployments preserve their existing world scope.
+var allow_public_p2p_worlds := false
 var ai_options: Dictionary = {}
 var strip_progression_gear := false
 var recently_visited: Dictionary = {}
@@ -105,6 +109,7 @@ func configure(backend_adapter: Object = null, multiplayer_adapter: Object = nul
 	enabled = bool(options.get("enabled", enabled))
 	kill_switch = bool(options.get("kill_switch", kill_switch))
 	response_enabled = bool(options.get("response_enabled", response_enabled))
+	allow_public_p2p_worlds = bool(options.get("allow_public_p2p_worlds", allow_public_p2p_worlds))
 	strip_progression_gear = bool(options.get("strip_progression_gear", strip_progression_gear))
 	blocked_worlds_path = str(options.get("blocked_worlds_path", blocked_worlds_path))
 	if bool(options.get("load_blocked_worlds", true)) and not _blocked_worlds_loaded:
@@ -120,6 +125,11 @@ func start() -> void:
 	if not enabled or kill_switch:
 		_log("disabled", {})
 		return
+	_log("discovery_scope", {
+		"allowlist_active": not allow_world_ids.is_empty(),
+		"public_p2p_enabled": allow_public_p2p_worlds,
+		"managed_world_count": allow_world_ids.size(),
+	})
 	_retry_attempt = 0
 	_set_state(STATE_DISCOVERING)
 	_next_discovery_msec = 0
@@ -172,8 +182,8 @@ func _discover() -> void:
 	var sessions: Array = raw_sessions as Array if raw_sessions is Array else []
 	var discovery_now := Time.get_ticks_msec()
 	var candidates := filter_public_sessions(sessions, protocol_version, discovery_now, recently_visited)
-	if not allow_world_ids.is_empty():
-		candidates = candidates.filter(func(entry: Dictionary): return str(entry.get("world_id", "")) in allow_world_ids)
+	if _world_scope_is_restricted():
+		candidates = candidates.filter(func(entry: Dictionary): return _session_allowed_by_world_scope(entry))
 	if candidates.is_empty():
 		_log("discovery_filter_summary", session_filter_summary(
 			sessions,
@@ -181,6 +191,7 @@ func _discover() -> void:
 			discovery_now,
 			recently_visited,
 			allow_world_ids,
+			allow_public_p2p_worlds,
 		))
 		_schedule_retry("no_eligible_world")
 		return
@@ -353,6 +364,7 @@ func session_filter_summary(
 	now_msec: int = 0,
 	recently_visited_sessions: Dictionary = {},
 	allowed_world_ids: PackedStringArray = PackedStringArray(),
+	allow_public_p2p: bool = false,
 ) -> Dictionary:
 	var counts: Dictionary = {}
 	var eligible_count := 0
@@ -361,7 +373,7 @@ func session_filter_summary(
 		if raw_session is Dictionary:
 			var entry := raw_session as Dictionary
 			reason = _session_ineligibility_reason(entry, expected_protocol_version, now_msec, recently_visited_sessions)
-			if reason.is_empty() and not allowed_world_ids.is_empty() and str(entry.get("world_id", "")) not in allowed_world_ids:
+			if reason.is_empty() and _world_scope_is_restricted_for(allowed_world_ids, allow_public_p2p) and not _session_allowed_by_world_scope_for(entry, allowed_world_ids, allow_public_p2p):
 				reason = "not_allowlisted"
 		if reason.is_empty():
 			eligible_count += 1
@@ -372,7 +384,43 @@ func session_filter_summary(
 		"eligible_count": eligible_count,
 		"rejected_by_reason": counts,
 		"allowlist_active": not allowed_world_ids.is_empty(),
+		"public_p2p_enabled": allow_public_p2p,
 	}
+
+
+func _world_scope_is_restricted() -> bool:
+	return _world_scope_is_restricted_for(allow_world_ids, allow_public_p2p_worlds)
+
+
+func _world_scope_is_restricted_for(allowed_world_ids: PackedStringArray, allow_public_p2p: bool) -> bool:
+	return not allowed_world_ids.is_empty() or allow_public_p2p
+
+
+func _session_allowed_by_world_scope(entry: Dictionary) -> bool:
+	return _session_allowed_by_world_scope_for(entry, allow_world_ids, allow_public_p2p_worlds)
+
+
+func _session_allowed_by_world_scope_for(
+	entry: Dictionary,
+	allowed_world_ids: PackedStringArray,
+	allow_public_p2p: bool,
+) -> bool:
+	var world_id := str(entry.get("world_id", ""))
+	var is_p2p := not bool(entry.get("dedicated_server", false))
+	# The managed IDs are already hosted by our headless community servers.
+	# Never select a peer-hosted session that reuses one of those IDs.
+	if is_p2p and world_id in MANAGED_COMMUNITY_WORLD_IDS:
+		return false
+	if world_id in allowed_world_ids:
+		return true
+	if not allow_public_p2p:
+		return allowed_world_ids.is_empty()
+	return (
+		not world_id.is_empty()
+		and str(entry.get("access_mode", "public")).to_lower() == "public"
+		and is_p2p
+		and not bool(entry.get("official", entry.get("is_official", false)))
+	)
 
 
 func _session_ineligibility_reason(
