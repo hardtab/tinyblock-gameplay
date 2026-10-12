@@ -174,7 +174,8 @@ func _discover() -> void:
 	if not enabled or kill_switch:
 		return
 	if not response is Dictionary or not bool((response as Dictionary).get("ok", false)):
-		_schedule_retry(str((response as Dictionary).get("error", "discovery_failed")) if response is Dictionary else "discovery_failed")
+		var error := str((response as Dictionary).get("error", "discovery_failed")) if response is Dictionary else "discovery_failed"
+		_schedule_retry(error, _discovery_failure_diagnostics(response))
 		return
 	_record_successful_listing()
 	var body: Dictionary = (response as Dictionary).get("body", {}) if (response as Dictionary).get("body", {}) is Dictionary else {}
@@ -307,7 +308,7 @@ func _on_session_decision(event: Dictionary) -> void:
 	structured_log.emit(entry)
 
 
-func _schedule_retry(reason: String) -> void:
+func _schedule_retry(reason: String, diagnostics: Dictionary = {}) -> void:
 	_retry_attempt += 1
 	# A public world can appear immediately after a failed listing.  Do not let
 	# the generic network backoff (which may reach five minutes) make the bot
@@ -319,7 +320,26 @@ func _schedule_retry(reason: String) -> void:
 	var delay := retry_delay_seconds(_retry_attempt, _rng.randf(), retry_max)
 	_next_discovery_msec = Time.get_ticks_msec() + int(delay * 1000.0)
 	_set_state(STATE_DISCOVERING)
-	_log("discovery_retry", {"attempt": _retry_attempt, "delay_seconds": delay, "reason": reason})
+	var event := {"attempt": _retry_attempt, "delay_seconds": delay, "reason": reason}
+	# Only numeric transport metadata is safe to persist. Never forward backend
+	# response bodies, URLs, headers, session IDs, or credentials into logs.
+	for key in ["transport_result", "http_status"]:
+		if diagnostics.has(key):
+			event[key] = int(diagnostics[key])
+	_log("discovery_retry", event)
+
+
+func _discovery_failure_diagnostics(response: Variant) -> Dictionary:
+	if not response is Dictionary:
+		return {}
+	var result: Dictionary = response as Dictionary
+	var diagnostics: Dictionary = {}
+	if str(result.get("error", "")) == "transport_error" and result.has("code"):
+		diagnostics["transport_result"] = int(result.get("code", -1))
+	var http_status := int(result.get("status_code", 0))
+	if http_status > 0:
+		diagnostics["http_status"] = http_status
+	return diagnostics
 
 
 func _record_successful_listing() -> void:
