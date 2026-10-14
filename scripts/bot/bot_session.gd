@@ -990,6 +990,194 @@ func _should_settle_airborne(self_state: Dictionary, origin: Vector2) -> bool:
 	)
 
 
+## A host correction can leave a fleeing bot in a free fall with no verified
+## jump/drop transition. Keep the normal passive settle unless the current
+## no-input trajectory is fully known and intersects harmful fluid; only then
+## consider a directional trajectory that lands on known dry support.
+func _verified_airborne_hazard_fall_escape(
+	self_state: Dictionary,
+	origin: Vector2,
+	threat: Vector2,
+	require_threat_distance_gain: bool,
+) -> Dictionary:
+	if (
+		_terrain_tiles.is_empty()
+		or not _should_settle_airborne(self_state, origin)
+		or _local_touches_harmful_fluid(self_state)
+		or float(self_state.get("vy", 0.0)) < -0.05
+		or not _known_harmful_fluid_in_fall_envelope(self_state)
+	):
+		return {}
+	var passive := _simulate_airborne_fall(self_state, 0.0)
+	if not bool(passive.get("known", false)) or not bool(passive.get("touches_harmful_fluid", false)):
+		return {}
+	var origin_distance := origin.distance_to(threat)
+	var best: Dictionary = {}
+	var best_score := -INF
+	for direction in [-1.0, 1.0]:
+		var trajectory := _simulate_airborne_fall(self_state, direction)
+		if (
+			not bool(trajectory.get("known", false))
+			or bool(trajectory.get("touches_harmful_fluid", false))
+			or not bool(trajectory.get("safe_landing", false))
+		):
+			continue
+		var landing: Vector2 = trajectory.get("landing_position", origin)
+		var threat_distance := landing.distance_to(threat)
+		if require_threat_distance_gain and threat_distance <= origin_distance + 8.0:
+			continue
+		var support_tile: Vector2i = trajectory.get("support_tile", Vector2i.ZERO)
+		var clearance := _nearest_harmful_fluid_clearance(landing, self_state)
+		var score := threat_distance + minf(clearance, float(BlockDefs.TILE) * 8.0) * 0.5
+		if score <= best_score:
+			continue
+		best_score = score
+		best = {
+			"direction": direction,
+			"position": landing,
+			"support_tile": support_tile,
+			"kind": "verified_hazard_fall",
+		}
+	return best
+
+
+## Avoid running three fall simulations for every airborne flee tick. The
+## passive controller has no horizontal input, so a known hazard must be in
+## the current vertical corridor (with a small margin for residual drift).
+func _known_harmful_fluid_in_fall_envelope(self_state: Dictionary) -> bool:
+	var x := float(self_state.get("x", 0.0))
+	var y := float(self_state.get("y", 0.0))
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var margin := float(BlockDefs.TILE) * 2.0
+	var left := floori((x - margin) / float(BlockDefs.TILE))
+	var right := floori((x + width + margin - 0.001) / float(BlockDefs.TILE))
+	var first_row := floori((y + height) / float(BlockDefs.TILE))
+	var last_row := floori((y + height + LOCAL_MAX_FALL_SPEED * 90.0) / float(BlockDefs.TILE))
+	for tile_y in range(first_row, last_row + 1):
+		for tile_x in range(left, right + 1):
+			if _terrain_is_lava_at(tile_x, tile_y) and _terrain_cell_is_known(tile_x, tile_y):
+				return true
+	return false
+
+
+## Predict a bounded no-jump fall with the same local gravity, horizontal
+## control, collision, and fluid rules as `_advance_local_physics`. The result
+## is accepted only when every occupied/support cell was known throughout the
+## path; missing terrain is never treated as proof of a safe landing.
+func _simulate_airborne_fall(self_state: Dictionary, direction: float) -> Dictionary:
+	var x := float(self_state.get("x", 0.0))
+	var y := float(self_state.get("y", 0.0))
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var vx := float(self_state.get("vx", 0.0))
+	var vy := float(self_state.get("vy", 0.0))
+	var tree_ghost := bool(self_state.get("tree_ghost", false)) or bool(self_state.get("climbing", false))
+	# Tree traversal changes local collision semantics during the real physics
+	# tick. Refuse to certify a trajectory in that mode until its transition can
+	# be mirrored exactly; a false negative only preserves passive settling.
+	if tree_ghost or _climb_active or _local_overlaps_climbable(self_state):
+		return {"known": false}
+	var movement_multiplier := _local_equipment_effect_multiplier("movement_speed_multiplier", 1.0, 1.6)
+	if not _airborne_fall_region_is_known(x, y, width, height):
+		return {"known": false}
+	if _position_touches_harmful_fluid(x, y, width, height):
+		return {"known": true, "touches_harmful_fluid": true}
+	for _frame in range(90):
+		var fluid := _local_fluid_physics(x, y, width, height)
+		var support := _local_ground_support(x, y, width, height, tree_ghost)
+		var surface := _local_surface_physics_for_support(support)
+		var in_fluid := not fluid.is_empty()
+		var gravity := BlockDefs.GRAVITY * float(fluid.get("gravity_multiplier", 1.0))
+		var target_vx := direction * BlockDefs.MOVE * float(surface.get("movement_speed_multiplier", 1.0)) * movement_multiplier
+		if in_fluid:
+			target_vx *= float(fluid.get("move_speed_multiplier", 1.0))
+			vx = target_vx
+		elif not support.is_empty():
+			vx = lerpf(vx, target_vx, clampf(float(surface.get("friction", 1.0)), 0.0, 1.0))
+		else:
+			vx = target_vx
+		vy = minf(float(fluid.get("max_fall", LOCAL_MAX_FALL_SPEED)), vy + gravity)
+		var substeps := maxi(1, int(ceil(maxf(absf(vx), absf(vy)) / 6.0)))
+		var substep := 1.0 / float(substeps)
+		var on_ground := false
+		for _substep_index in substeps:
+			if not _airborne_fall_region_is_known(x, y, width, height):
+				return {"known": false}
+			var next_x := x + vx * substep
+			var current_hazard := _position_touches_harmful_fluid(x, y, width, height)
+			if not current_hazard and _position_touches_harmful_fluid(next_x, y, width, height):
+				# Match the live local controller's guard against walking into a
+				# newly overlapping hazard while keeping the route proof dry.
+				vx = 0.0
+				continue
+			else:
+				var horizontal_hit := _local_collision(next_x, y, width, height, tree_ghost)
+				if horizontal_hit.is_empty():
+					x = next_x
+				else:
+					var hit_tile := Vector2i(
+						floori(float(horizontal_hit.get("bx", 0.0)) / float(BlockDefs.TILE)),
+						floori(float(horizontal_hit.get("by", 0.0)) / float(BlockDefs.TILE)),
+					)
+					if _terrain_climbable_at(hit_tile.x, hit_tile.y):
+						return {"known": false}
+					x = float(horizontal_hit.get("bx", x)) - width if vx > 0.0 else float(horizontal_hit.get("bx", x)) + float(BlockDefs.TILE)
+					vx = 0.0
+			var next_y := y + vy * substep
+			var vertical_hit := _local_collision(x, next_y, width, height, tree_ghost)
+			if vertical_hit.is_empty():
+				y = next_y
+				on_ground = is_zero_approx(vy) and not _local_collision(x, y + 1.5, width, height, tree_ghost).is_empty()
+			else:
+				var hit_tile := Vector2i(
+					floori(float(vertical_hit.get("bx", 0.0)) / float(BlockDefs.TILE)),
+					floori(float(vertical_hit.get("by", 0.0)) / float(BlockDefs.TILE)),
+				)
+				if _terrain_climbable_at(hit_tile.x, hit_tile.y):
+					return {"known": false}
+				var hit_y := float(vertical_hit.get("by", y))
+				if vy >= 0.0:
+					y = hit_y - height
+					on_ground = true
+				else:
+					y = hit_y + float(BlockDefs.TILE)
+					on_ground = false
+				vy = 0.0
+			if not _airborne_fall_region_is_known(x, y, width, height):
+				return {"known": false}
+			if _position_touches_harmful_fluid(x, y, width, height):
+				return {"known": true, "touches_harmful_fluid": true}
+			if on_ground:
+				var landing_state := self_state.duplicate(true)
+				landing_state["x"] = x
+				landing_state["y"] = y
+				landing_state["on_ground"] = true
+				var support_tile := _route_origin_support_tile(Vector2(x, y), landing_state)
+				var safe_landing := _terrain_standable_tile(support_tile)
+				return {
+					"known": true,
+					"touches_harmful_fluid": false,
+					"safe_landing": safe_landing,
+					"landing_position": Vector2(x, y),
+					"support_tile": support_tile,
+				}
+	return {"known": true, "touches_harmful_fluid": false, "safe_landing": false}
+
+
+func _airborne_fall_region_is_known(x: float, y: float, width: float, height: float) -> bool:
+	for offset_y in [0.0, 1.5]:
+		var left := floori(x / float(BlockDefs.TILE))
+		var right := floori((x + width - 0.001) / float(BlockDefs.TILE))
+		var top := floori((y + offset_y) / float(BlockDefs.TILE))
+		var bottom := floori((y + offset_y + height - 0.001) / float(BlockDefs.TILE))
+		for tile_y in range(top, bottom + 1):
+			for tile_x in range(left, right + 1):
+				if not _terrain_cell_is_known(tile_x, tile_y):
+					return false
+	return true
+
+
 func _fluid_shore_recovery_step(
 	self_state: Dictionary,
 	origin: Vector2,
@@ -1285,6 +1473,30 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 							float(player_state.get("h", 28.0)) * 0.5,
 						)
 						break
+			if _should_settle_airborne(self_state, origin):
+				var airborne_escape := _verified_airborne_hazard_fall_escape(
+					self_state,
+					origin,
+					threat_center,
+					not target_id.begins_with("lava:"),
+				)
+				if not airborne_escape.is_empty():
+					var escape_direction := float(airborne_escape.get("direction", 0.0))
+					_log_flee_motion(
+						origin,
+						threat_center,
+						{
+							"position": airborne_escape.get("position", origin),
+							"support_tile": airborne_escape.get("support_tile", []),
+							"route_step": {"kind": "verified_hazard_fall"},
+						},
+						"verified_hazard_fall_escape",
+						self_state,
+					)
+					_set_desired_input(escape_direction < 0.0, escape_direction > 0.0, false)
+					_advance_local_physics(self_state, delta, false)
+					_world_snapshot["self"] = self_state
+					return {"done": false, "reason": "verified_hazard_fall_escape"}
 			physics_first_step_guard = _safe_flee_first_step_filter(self_state, origin, threat_center)
 			var allow_emergency_closing_step := target_id.begins_with("creature_") and not player_target
 			var flee_waypoint := _safe_flee_waypoint(
