@@ -257,5 +257,3 @@ static func _point(origin: Vector2, sx: float, sy: float, x: float, y: float) ->
 
 static func _color(appearance: Dictionary, key: String) -> Color:
 	return Color.from_string(str(appearance.get(key, DEFAULT_APPEARANCE[key])), Color.WHITE)
-
-

@@ -35,6 +35,10 @@ const STATE_SYNCING := "SYNCING"
 const STATE_PLAYING := "PLAYING"
 const STATE_LEAVING := "LEAVING"
 
+## One guest-auth request plus one join-ticket request can each use three
+## 20-second attempts. Leave room for those bounded requests and the initial
+## WebSocket handshake, but never leave a selected world stuck in JOINING.
+const DEFAULT_JOIN_TIMEOUT_MSEC := 150_000
 const DEFAULT_SYNC_TIMEOUT_MSEC := 45_000
 const INITIAL_INVENTORY_ECHO_RETRY_MSEC := 2_000
 const INITIAL_INVENTORY_ECHO_TIMEOUT_MSEC := 30_000
@@ -102,6 +106,7 @@ var observation_radius := DEFAULT_OBSERVATION_RADIUS
 var human_player_count := 0
 var empty_since_msec := -1
 var sync_complete := false
+var _join_started_msec := -1
 var _sync_started_msec := -1
 var _empty_emitted := false
 var _left_emitted := false
@@ -523,11 +528,13 @@ func join_session(record: Dictionary) -> void:
 	_equipment_slots = {"hand": "", "feet": ""}
 	session_id = str(record.get("session_id", ""))
 	world_id = str(record.get("world_id", ""))
+	_join_started_msec = Time.get_ticks_msec()
 	_set_state(STATE_JOINING)
 	if backend == null or not backend.has_method("join_multiplayer_session"):
 		_emit_left("backend_unavailable")
 		return
 	_join_in_flight = true
+	_log_join_phase("backend_request", true)
 	var response: Variant = await backend.call(
 		"join_multiplayer_session",
 		str(record.get("session_id", "")),
@@ -537,7 +544,9 @@ func join_session(record: Dictionary) -> void:
 	_join_in_flight = false
 	if state == STATE_LEAVING or _left_emitted:
 		return
-	if not response is Dictionary or not bool((response as Dictionary).get("ok", false)):
+	var response_ok := response is Dictionary and bool((response as Dictionary).get("ok", false))
+	_log_join_phase("backend_response", response_ok)
+	if not response_ok:
 		var failure := response as Dictionary if response is Dictionary else {}
 		structured_log.emit(join_failure_log_event(record, failure))
 		_emit_left(str(failure.get("error", "join_failed")))
@@ -596,6 +605,7 @@ func _connect_join_response(response: Dictionary, record: Dictionary) -> bool:
 		bool(body.get("relay_fallback_enabled", false)),
 		protocol_version,
 	)
+	_log_join_phase("websocket_connect", int(error) == OK)
 	if int(error) != OK:
 		_emit_left("connect_error_%d" % int(error))
 		return false
@@ -639,11 +649,14 @@ func handle_message(message: Dictionary) -> void:
 			leave("legacy_client")
 			return
 		if state in [STATE_JOINING, STATE_SYNCING]:
+			if state == STATE_JOINING:
+				_begin_snapshot_sync()
+			else:
+				# A reconnected data channel starts a fresh exchange without
+				# extending the existing hard sync deadline.
+				_snapshot_retry_count = 0
+				_snapshot_retry_at_msec = Time.get_ticks_msec() + SNAPSHOT_RETRY_INTERVAL_MSEC
 			_send_snapshot_request()
-			# A fresh connected event starts a new exchange; reset the retry
-			# cadence so the first resend happens only after the normal interval.
-			_snapshot_retry_count = 0
-			_snapshot_retry_at_msec = Time.get_ticks_msec() + SNAPSHOT_RETRY_INTERVAL_MSEC
 		return
 	if kind == "control" and message_type == "player_left":
 		var left_id := str(message.get("player_id", ""))
@@ -763,6 +776,9 @@ func _process(delta: float) -> void:
 		var transfer: Dictionary = _region_incoming_transfers[transfer_id]
 		if now_msec - int(transfer.get("started_at_msec", now_msec)) > 30_000:
 			_region_incoming_transfers.erase(transfer_id)
+	if state == STATE_JOINING:
+		_check_join_timeout(now_msec)
+		return
 	if state == STATE_SYNCING:
 		if _sync_started_msec >= 0 and now_msec - _sync_started_msec >= DEFAULT_SYNC_TIMEOUT_MSEC:
 			_emit_left("snapshot_timeout")
@@ -870,6 +886,14 @@ func _process(delta: float) -> void:
 	_check_empty_world_grace(now_msec)
 
 
+func _check_join_timeout(now_msec: int) -> bool:
+	if state != STATE_JOINING or _join_started_msec < 0 or now_msec - _join_started_msec < DEFAULT_JOIN_TIMEOUT_MSEC:
+		return false
+	_log_join_phase("join_timeout", false)
+	_emit_left("join_timeout")
+	return true
+
+
 func _check_empty_world_grace(now_msec: int) -> void:
 	if not _empty_emitted and Perception.empty_world_should_leave(sync_complete, human_player_count, empty_since_msec, now_msec, empty_grace_msec):
 		_empty_emitted = true
@@ -891,17 +915,26 @@ func _on_network_connected(role: String, player_id: String, network_session_id: 
 	if state != STATE_JOINING and state != STATE_SYNCING:
 		return
 	if role != "guest":
+		_log_join_phase("websocket_connected", false)
 		_emit_left("unexpected_role")
 		return
+	_log_join_phase("websocket_connected", true)
 	own_player_id = player_id
 	_host_player_id = _host_id_from_network()
 	if not network_session_id.is_empty():
 		session_id = network_session_id
+
+
+func _begin_snapshot_sync() -> void:
+	if state != STATE_JOINING:
+		return
+	# The WebSocket authentication signal comes before the guest RTC channel is
+	# usable. Keep the bounded join deadline until the subsequent control/connected
+	# message confirms the data channel is ready for the snapshot request.
+	_join_started_msec = -1
 	_set_state(STATE_SYNCING)
 	_sync_started_msec = Time.get_ticks_msec()
 	_snapshot_retry_count = 0
-	# The shared client suppresses a second `connected` event on RTC reconnect,
-	# so the bot arms its own retry cadence instead of trusting that message.
 	_snapshot_retry_at_msec = _sync_started_msec + SNAPSHOT_RETRY_INTERVAL_MSEC
 	sync_started.emit(session_id)
 
@@ -955,6 +988,194 @@ func _should_settle_airborne(self_state: Dictionary, origin: Vector2) -> bool:
 		and not _local_pose_has_support(self_state)
 		and _active_verified_drop_step(origin, self_state).is_empty()
 	)
+
+
+## A host correction can leave a fleeing bot in a free fall with no verified
+## jump/drop transition. Keep the normal passive settle unless the current
+## no-input trajectory is fully known and intersects harmful fluid; only then
+## consider a directional trajectory that lands on known dry support.
+func _verified_airborne_hazard_fall_escape(
+	self_state: Dictionary,
+	origin: Vector2,
+	threat: Vector2,
+	require_threat_distance_gain: bool,
+) -> Dictionary:
+	if (
+		_terrain_tiles.is_empty()
+		or not _should_settle_airborne(self_state, origin)
+		or _local_touches_harmful_fluid(self_state)
+		or float(self_state.get("vy", 0.0)) < -0.05
+		or not _known_harmful_fluid_in_fall_envelope(self_state)
+	):
+		return {}
+	var passive := _simulate_airborne_fall(self_state, 0.0)
+	if not bool(passive.get("known", false)) or not bool(passive.get("touches_harmful_fluid", false)):
+		return {}
+	var origin_distance := origin.distance_to(threat)
+	var best: Dictionary = {}
+	var best_score := -INF
+	for direction in [-1.0, 1.0]:
+		var trajectory := _simulate_airborne_fall(self_state, direction)
+		if (
+			not bool(trajectory.get("known", false))
+			or bool(trajectory.get("touches_harmful_fluid", false))
+			or not bool(trajectory.get("safe_landing", false))
+		):
+			continue
+		var landing: Vector2 = trajectory.get("landing_position", origin)
+		var threat_distance := landing.distance_to(threat)
+		if require_threat_distance_gain and threat_distance <= origin_distance + 8.0:
+			continue
+		var support_tile: Vector2i = trajectory.get("support_tile", Vector2i.ZERO)
+		var clearance := _nearest_harmful_fluid_clearance(landing, self_state)
+		var score := threat_distance + minf(clearance, float(BlockDefs.TILE) * 8.0) * 0.5
+		if score <= best_score:
+			continue
+		best_score = score
+		best = {
+			"direction": direction,
+			"position": landing,
+			"support_tile": support_tile,
+			"kind": "verified_hazard_fall",
+		}
+	return best
+
+
+## Avoid running three fall simulations for every airborne flee tick. The
+## passive controller has no horizontal input, so a known hazard must be in
+## the current vertical corridor (with a small margin for residual drift).
+func _known_harmful_fluid_in_fall_envelope(self_state: Dictionary) -> bool:
+	var x := float(self_state.get("x", 0.0))
+	var y := float(self_state.get("y", 0.0))
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var margin := float(BlockDefs.TILE) * 2.0
+	var left := floori((x - margin) / float(BlockDefs.TILE))
+	var right := floori((x + width + margin - 0.001) / float(BlockDefs.TILE))
+	var first_row := floori((y + height) / float(BlockDefs.TILE))
+	var last_row := floori((y + height + LOCAL_MAX_FALL_SPEED * 90.0) / float(BlockDefs.TILE))
+	for tile_y in range(first_row, last_row + 1):
+		for tile_x in range(left, right + 1):
+			if _terrain_is_lava_at(tile_x, tile_y) and _terrain_cell_is_known(tile_x, tile_y):
+				return true
+	return false
+
+
+## Predict a bounded no-jump fall with the same local gravity, horizontal
+## control, collision, and fluid rules as `_advance_local_physics`. The result
+## is accepted only when every occupied/support cell was known throughout the
+## path; missing terrain is never treated as proof of a safe landing.
+func _simulate_airborne_fall(self_state: Dictionary, direction: float) -> Dictionary:
+	var x := float(self_state.get("x", 0.0))
+	var y := float(self_state.get("y", 0.0))
+	var width := maxf(1.0, float(self_state.get("w", 20.0)))
+	var height := maxf(1.0, float(self_state.get("h", 28.0)))
+	var vx := float(self_state.get("vx", 0.0))
+	var vy := float(self_state.get("vy", 0.0))
+	var tree_ghost := bool(self_state.get("tree_ghost", false)) or bool(self_state.get("climbing", false))
+	# Tree traversal changes local collision semantics during the real physics
+	# tick. Refuse to certify a trajectory in that mode until its transition can
+	# be mirrored exactly; a false negative only preserves passive settling.
+	if tree_ghost or _climb_active or _local_overlaps_climbable(self_state):
+		return {"known": false}
+	var movement_multiplier := _local_equipment_effect_multiplier("movement_speed_multiplier", 1.0, 1.6)
+	if not _airborne_fall_region_is_known(x, y, width, height):
+		return {"known": false}
+	if _position_touches_harmful_fluid(x, y, width, height):
+		return {"known": true, "touches_harmful_fluid": true}
+	for _frame in range(90):
+		var fluid := _local_fluid_physics(x, y, width, height)
+		var support := _local_ground_support(x, y, width, height, tree_ghost)
+		var surface := _local_surface_physics_for_support(support)
+		var in_fluid := not fluid.is_empty()
+		var gravity := BlockDefs.GRAVITY * float(fluid.get("gravity_multiplier", 1.0))
+		var target_vx := direction * BlockDefs.MOVE * float(surface.get("movement_speed_multiplier", 1.0)) * movement_multiplier
+		if in_fluid:
+			target_vx *= float(fluid.get("move_speed_multiplier", 1.0))
+			vx = target_vx
+		elif not support.is_empty():
+			vx = lerpf(vx, target_vx, clampf(float(surface.get("friction", 1.0)), 0.0, 1.0))
+		else:
+			vx = target_vx
+		vy = minf(float(fluid.get("max_fall", LOCAL_MAX_FALL_SPEED)), vy + gravity)
+		var substeps := maxi(1, int(ceil(maxf(absf(vx), absf(vy)) / 6.0)))
+		var substep := 1.0 / float(substeps)
+		var on_ground := false
+		for _substep_index in substeps:
+			if not _airborne_fall_region_is_known(x, y, width, height):
+				return {"known": false}
+			var next_x := x + vx * substep
+			var current_hazard := _position_touches_harmful_fluid(x, y, width, height)
+			if not current_hazard and _position_touches_harmful_fluid(next_x, y, width, height):
+				# Match the live local controller's guard against walking into a
+				# newly overlapping hazard while keeping the route proof dry.
+				vx = 0.0
+				continue
+			else:
+				var horizontal_hit := _local_collision(next_x, y, width, height, tree_ghost)
+				if horizontal_hit.is_empty():
+					x = next_x
+				else:
+					var hit_tile := Vector2i(
+						floori(float(horizontal_hit.get("bx", 0.0)) / float(BlockDefs.TILE)),
+						floori(float(horizontal_hit.get("by", 0.0)) / float(BlockDefs.TILE)),
+					)
+					if _terrain_climbable_at(hit_tile.x, hit_tile.y):
+						return {"known": false}
+					x = float(horizontal_hit.get("bx", x)) - width if vx > 0.0 else float(horizontal_hit.get("bx", x)) + float(BlockDefs.TILE)
+					vx = 0.0
+			var next_y := y + vy * substep
+			var vertical_hit := _local_collision(x, next_y, width, height, tree_ghost)
+			if vertical_hit.is_empty():
+				y = next_y
+				on_ground = is_zero_approx(vy) and not _local_collision(x, y + 1.5, width, height, tree_ghost).is_empty()
+			else:
+				var hit_tile := Vector2i(
+					floori(float(vertical_hit.get("bx", 0.0)) / float(BlockDefs.TILE)),
+					floori(float(vertical_hit.get("by", 0.0)) / float(BlockDefs.TILE)),
+				)
+				if _terrain_climbable_at(hit_tile.x, hit_tile.y):
+					return {"known": false}
+				var hit_y := float(vertical_hit.get("by", y))
+				if vy >= 0.0:
+					y = hit_y - height
+					on_ground = true
+				else:
+					y = hit_y + float(BlockDefs.TILE)
+					on_ground = false
+				vy = 0.0
+			if not _airborne_fall_region_is_known(x, y, width, height):
+				return {"known": false}
+			if _position_touches_harmful_fluid(x, y, width, height):
+				return {"known": true, "touches_harmful_fluid": true}
+			if on_ground:
+				var landing_state := self_state.duplicate(true)
+				landing_state["x"] = x
+				landing_state["y"] = y
+				landing_state["on_ground"] = true
+				var support_tile := _route_origin_support_tile(Vector2(x, y), landing_state)
+				var safe_landing := _terrain_standable_tile(support_tile)
+				return {
+					"known": true,
+					"touches_harmful_fluid": false,
+					"safe_landing": safe_landing,
+					"landing_position": Vector2(x, y),
+					"support_tile": support_tile,
+				}
+	return {"known": true, "touches_harmful_fluid": false, "safe_landing": false}
+
+
+func _airborne_fall_region_is_known(x: float, y: float, width: float, height: float) -> bool:
+	for offset_y in [0.0, 1.5]:
+		var left := floori(x / float(BlockDefs.TILE))
+		var right := floori((x + width - 0.001) / float(BlockDefs.TILE))
+		var top := floori((y + offset_y) / float(BlockDefs.TILE))
+		var bottom := floori((y + offset_y + height - 0.001) / float(BlockDefs.TILE))
+		for tile_y in range(top, bottom + 1):
+			for tile_x in range(left, right + 1):
+				if not _terrain_cell_is_known(tile_x, tile_y):
+					return false
+	return true
 
 
 func _fluid_shore_recovery_step(
@@ -1252,6 +1473,30 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 							float(player_state.get("h", 28.0)) * 0.5,
 						)
 						break
+			if _should_settle_airborne(self_state, origin):
+				var airborne_escape := _verified_airborne_hazard_fall_escape(
+					self_state,
+					origin,
+					threat_center,
+					not target_id.begins_with("lava:"),
+				)
+				if not airborne_escape.is_empty():
+					var escape_direction := float(airborne_escape.get("direction", 0.0))
+					_log_flee_motion(
+						origin,
+						threat_center,
+						{
+							"position": airborne_escape.get("position", origin),
+							"support_tile": airborne_escape.get("support_tile", []),
+							"route_step": {"kind": "verified_hazard_fall"},
+						},
+						"verified_hazard_fall_escape",
+						self_state,
+					)
+					_set_desired_input(escape_direction < 0.0, escape_direction > 0.0, false)
+					_advance_local_physics(self_state, delta, false)
+					_world_snapshot["self"] = self_state
+					return {"done": false, "reason": "verified_hazard_fall_escape"}
 			physics_first_step_guard = _safe_flee_first_step_filter(self_state, origin, threat_center)
 			var allow_emergency_closing_step := target_id.begins_with("creature_") and not player_target
 			var flee_waypoint := _safe_flee_waypoint(
@@ -4771,6 +5016,8 @@ func _prepare_snapshot(payload: Dictionary) -> void:
 	var total := int(payload.get("total", 0))
 	if transfer_id.is_empty() or total <= 0 or total > 1024:
 		return
+	if _snapshot_transfer_id.is_empty() or _snapshot_transfer_id != transfer_id or _snapshot_expected_chunks != total:
+		_log_join_phase("snapshot_started", true)
 	if _snapshot_transfer_id != transfer_id or _snapshot_expected_chunks != total:
 		_snapshot_transfer_id = transfer_id
 		_snapshot_expected_chunks = total
@@ -4782,10 +5029,24 @@ func _prepare_snapshot(payload: Dictionary) -> void:
 		_snapshot_retry_at_msec = Time.get_ticks_msec() + SNAPSHOT_RETRY_INTERVAL_MSEC
 
 
-func _send_snapshot_request() -> void:
+func _send_snapshot_request() -> bool:
 	if network_client == null or not network_client.has_method("send_command"):
-		return
-	network_client.call("send_command", "snapshot_request", {})
+		_log_join_phase("snapshot_request", false)
+		return false
+	var sent := bool(network_client.call("send_command", "snapshot_request", {}))
+	_log_join_phase("snapshot_request", sent)
+	return sent
+
+
+func _log_join_phase(phase: String, ok: bool) -> void:
+	# These diagnostics deliberately exclude world/session ids, player ids,
+	# tickets, URLs, and credentials so they are safe in the bot's normal logs.
+	structured_log.emit({
+		"event": "session_join_phase",
+		"phase": phase,
+		"ok": ok,
+		"at_msec": Time.get_ticks_msec(),
+	})
 
 
 func _retry_snapshot_sync(now_msec: int) -> void:
@@ -4994,6 +5255,7 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	_record_world_state_achievements()
 	var initial_player_biomes: Dictionary = snapshot.get("player_biomes", {}) if snapshot.get("player_biomes", {}) is Dictionary else {}
 	_record_authoritative_location_achievements(str(initial_player_biomes.get(own_player_id, "")), local_state)
+	_log_join_phase("snapshot_applied", true)
 	session_ready.emit(session_id, own_player_id)
 
 
@@ -8119,6 +8381,7 @@ func _emit_left(reason: String) -> void:
 	if _left_emitted:
 		return
 	_left_emitted = true
+	_join_started_msec = -1
 	_set_state(STATE_LEAVING)
 	_disconnect_requested = true
 	if network_client != null and network_client.has_method("disconnect_from_session"):
