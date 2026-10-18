@@ -139,6 +139,7 @@ var _sky_background_layer: Node2D
 var _sky_background_material: ShaderMaterial
 var _sky_layer: Node2D
 var _world_layer: Node2D
+var _avatar_glow_layer: Node2D
 var _lighting_layer: Node2D
 var _sunlight_layer: Node2D
 var _atmosphere_layer: Node2D
@@ -211,6 +212,10 @@ func _create_render_layers() -> void:
 	_lighting_layer.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	_lighting_layer.draw.connect(_draw_lighting_layer)
 	add_child(_lighting_layer)
+	_avatar_glow_layer = Node2D.new()
+	_avatar_glow_layer.z_index = 11
+	_avatar_glow_layer.draw.connect(_draw_avatar_particle_glows)
+	add_child(_avatar_glow_layer)
 	_sunlight_layer = Node2D.new()
 	_sunlight_layer.z_index = 11
 	_sunlight_layer.draw.connect(_draw_sunlight_layer)
@@ -1634,6 +1639,9 @@ func _update_render_layers() -> void:
 		_snap_lighting_axis(-draw_cam.y)
 	)
 	_lighting_layer.scale = Vector2(zoom, zoom)
+	_avatar_glow_layer.position = -draw_cam
+	_avatar_glow_layer.scale = Vector2(zoom, zoom)
+	_avatar_glow_layer.queue_redraw()
 	_sunlight_layer.position = -draw_cam
 	_sunlight_layer.scale = Vector2(zoom, zoom)
 	_targeting_layer.position = -draw_cam
@@ -1884,6 +1892,21 @@ func _draw_world_layer() -> void:
 
 func _draw_lighting_layer() -> void:
 	_draw_lighting(_lighting_layer, _lighting_render_area)
+
+
+func _draw_avatar_particle_glows() -> void:
+	# Cosmetic emission sits above darkness; it never enters the world's light maps.
+	var visible := _visible_tile_range().grow(1)
+	var combined: Dictionary = _lighting_cache.get("visual_combined", _lighting_cache.get("combined", {}))
+	for particle: Dictionary in _avatar_trail.particles:
+		if str(particle["style"]) not in AvatarTrailClass.IDLE_STYLES:
+			continue
+		var position: Vector2 = particle["position"] + particle["drift"] * float(particle["age"])
+		var cell := Vector2i(floori(position.x / BlockDefs.TILE), floori(position.y / BlockDefs.TILE))
+		if not visible.has_point(cell) or not sim.light_passable(sim.get_block(cell.x, cell.y)):
+			continue
+		var darkness := 1.0 - clampf(_light_at_tile(combined, cell), 0.0, 1.0)
+		AvatarArtClass.draw_trail_glow(_avatar_glow_layer, position, str(particle["style"]), float(particle["age"]), float(particle["lifetime"]), float(particle["phase"]), darkness, AvatarTrailClass.FIRE_SCALE if particle["style"] == "fire" else 1.0)
 
 
 func _draw_sunlight_layer() -> void:
@@ -2690,7 +2713,7 @@ func _update_avatar_trails(delta: float) -> void:
 		_avatar_trail_world_id = sim.world_id
 	var actors := {
 		"local": {
-			"position": Vector2(float(sim.player.get("x", 0.0)) + 10.0, float(sim.player.get("y", 0.0)) + 26.0),
+			"position": Vector2(float(sim.player.get("x", 0.0)) - 3.0, float(sim.player.get("y", 0.0)) + 24.0),
 			"style": str(PlayerProfile.skin.get("particles", "none")),
 			"moving": absf(float(sim.player.get("vx", 0.0))) > 0.2 or absf(float(sim.player.get("vy", 0.0))) > 0.8,
 		},
@@ -2700,7 +2723,7 @@ func _update_avatar_trails(delta: float) -> void:
 		var remote: Dictionary = remote_players[raw_id]
 		var appearance: Dictionary = remote.get("skin", {}) if remote.get("skin", {}) is Dictionary else {}
 		actors["remote:" + player_id] = {
-			"position": _remote_player_render_position(player_id, remote) + Vector2(10, 26),
+			"position": _remote_player_render_position(player_id, remote) + Vector2(-3, 24),
 			"style": str(appearance.get("particles", "none")),
 			"revision": int(remote.get("respawn_revision", 0)),
 			"moving": absf(float(remote.get("vx", 0.0))) > 0.2 or absf(float(remote.get("vy", 0.0))) > 0.8,

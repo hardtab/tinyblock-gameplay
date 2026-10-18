@@ -188,14 +188,15 @@ static func _draw_particles(
 	canvas: CanvasItem, origin: Vector2, sx: float, sy: float, style: String, elapsed: float
 ) -> void:
 	var unit := minf(sx, sy)
+	var particle_origin := origin - Vector2(3.0 * sx, 0.0)
 	match style:
 		"flowers":
 			for index in range(3):
 				var phase := elapsed * 2.1 + float(index) * 2.1
 				var x := 3.0 + float(index) * 7.0 + sin(phase) * 1.5
 				var y := 23.0 + fposmod(float(index) * 2.7 + elapsed * 5.0, 5.0)
-				canvas.draw_line(_point(origin, sx, sy, x, y + 3.0), _point(origin, sx, sy, x, y + 6.0), Color("#4a9d53"), maxf(0.8, unit), true)
-				var center := _point(origin, sx, sy, x, y)
+				canvas.draw_line(_point(particle_origin, sx, sy, x, y + 3.0), _point(particle_origin, sx, sy, x, y + 6.0), Color("#4a9d53"), maxf(0.8, unit), true)
+				var center := _point(particle_origin, sx, sy, x, y)
 				var radius := maxf(0.8, unit * 0.85)
 				var petal: Color = [Color("#ffc857"), Color("#ff8fab"), Color("#b6a1ff")][index]
 				for offset in [Vector2(-1, 0), Vector2(1, 0), Vector2(0, -1), Vector2(0, 1)]:
@@ -204,7 +205,7 @@ static func _draw_particles(
 		"fireflies":
 			for index in range(4):
 				var phase := elapsed * 2.6 + float(index) * 1.55
-				var center := _point(origin, sx, sy, 2.0 + float(index % 2) * 15.0 + sin(phase) * 2.0, 8.0 + float(index) * 4.0 + cos(phase * 0.8) * 2.0)
+				var center := _point(particle_origin, sx, sy, 2.0 + float(index % 2) * 15.0 + sin(phase) * 2.0, 8.0 + float(index) * 4.0 + cos(phase * 0.8) * 2.0)
 				var glow := Color("#f5d76e")
 				glow.a = 0.2 + 0.16 * sin(phase)
 				canvas.draw_circle(center, 2.4 * unit, glow)
@@ -212,7 +213,7 @@ static func _draw_particles(
 		"stars":
 			for index in range(3):
 				var phase := elapsed * 3.0 + float(index) * 2.05
-				var center := _point(origin, sx, sy, 1.0 + float(index) * 9.0, 5.0 + fposmod(float(index) * 3.0 + elapsed * 8.0, 19.0))
+				var center := _point(particle_origin, sx, sy, 1.0 + float(index) * 9.0, 5.0 + fposmod(float(index) * 3.0 + elapsed * 8.0, 19.0))
 				var radius := (1.1 + 0.6 * (0.5 + 0.5 * sin(phase))) * unit
 				_draw_star(canvas, center, radius, Color("#fff18b"))
 		"sparks":
@@ -220,16 +221,19 @@ static func _draw_particles(
 				var phase := elapsed * 5.0 + float(index) * 1.6
 				var x := 2.0 + float(index) * 5.2 + sin(phase) * 1.8
 				var y := 20.0 + fposmod(float(index) * 2.8 + elapsed * 10.0, 7.0)
-				var point := _point(origin, sx, sy, x, y)
+				var point := _point(particle_origin, sx, sy, x, y)
 				var tail := point + Vector2(-cos(phase) * 2.0 * sx, 2.6 * sy)
 				canvas.draw_line(tail, point, Color("#ff8838", 0.9), maxf(0.8, unit), true)
 				canvas.draw_circle(point, maxf(0.8, unit * 0.7), Color("#ffe29a"))
 
 		"fire":
-			for index in range(3):
-				var age := fposmod(elapsed + float(index) * (0.85 / 3.0), 0.85)
-				var position := _point(origin, sx, sy, 3.0 + float(index) * 6.75, 27.0 - age * 9.0)
-				draw_trail_particle(canvas, position, "fire", age, 0.85, float(index) * 1.7, unit)
+			const FIRE_PREVIEW_LIFETIME := 0.35
+			for index in range(2):
+				var age := fposmod(elapsed + float(index) * FIRE_PREVIEW_LIFETIME / 2.0, FIRE_PREVIEW_LIFETIME)
+				var position := _point(particle_origin, sx, sy, 3.0 + float(index) * 6.75, 27.0 - age * 9.0)
+				draw_trail_particle(
+					canvas, position, "fire", age, FIRE_PREVIEW_LIFETIME, float(index) * 1.7, unit * 0.6
+				)
 
 
 static func trail_alpha(age: float, lifetime: float) -> float:
@@ -267,6 +271,42 @@ static func draw_trail_particle(canvas: CanvasItem, position: Vector2, style: St
 				position + Vector2(-radius * 0.6, 0), position + Vector2(0, -height * 0.65), position + Vector2(radius * 0.6, 0),
 			]), Color(1.0, 0.87, 0.35, alpha))
 			canvas.draw_circle(position + Vector2(sin(phase) * 3.0 * unit, -height - age * 3.0 * unit), unit * 0.5, Color(1.0, 0.7, 0.2, alpha))
+
+
+## Draws a tiny cosmetic halo above the darkness overlay. `darkness` is 0 in
+## bright areas and 1 in fully dark areas; this deliberately does not light
+## terrain or affect visibility beyond the few pixels around the particle.
+static func draw_trail_glow(
+	canvas: CanvasItem,
+	position: Vector2,
+	style: String,
+	age: float,
+	lifetime: float,
+	phase: float,
+	darkness: float,
+	unit: float = 1.0
+) -> void:
+	if style not in ["fireflies", "stars", "fire"]:
+		return
+	var particle_alpha := trail_alpha(age, lifetime)
+	if particle_alpha < 0.22:
+		return
+	var night_factor := smoothstep(0.16, 0.82, clampf(darkness, 0.0, 1.0))
+	if night_factor <= 0.0:
+		return
+	var pulse := 0.86 + 0.14 * sin(phase + age * (8.0 if style == "fireflies" else 3.0))
+	var color := Color(1.0, 0.86, 0.38)
+	if style == "stars":
+		color = Color(1.0, 0.94, 0.62)
+	elif style == "fire":
+		color = Color(1.0, 0.34, 0.1)
+	var radius := clampf(5.0 * maxf(unit, 0.25), 3.5, 6.0)
+	var strength := night_factor * particle_alpha * pulse
+	# Low-alpha nested circles approximate a soft halo while keeping each glow
+	# local and cheap enough for a moving trail on mobile.
+	canvas.draw_circle(position, radius, Color(color, 0.018 * strength))
+	canvas.draw_circle(position, radius * 0.62, Color(color, 0.026 * strength))
+	canvas.draw_circle(position, radius * 0.3, Color(color.lightened(0.18), 0.035 * strength))
 
 
 static func _draw_star(canvas: CanvasItem, center: Vector2, radius: float, color: Color) -> void:
