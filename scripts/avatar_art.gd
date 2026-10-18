@@ -228,9 +228,10 @@ static func _draw_particles(
 
 		"fire":
 			const FIRE_PREVIEW_LIFETIME := 0.3
-			for index in range(2):
-				var age := fposmod(elapsed + float(index) * FIRE_PREVIEW_LIFETIME / 2.0, FIRE_PREVIEW_LIFETIME)
-				var position := _point(particle_origin, sx, sy, 3.0 + float(index) * 13.5, 27.0 - age * 9.0)
+			const FIRE_PREVIEW_COUNT := 3
+			for index in range(FIRE_PREVIEW_COUNT):
+				var age := fposmod(elapsed + float(index) * FIRE_PREVIEW_LIFETIME / FIRE_PREVIEW_COUNT, FIRE_PREVIEW_LIFETIME)
+				var position := _point(particle_origin, sx, sy, 3.0 + float(index) * 6.75, 27.0 - age * 9.0)
 				draw_trail_particle(
 					canvas, position, "fire", age, FIRE_PREVIEW_LIFETIME, float(index) * 1.7, unit * 0.6
 				)
