@@ -21,7 +21,7 @@ const ENUM_OPTIONS := {
 	"arms": ["classic", "long", "tiny"],
 	"legs": ["classic", "short", "spring"],
 	"face": ["none", "mustache", "whiskers"],
-	"particles": ["none", "flowers", "fireflies", "stars", "sparks"],
+	"particles": ["none", "flowers", "fireflies", "stars", "sparks", "fire"],
 }
 
 
@@ -224,6 +224,49 @@ static func _draw_particles(
 				var tail := point + Vector2(-cos(phase) * 2.0 * sx, 2.6 * sy)
 				canvas.draw_line(tail, point, Color("#ff8838", 0.9), maxf(0.8, unit), true)
 				canvas.draw_circle(point, maxf(0.8, unit * 0.7), Color("#ffe29a"))
+
+		"fire":
+			for index in range(4):
+				var age := fposmod(elapsed + float(index) * 0.21, 0.85)
+				var position := _point(origin, sx, sy, 3.0 + float(index) * 4.5, 27.0 - age * 9.0)
+				draw_trail_particle(canvas, position, "fire", age, 0.85, float(index) * 1.7, unit)
+
+
+static func trail_alpha(age: float, lifetime: float) -> float:
+	return pow(clampf(1.0 - age / maxf(0.01, lifetime), 0.0, 1.0), 1.3)
+
+
+static func draw_trail_particle(canvas: CanvasItem, position: Vector2, style: String, age: float, lifetime: float, phase: float, unit: float = 1.0) -> void:
+	var alpha := trail_alpha(age, lifetime)
+	var radius := unit * (1.2 + alpha * 0.7)
+	match style:
+		"flowers":
+			var petal := Color.from_hsv(fposmod(phase / TAU, 1.0), 0.45, 1.0, alpha)
+			canvas.draw_line(position, position + Vector2(0, 3.0 * unit), Color(0.3, 0.65, 0.3, alpha), unit)
+			for offset in [Vector2.LEFT, Vector2.RIGHT, Vector2.UP, Vector2.DOWN]:
+				canvas.draw_circle(position + offset * radius, radius * 0.7, petal)
+			canvas.draw_circle(position, radius * 0.5, Color(1.0, 0.9, 0.45, alpha))
+		"fireflies":
+			var pulse := 0.7 + 0.3 * sin(phase + age * 8.0)
+			canvas.draw_circle(position, radius * 2.4, Color(1.0, 0.85, 0.3, alpha * 0.15 * pulse))
+			canvas.draw_circle(position, radius * 0.65, Color(1.0, 1.0, 0.6, alpha * pulse))
+		"stars":
+			_draw_star(canvas, position, radius, Color(1.0, 0.93, 0.45, alpha))
+		"sparks":
+			canvas.draw_line(position + Vector2(sin(phase) * -2.0, 3.0) * unit, position, Color(1.0, 0.4, 0.15, alpha), unit)
+			canvas.draw_circle(position, radius * 0.6, Color(1.0, 0.9, 0.6, alpha))
+		"fire":
+			var height := (4.0 + alpha * 4.0 + sin(phase + age * 17.0)) * unit
+			canvas.draw_circle(position - Vector2(0, height * 0.3), radius * 2.6, Color(1.0, 0.25, 0.04, alpha * 0.12))
+			canvas.draw_colored_polygon(PackedVector2Array([
+				position + Vector2(-radius * 1.3, 0), position + Vector2(-radius, -height * 0.5),
+				position + Vector2(sin(phase + age * 12.0) * unit, -height),
+				position + Vector2(radius * 0.7, -height * 0.55), position + Vector2(radius * 1.3, 0),
+			]), Color(1.0, 0.28 + alpha * 0.2, 0.05, alpha))
+			canvas.draw_colored_polygon(PackedVector2Array([
+				position + Vector2(-radius * 0.6, 0), position + Vector2(0, -height * 0.65), position + Vector2(radius * 0.6, 0),
+			]), Color(1.0, 0.87, 0.35, alpha))
+			canvas.draw_circle(position + Vector2(sin(phase) * 3.0 * unit, -height - age * 3.0 * unit), unit * 0.5, Color(1.0, 0.7, 0.2, alpha))
 
 
 static func _draw_star(canvas: CanvasItem, center: Vector2, radius: float, color: Color) -> void:

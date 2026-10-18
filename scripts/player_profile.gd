@@ -20,7 +20,7 @@ const ENUM_OPTIONS := {
 	"arms": ["classic", "long", "tiny"],
 	"legs": ["classic", "short", "spring"],
 	"face": ["none", "mustache", "whiskers"],
-	"particles": ["none", "flowers", "fireflies", "stars", "sparks"],
+	"particles": ["none", "flowers", "fireflies", "stars", "sparks", "fire"],
 }
 
 signal appearance_changed(skin: Dictionary)

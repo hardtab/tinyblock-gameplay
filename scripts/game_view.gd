@@ -4,6 +4,7 @@ const WorldSim = preload("res://gameplay/scripts/world.gd")
 const CompactNumberClass = preload("res://gameplay/scripts/compact_number.gd")
 const EmojiReactionsClass = preload("res://gameplay/scripts/emoji_reactions.gd")
 const AvatarArtClass = preload("res://gameplay/scripts/avatar_art.gd")
+const AvatarTrailClass = preload("res://gameplay/scripts/avatar_trail.gd")
 
 signal hud_update(coords: String, blocks: String)
 signal challenge_milestone_reached(distance: int)
@@ -87,6 +88,8 @@ var camera_pos := Vector2.ZERO
 var zoom := DEFAULT_ZOOM
 var anim_frame := 0
 var _animation_time := 0.0
+var _avatar_trail := AvatarTrailClass.new()
+var _avatar_trail_world_id := ""
 var _simulation_accumulator := 0.0
 
 var mining: Dictionary = {}
@@ -303,6 +306,8 @@ func continue_world(state: Dictionary) -> bool:
 
 
 func _finish_world_start() -> void:
+	_avatar_trail.clear()
+	_avatar_trail_world_id = sim.world_id
 	remote_mining.clear()
 	_remote_player_render_positions.clear()
 	_remote_player_render_revisions.clear()
@@ -398,6 +403,7 @@ func _process(_delta: float) -> void:
 		_virtual_jump_buffer_remaining = maxf(0.0, _virtual_jump_buffer_remaining - _delta)
 	_sync_creature_lighting()
 	_update_health_indicator(_delta)
+	_update_avatar_trails(_delta)
 	_update_camera(_delta)
 	_update_render_layers()
 
@@ -1683,6 +1689,7 @@ func _draw() -> void:
 	_draw_creatures()
 	_draw_arrows()
 	_draw_fire()
+	_avatar_trail.draw(self)
 	_draw_player()
 	_draw_mining_cracks()
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
@@ -2655,8 +2662,6 @@ func _draw_player() -> void:
 	var body_h: float = sim.player["h"] * scale_y
 	var foot_y: float = py + sim.player["h"]
 	var y: float = foot_y - body_h
-	var velocity_x := float(sim.player.get("vx", 0.0))
-	var velocity_y := float(sim.player.get("vy", 0.0))
 	AvatarArtClass.draw_avatar(
 		self,
 		Vector2(px, y),
@@ -2664,7 +2669,7 @@ func _draw_player() -> void:
 		PlayerProfile.skin,
 		facing,
 		float(anim_frame) / 60.0,
-		absf(velocity_x) > 0.2 or absf(velocity_y) > 0.8,
+		false,
 	)
 	_draw_selected_equipment(px, y, scale_y, facing)
 	_draw_hit_flash(self, Rect2(px, y, 20.0, body_h), _local_hit_flash_expires_msec)
@@ -2677,6 +2682,30 @@ func _draw_player() -> void:
 			color.a *= indicator_alpha
 			draw_rect(Rect2(indicator_x + heart * (HEALTH_INDICATOR_PIP_SIZE + HEALTH_INDICATOR_PIP_GAP), y - 7, HEALTH_INDICATOR_PIP_SIZE, HEALTH_INDICATOR_PIP_SIZE), color)
 	_draw_remote_players()
+
+
+func _update_avatar_trails(delta: float) -> void:
+	if sim.world_id != _avatar_trail_world_id:
+		_avatar_trail.clear()
+		_avatar_trail_world_id = sim.world_id
+	var actors := {
+		"local": {
+			"position": Vector2(float(sim.player.get("x", 0.0)) + 10.0, float(sim.player.get("y", 0.0)) + 26.0),
+			"style": str(PlayerProfile.skin.get("particles", "none")),
+			"moving": absf(float(sim.player.get("vx", 0.0))) > 0.2 or absf(float(sim.player.get("vy", 0.0))) > 0.8,
+		},
+	}
+	for raw_id in remote_players:
+		var player_id := str(raw_id)
+		var remote: Dictionary = remote_players[raw_id]
+		var appearance: Dictionary = remote.get("skin", {}) if remote.get("skin", {}) is Dictionary else {}
+		actors["remote:" + player_id] = {
+			"position": _remote_player_render_position(player_id, remote) + Vector2(10, 26),
+			"style": str(appearance.get("particles", "none")),
+			"revision": int(remote.get("respawn_revision", 0)),
+			"moving": absf(float(remote.get("vx", 0.0))) > 0.2 or absf(float(remote.get("vy", 0.0))) > 0.8,
+		}
+	_avatar_trail.advance(delta, actors)
 
 
 func _draw_remote_players() -> void:
@@ -2699,8 +2728,6 @@ func _draw_remote_players() -> void:
 		}
 		var appearance_source: Variant = remote.get("skin", {}) if remote.get("skin", {}) is Dictionary else {}
 		var appearance := AvatarArtClass.normalize_appearance(appearance_source, fallback_appearance)
-		var remote_velocity_x := float(remote.get("vx", 0.0))
-		var remote_velocity_y := float(remote.get("vy", 0.0))
 		AvatarArtClass.draw_avatar(
 			self,
 			render_position,
@@ -2708,7 +2735,7 @@ func _draw_remote_players() -> void:
 			appearance,
 			facing,
 			float(anim_frame) / 60.0 + fposmod(float(player_id.hash()), 17.0),
-			absf(remote_velocity_x) > 0.2 or absf(remote_velocity_y) > 0.8,
+			false,
 		)
 		_draw_equipment(
 			px,
