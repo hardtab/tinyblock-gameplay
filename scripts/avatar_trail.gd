@@ -4,6 +4,7 @@ const AvatarArtClass = preload("res://gameplay/scripts/avatar_art.gd")
 const MAX_PARTICLES := 384
 const MAX_EMITTERS := 64
 const SPACING := 5.0
+const FIRE_DENSITY := 0.7
 const TELEPORT_DISTANCE := 96.0
 const MAX_EMISSIONS_PER_STEP := 8
 const STYLES: Array[String] = ["flowers", "fireflies", "stars", "sparks", "fire"]
@@ -51,13 +52,14 @@ func advance(delta: float, actors: Dictionary) -> void:
 			_drop_emitter(player_id)
 			previous["carry"] = 0.0
 		elif bool(actor.get("moving", true)) and distance > 0.1:
-			var next_distance := SPACING - float(previous["carry"])
+			var spacing := SPACING / FIRE_DENSITY if style == "fire" else SPACING
+			var next_distance := spacing - float(previous["carry"])
 			var emitted := 0
 			while next_distance <= distance and emitted < MAX_EMISSIONS_PER_STEP:
 				_spawn(player_id, last_position.lerp(position, next_distance / distance), style)
-				next_distance += SPACING
+				next_distance += spacing
 				emitted += 1
-			previous["carry"] = fposmod(float(previous["carry"]) + distance, SPACING)
+			previous["carry"] = fposmod(float(previous["carry"]) + distance, spacing)
 		else:
 			previous["carry"] = 0.0
 		previous["position"] = position

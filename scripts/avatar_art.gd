@@ -226,9 +226,9 @@ static func _draw_particles(
 				canvas.draw_circle(point, maxf(0.8, unit * 0.7), Color("#ffe29a"))
 
 		"fire":
-			for index in range(4):
-				var age := fposmod(elapsed + float(index) * 0.21, 0.85)
-				var position := _point(origin, sx, sy, 3.0 + float(index) * 4.5, 27.0 - age * 9.0)
+			for index in range(3):
+				var age := fposmod(elapsed + float(index) * (0.85 / 3.0), 0.85)
+				var position := _point(origin, sx, sy, 3.0 + float(index) * 6.75, 27.0 - age * 9.0)
 				draw_trail_particle(canvas, position, "fire", age, 0.85, float(index) * 1.7, unit)
 
 
