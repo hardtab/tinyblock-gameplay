@@ -4,8 +4,8 @@ const AvatarArtClass = preload("res://gameplay/scripts/avatar_art.gd")
 const MAX_PARTICLES := 384
 const MAX_EMITTERS := 64
 const SPACING := 5.0
-const FIRE_DENSITY := 0.4
-const FIRE_LIFETIME := 0.35
+const FIRE_DENSITY := 0.5
+const FIRE_LIFETIME := 0.4
 const FIRE_MAX_DISTANCE := 40.0
 const FIRE_SCALE := 0.6
 const IDLE_STYLES: Array[String] = ["fire", "fireflies", "stars"]
@@ -68,7 +68,7 @@ func advance(delta: float, actors: Dictionary) -> void:
 		else:
 			previous["carry"] = 0.0
 			previous["idle_time"] = float(previous.get("idle_time", 0.0)) + maxf(0.0, delta)
-			var idle_interval := 0.4 if style == "fire" else 0.7
+			var idle_interval := 0.32 if style == "fire" else 0.7
 			if style in IDLE_STYLES and float(previous["idle_time"]) >= idle_interval:
 				_spawn(player_id, position, style)
 				previous["idle_time"] = fposmod(float(previous["idle_time"]), idle_interval)
@@ -103,7 +103,7 @@ func _spawn(player_id: String, position: Vector2, style: String) -> void:
 	var drift := Vector2.ZERO if style == "flowers" else Vector2(sin(phase) * 2.0, -6.0 if style == "fireflies" else -10.0)
 	particles.append({
 		"player_id": player_id, "style": style,
-		"position": position + Vector2(sin(phase) * (1.5 if style == "fire" else 4.0), cos(phase) * 1.5),
+		"position": position + Vector2(sin(phase) * 4.0, cos(phase) * 1.5),
 		"drift": drift, "age": 0.0, "lifetime": lifetime, "phase": phase,
 	})
 	if particles.size() > MAX_PARTICLES:

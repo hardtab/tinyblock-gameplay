@@ -188,7 +188,7 @@ static func _draw_particles(
 	canvas: CanvasItem, origin: Vector2, sx: float, sy: float, style: String, elapsed: float
 ) -> void:
 	var unit := minf(sx, sy)
-	var particle_origin := origin - Vector2(3.0 * sx, 0.0)
+	var particle_origin := origin
 	match style:
 		"flowers":
 			for index in range(3):
@@ -227,10 +227,10 @@ static func _draw_particles(
 				canvas.draw_circle(point, maxf(0.8, unit * 0.7), Color("#ffe29a"))
 
 		"fire":
-			const FIRE_PREVIEW_LIFETIME := 0.35
+			const FIRE_PREVIEW_LIFETIME := 0.3
 			for index in range(2):
 				var age := fposmod(elapsed + float(index) * FIRE_PREVIEW_LIFETIME / 2.0, FIRE_PREVIEW_LIFETIME)
-				var position := _point(particle_origin, sx, sy, 3.0 + float(index) * 6.75, 27.0 - age * 9.0)
+				var position := _point(particle_origin, sx, sy, 3.0 + float(index) * 13.5, 27.0 - age * 9.0)
 				draw_trail_particle(
 					canvas, position, "fire", age, FIRE_PREVIEW_LIFETIME, float(index) * 1.7, unit * 0.6
 				)
@@ -304,9 +304,12 @@ static func draw_trail_glow(
 	var strength := night_factor * particle_alpha * pulse
 	# Low-alpha nested circles approximate a soft halo while keeping each glow
 	# local and cheap enough for a moving trail on mobile.
-	canvas.draw_circle(position, radius, Color(color, 0.018 * strength))
-	canvas.draw_circle(position, radius * 0.62, Color(color, 0.026 * strength))
-	canvas.draw_circle(position, radius * 0.3, Color(color.lightened(0.18), 0.035 * strength))
+	canvas.draw_circle(position, radius, Color(color, 0.04 * strength))
+	canvas.draw_circle(position, radius * 0.62, Color(color, 0.065 * strength))
+	canvas.draw_circle(position, radius * 0.3, Color(color.lightened(0.18), 0.1 * strength))
+	# Keep a tiny warm point visible above the darkness overlay. It marks the
+	# cosmetic effect itself without casting light onto nearby terrain.
+	canvas.draw_circle(position, clampf(unit * 0.8, 0.7, 1.2), Color(color.lightened(0.35), 0.22 * strength))
 
 
 static func _draw_star(canvas: CanvasItem, center: Vector2, radius: float, color: Color) -> void:

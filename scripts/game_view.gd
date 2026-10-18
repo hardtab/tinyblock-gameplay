@@ -2713,7 +2713,7 @@ func _update_avatar_trails(delta: float) -> void:
 		_avatar_trail_world_id = sim.world_id
 	var actors := {
 		"local": {
-			"position": Vector2(float(sim.player.get("x", 0.0)) - 3.0, float(sim.player.get("y", 0.0)) + 24.0),
+			"position": Vector2(float(sim.player.get("x", 0.0)) + 10.0, float(sim.player.get("y", 0.0)) + 26.0),
 			"style": str(PlayerProfile.skin.get("particles", "none")),
 			"moving": absf(float(sim.player.get("vx", 0.0))) > 0.2 or absf(float(sim.player.get("vy", 0.0))) > 0.8,
 		},
@@ -2723,7 +2723,7 @@ func _update_avatar_trails(delta: float) -> void:
 		var remote: Dictionary = remote_players[raw_id]
 		var appearance: Dictionary = remote.get("skin", {}) if remote.get("skin", {}) is Dictionary else {}
 		actors["remote:" + player_id] = {
-			"position": _remote_player_render_position(player_id, remote) + Vector2(-3, 24),
+			"position": _remote_player_render_position(player_id, remote) + Vector2(10, 26),
 			"style": str(appearance.get("particles", "none")),
 			"revision": int(remote.get("respawn_revision", 0)),
 			"moving": absf(float(remote.get("vx", 0.0))) > 0.2 or absf(float(remote.get("vy", 0.0))) > 0.8,
