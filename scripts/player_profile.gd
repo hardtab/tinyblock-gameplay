@@ -13,6 +13,17 @@ const CLOTHING_COLORS: PackedStringArray = [
 const HAIR_COLORS: PackedStringArray = [
 	"#23170f", "#3a2417", "#5a3822", "#754c2d", "#9a6538", "#c89452", "#2e2522", "#6b2d2d",
 ]
+const COLOR_KEYS: PackedStringArray = ["skin", "shirt", "shirt_dark", "accent", "pants", "hair"]
+const ENUM_OPTIONS := {
+	"body_shape": ["classic", "round", "boxy"],
+	"antenna": ["none", "sprout", "twin"],
+	"arms": ["classic", "long", "tiny"],
+	"legs": ["classic", "short", "spring"],
+	"face": ["none", "mustache", "whiskers"],
+	"particles": ["none", "flowers", "fireflies", "stars", "sparks"],
+}
+
+signal appearance_changed(skin: Dictionary)
 
 var profile_path := DEFAULT_PROFILE_PATH
 var profile_id := ""
@@ -32,7 +43,7 @@ func load_or_create() -> void:
 	if _load_profile():
 		return
 	profile_id = Crypto.new().generate_random_bytes(16).hex_encode()
-	skin = _skin_from_id(profile_id)
+	skin = _with_appearance_defaults(_skin_from_id(profile_id), profile_id)
 	_save_profile()
 
 
@@ -64,6 +75,12 @@ func _skin_from_id(id: String) -> Dictionary:
 		"accent": accent.lightened(0.08).to_html(false),
 		"pants": pants.to_html(false),
 		"hair": HAIR_COLORS[hair_index],
+		"body_shape": "classic",
+		"antenna": "none",
+		"arms": "classic",
+		"legs": "classic",
+		"face": "none",
+		"particles": "none",
 	}
 
 
@@ -80,11 +97,16 @@ func _load_profile() -> bool:
 	var loaded_skin = parsed.get("skin", null)
 	if loaded_id.length() < 16 or not loaded_skin is Dictionary:
 		return false
-	for key in ["skin", "shirt", "shirt_dark", "accent", "pants", "hair"]:
+	for key in COLOR_KEYS:
 		if not (loaded_skin as Dictionary).has(key) or not Color.html_is_valid(str((loaded_skin as Dictionary)[key])):
 			return false
+	var migrated_skin := _with_appearance_defaults(loaded_skin as Dictionary, loaded_id)
 	profile_id = loaded_id
-	skin = (loaded_skin as Dictionary).duplicate(true)
+	skin = migrated_skin
+	# Older profiles contain only colors. Save once after loading so the new
+	# appearance fields survive the next launch without changing their colors.
+	if migrated_skin != loaded_skin:
+		_save_profile()
 	return true
 
 
@@ -96,3 +118,49 @@ func _save_profile() -> bool:
 	file.flush()
 	file.close()
 	return true
+
+
+func set_appearance_value(key: String, value: Variant) -> bool:
+	var previous_value: Variant = skin.get(key, null)
+	if key in COLOR_KEYS:
+		var color_value := ""
+		if value is Color:
+			var picker_color: Color = value
+			color_value = picker_color.to_html(false)
+		else:
+			color_value = str(value).strip_edges()
+		if not Color.html_is_valid(color_value):
+			return false
+		color_value = Color.from_string(color_value, Color.WHITE).to_html(false)
+		if str(skin.get(key, "")) == color_value:
+			return true
+		skin[key] = color_value
+	elif ENUM_OPTIONS.has(key):
+		var enum_value := str(value)
+		if enum_value not in ENUM_OPTIONS[key]:
+			return false
+		if str(skin.get(key, "")) == enum_value:
+			return true
+		skin[key] = enum_value
+	else:
+		return false
+	if not _save_profile():
+		if previous_value == null:
+			skin.erase(key)
+		else:
+			skin[key] = previous_value
+		return false
+	appearance_changed.emit(skin.duplicate(true))
+	return true
+
+
+func _with_appearance_defaults(loaded_skin: Dictionary, id: String) -> Dictionary:
+	var migrated := _skin_from_id(id)
+	for key in COLOR_KEYS:
+		if loaded_skin.has(key) and Color.html_is_valid(str(loaded_skin[key])):
+			migrated[key] = str(loaded_skin[key])
+	for key in ENUM_OPTIONS:
+		var allowed: Array = ENUM_OPTIONS[key]
+		if loaded_skin.has(key) and str(loaded_skin[key]) in allowed:
+			migrated[key] = str(loaded_skin[key])
+	return migrated

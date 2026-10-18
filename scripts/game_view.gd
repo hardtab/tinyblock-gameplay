@@ -3,6 +3,7 @@ extends Node2D
 const WorldSim = preload("res://gameplay/scripts/world.gd")
 const CompactNumberClass = preload("res://gameplay/scripts/compact_number.gd")
 const EmojiReactionsClass = preload("res://gameplay/scripts/emoji_reactions.gd")
+const AvatarArtClass = preload("res://gameplay/scripts/avatar_art.gd")
 
 signal hud_update(coords: String, blocks: String)
 signal challenge_milestone_reached(distance: int)
@@ -2654,24 +2655,17 @@ func _draw_player() -> void:
 	var body_h: float = sim.player["h"] * scale_y
 	var foot_y: float = py + sim.player["h"]
 	var y: float = foot_y - body_h
-	draw_rect(Rect2(px + 1, py + sim.player["h"] - 3, 18, 5), Color(0, 0, 0, 0.16))
-	var shirt := PlayerProfile.color("shirt")
-	var shirt_dark := PlayerProfile.color("shirt_dark")
-	var accent := PlayerProfile.color("accent")
-	var pants := PlayerProfile.color("pants")
-	var skin_color := PlayerProfile.color("skin")
-	var hair := PlayerProfile.color("hair")
-	draw_rect(Rect2(px + 2, y + 18.0 * scale_y, 16, 10.0 * scale_y), pants)
-	draw_rect(Rect2(px + 3, y + 10.0 * scale_y, 14, 10.0 * scale_y), shirt)
-	draw_rect(Rect2(px + 2, y + 9.0 * scale_y, 16, 2.0 * scale_y), accent)
-	draw_rect(Rect2(px + 4, y + 13.0 * scale_y, 10, 2.0 * scale_y), shirt_dark)
-	draw_rect(Rect2(px + 7, y + 13.0 * scale_y, 3, 2.0 * scale_y), accent)
-	draw_rect(Rect2(px + 5, y + 2.0 * scale_y, 10, 10.0 * scale_y), skin_color)
-	draw_rect(Rect2(px + 4, y, 12, 4.0 * scale_y), hair)
-	var eye_x: float = px + (10.0 if facing > 0 else 6.0)
-	draw_rect(Rect2(eye_x, y + 5.0 * scale_y, 2, 2), Color("#1a1a1a"))
-	draw_rect(Rect2(px + 1, y + 12.0 * scale_y, 4, 8.0 * scale_y), shirt_dark)
-	draw_rect(Rect2(px + 15, y + 12.0 * scale_y, 4, 8.0 * scale_y), shirt_dark)
+	var velocity_x := float(sim.player.get("vx", 0.0))
+	var velocity_y := float(sim.player.get("vy", 0.0))
+	AvatarArtClass.draw_avatar(
+		self,
+		Vector2(px, y),
+		Vector2(PLAYER_RENDER_WIDTH, body_h),
+		PlayerProfile.skin,
+		facing,
+		float(anim_frame) / 60.0,
+		absf(velocity_x) > 0.2 or absf(velocity_y) > 0.8,
+	)
 	_draw_selected_equipment(px, y, scale_y, facing)
 	_draw_hit_flash(self, Rect2(px, y, 20.0, body_h), _local_hit_flash_expires_msec)
 	_draw_embedded_player_arrows(local_multiplayer_player_id, Rect2(px, y, 20.0, body_h))
@@ -2695,24 +2689,27 @@ func _draw_remote_players() -> void:
 		var facing := int(remote.get("facing", 1))
 		var hue := fposmod(float(player_id.hash()) / 997.0, 1.0)
 		var fallback_shirt := Color.from_hsv(hue, 0.58, 0.82)
-		var shirt := _remote_skin_color(remote, "shirt", fallback_shirt)
-		var dark := _remote_skin_color(remote, "shirt_dark", shirt.darkened(0.28))
-		var accent := _remote_skin_color(remote, "accent", shirt.lightened(0.28))
-		var pants := _remote_skin_color(remote, "pants", dark.darkened(0.24))
-		var skin_color := _remote_skin_color(remote, "skin", PlayerProfile.color("skin"))
-		var hair := _remote_skin_color(remote, "hair", PlayerProfile.color("hair"))
-		draw_rect(Rect2(px + 1, py + 25, 18, 5), Color(0, 0, 0, 0.16))
-		draw_rect(Rect2(px + 2, py + 18, 16, 10), pants)
-		draw_rect(Rect2(px + 3, py + 10, 14, 10), shirt)
-		draw_rect(Rect2(px + 2, py + 9, 16, 2), accent)
-		draw_rect(Rect2(px + 4, py + 13, 10, 2), dark)
-		draw_rect(Rect2(px + 7, py + 13, 3, 2), accent)
-		draw_rect(Rect2(px + 5, py + 2, 10, 10), skin_color)
-		draw_rect(Rect2(px + 4, py, 12, 4), hair)
-		var eye_x := px + (10.0 if facing > 0 else 6.0)
-		draw_rect(Rect2(eye_x, py + 5, 2, 2), Color("#1a1a1a"))
-		draw_rect(Rect2(px + 1, py + 12, 4, 8), dark)
-		draw_rect(Rect2(px + 15, py + 12, 4, 8), dark)
+		var fallback_appearance := {
+			"skin": PlayerProfile.skin.get("skin", "#e8b184"),
+			"shirt": fallback_shirt.to_html(false),
+			"shirt_dark": fallback_shirt.darkened(0.28).to_html(false),
+			"accent": fallback_shirt.lightened(0.28).to_html(false),
+			"pants": fallback_shirt.darkened(0.52).lerp(Color("#3d3028"), 0.35).to_html(false),
+			"hair": PlayerProfile.skin.get("hair", "#3a2417"),
+		}
+		var appearance_source: Variant = remote.get("skin", {}) if remote.get("skin", {}) is Dictionary else {}
+		var appearance := AvatarArtClass.normalize_appearance(appearance_source, fallback_appearance)
+		var remote_velocity_x := float(remote.get("vx", 0.0))
+		var remote_velocity_y := float(remote.get("vy", 0.0))
+		AvatarArtClass.draw_avatar(
+			self,
+			render_position,
+			Vector2(PLAYER_RENDER_WIDTH, PLAYER_RENDER_HEIGHT),
+			appearance,
+			facing,
+			float(anim_frame) / 60.0 + fposmod(float(player_id.hash()), 17.0),
+			absf(remote_velocity_x) > 0.2 or absf(remote_velocity_y) > 0.8,
+		)
 		_draw_equipment(
 			px,
 			py,
