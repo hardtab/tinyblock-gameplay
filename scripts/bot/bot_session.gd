@@ -18,6 +18,7 @@ const AchievementRegistryClass = preload("res://gameplay/scripts/bot/bot_achieve
 const ExecutorClass = preload("res://gameplay/scripts/bot/bot_executor.gd")
 const ActionLoop = preload("res://gameplay/scripts/bot/bot_action_loop.gd")
 const AiClientClass = preload("res://gameplay/scripts/bot/bot_ai_client.gd")
+const BotAvatar = preload("res://gameplay/scripts/bot/bot_avatar.gd")
 
 signal state_changed(state: String)
 signal sync_started(session_id: String)
@@ -25,6 +26,7 @@ signal session_ready(session_id: String, player_id: String)
 signal human_player_count_changed(count: int)
 signal empty_world_ready()
 signal session_left(reason: String)
+signal avatar_selected_for_join(appearance: Dictionary)
 signal world_block_requested(world_id: String, killer_player_id: String, kill_count: int)
 signal decision_logged(event: Dictionary)
 signal structured_log(event: Dictionary)
@@ -111,6 +113,9 @@ var _sync_started_msec := -1
 var _empty_emitted := false
 var _left_emitted := false
 var _join_in_flight := false
+var _avatar_rng := RandomNumberGenerator.new()
+var _join_avatar: Dictionary = {}
+var _previous_join_avatar: Dictionary = {}
 var _disconnect_requested := false
 var _network_signals_connected := false
 var _transport_reconnect_started_msec := -1
@@ -317,18 +322,10 @@ const SUPPORT_BLOCK_PRIORITY: PackedStringArray = [
 	"planks", "palm_planks", "pine_planks", "weeping_planks",
 	"stone_bricks", "cobblestone", "stone", "dirt",
 ]
-const BOT_SKIN := {
-	"skin": "#8b5a3c",
-	"shirt": "#76b852",
-	"shirt_dark": "#4f7b36",
-	"accent": "#b5d96a",
-	"pants": "#294f2f",
-	"hair": "#55352b",
-}
-
-
 func _init() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	_avatar_rng.randomize()
+	_join_avatar = BotAvatar.random_appearance(_avatar_rng)
 	safety = SafetyClass.new()
 	executor = ExecutorClass.new()
 	behavior = BehaviorClass.new(RuleProviderClass.new(1), safety, executor)
@@ -348,6 +345,8 @@ func configure(backend_adapter: Object = null, multiplayer_adapter: Object = nul
 	observation_radius = maxf(32.0, float(options.get("observation_radius", observation_radius)))
 	_strip_progression_gear = bool(options.get("strip_progression_gear", _strip_progression_gear))
 	_movement_step_callable = options.get("movement_step", Callable(self, "_default_movement_step")) if options.get("movement_step", Callable(self, "_default_movement_step")) is Callable else Callable(self, "_default_movement_step")
+	var previous_avatar: Variant = options.get("previous_join_avatar", {})
+	_previous_join_avatar = previous_avatar.duplicate(true) if previous_avatar is Dictionary else {}
 	if options.get("response_enabled", true) is bool:
 		safety.response_enabled = bool(options.get("response_enabled", true))
 	if options.has("retaliation_window_msec"):
@@ -401,6 +400,14 @@ func _connect_network_signals() -> void:
 func join_session(record: Dictionary) -> void:
 	if _join_in_flight or state in [STATE_JOINING, STATE_SYNCING, STATE_PLAYING]:
 		return
+	var previous_avatar := _previous_join_avatar if not _previous_join_avatar.is_empty() else _join_avatar
+	_join_avatar = BotAvatar.random_appearance(_avatar_rng, previous_avatar)
+	_previous_join_avatar = _join_avatar.duplicate(true)
+	avatar_selected_for_join.emit(_join_avatar.duplicate(true))
+	structured_log.emit({
+		"event": "avatar_selected_for_join",
+		"avatar_fingerprint": JSON.stringify(_join_avatar).sha256_text().substr(0, 12),
+	})
 	_left_emitted = false
 	_disconnect_requested = false
 	_transport_reconnect_started_msec = -1
@@ -959,7 +966,7 @@ func _send_player_snapshot_if_due(now_msec: int) -> void:
 		"health": clampi(int(local.get("health", 10)), 0, 10),
 		"nourishment": clampi(int(local.get("nourishment", 100)), 0, 100),
 		"respawn_revision": int(local.get("respawn_revision", 0)),
-		"skin": BOT_SKIN.duplicate(true),
+		"skin": _join_avatar.duplicate(true),
 		"equipment_slots": _replicated_equipment_slots(),
 	})
 

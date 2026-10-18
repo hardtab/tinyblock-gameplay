@@ -87,6 +87,7 @@ var _cooldown_until_msec := 0
 var _retry_attempt := 0
 var _discovery_in_flight := false
 var _current_session_record: Dictionary = {}
+var _last_session_avatar: Dictionary = {}
 var _session_started_msec := -1
 var _blocked_worlds_loaded := false
 
@@ -220,7 +221,9 @@ func _create_session(selected_protocol_version: int = -1) -> void:
 		"response_enabled": response_enabled,
 		"ai_options": ai_options,
 		"strip_progression_gear": strip_progression_gear,
+		"previous_join_avatar": _last_session_avatar,
 	})
+	session.avatar_selected_for_join.connect(_on_session_avatar_selected)
 	session.session_ready.connect(_on_session_ready)
 	session.sync_started.connect(_on_session_sync_started)
 	session.empty_world_ready.connect(_on_empty_world_ready)
@@ -228,6 +231,10 @@ func _create_session(selected_protocol_version: int = -1) -> void:
 	session.world_block_requested.connect(_on_world_block_requested)
 	session.structured_log.connect(_on_session_log)
 	session.decision_logged.connect(_on_session_decision)
+
+
+func _on_session_avatar_selected(appearance: Dictionary) -> void:
+	_last_session_avatar = appearance.duplicate(true)
 
 
 func _on_session_sync_started(_session_id: String) -> void:

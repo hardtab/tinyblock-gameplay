@@ -8,6 +8,7 @@ var save_path: String
 var backup_path: String
 var temp_path: String
 var remote_adapter: Object
+var last_delete_error: int = OK
 
 
 func _init(custom_save_dir: String = "user://worlds", custom_remote_adapter: Object = null) -> void:
@@ -220,18 +221,29 @@ func load_backup() -> Dictionary:
 
 
 func delete_world(world_id: String) -> bool:
+	last_delete_error = OK
 	if not _valid_world_id(world_id):
+		last_delete_error = ERR_INVALID_PARAMETER
 		return false
 	if _remote_available():
-		return bool(remote_adapter.call("data_delete_world", world_id))
-	var removed := false
+		var deleted := bool(remote_adapter.call("data_delete_world", world_id))
+		if not deleted:
+			last_delete_error = ERR_UNAVAILABLE
+		return deleted
+	var directory := DirAccess.open(save_dir)
+	if directory == null:
+		last_delete_error = DirAccess.get_open_error()
+		return false
 	for path in [_world_path(world_id), _world_backup_path(world_id), _world_temp_path(world_id), _world_repair_source_path(world_id)]:
-		if not FileAccess.file_exists(path):
+		var file_name: String = path.get_file()
+		if not directory.file_exists(file_name):
 			continue
-		if DirAccess.remove_absolute(ProjectSettings.globalize_path(path)) != OK:
+		var error := directory.remove(file_name)
+		if error != OK and directory.file_exists(file_name):
+			last_delete_error = error
+			push_warning("World save deletion failed: %s" % error_string(error))
 			return false
-		removed = true
-	return removed
+	return true
 
 
 func _remote_available() -> bool:
