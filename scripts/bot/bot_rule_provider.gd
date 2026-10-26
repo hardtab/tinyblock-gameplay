@@ -2617,6 +2617,15 @@ func _stone_age_progression_action(observation: Dictionary, legal: PackedStringA
 
 
 func _stone_age_craft_or_gather(observation: Dictionary, legal: PackedStringArray, stage: String, output: String, plank_requirement: int) -> Dictionary:
+	# The early achievement can still be at craft_workbench after walking away
+	# from its first table. Its explicit recipe path must share reuse semantics
+	# with ordinary progression instead of manufacturing a second workbench.
+	if output in STATION_NAMES and (_station_is_available(observation, output) or _has_known_station(observation, output)):
+		if not _station_is_available(observation, output):
+			var existing_station := _nearest_station_target(observation, output)
+			if not existing_station.is_empty() and Contract.ACTION_MOVE_TO in legal:
+				return _stone_age_decision(stage, Contract.ACTION_MOVE_TO, existing_station, 1800, 0.9, observation)
+		return {}
 	var plan := RecipePlanner.plan(output, 1, _inventory(observation), _as_array(observation.get("recipes", [])))
 	var planned_step := _stone_age_recipe_step_action(plan, observation, legal, stage)
 	if not planned_step.is_empty():
