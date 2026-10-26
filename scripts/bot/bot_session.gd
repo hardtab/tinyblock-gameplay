@@ -1327,15 +1327,16 @@ func _default_movement_step(action: String, decision: Dictionary, observation: D
 		var fluid_shore_step := _fluid_shore_recovery_step(self_state, origin, target, delta)
 		if not fluid_shore_step.is_empty():
 			return fluid_shore_step
-	if action == Contract.ACTION_MOVE_TO and target_id.begins_with("container:"):
-		# Containers are solid blocks. Route to a supported interaction position,
+	if action == Contract.ACTION_MOVE_TO and (target_id.begins_with("container:") or target_id.begins_with("station:")):
+		# Containers and stations are solid blocks. Route to a supported interaction position,
 		# then use a proven intermediate waypoint when the chest is farther than
 		# the bounded route graph can solve in one action.
 		# An already verified jump/drop can span two short decision windows. Let
 		# the shared movement executor finish that transition before asking the
 		# grounded route graph for another waypoint from its airborne midpoint.
 		var continuing_verified_transition := _jump_active or not _active_verified_drop_step(origin, self_state).is_empty()
-		if not continuing_verified_transition and origin.distance_to(target) <= float(BlockDefs.TILE) * 4.5:
+		var within_interaction_reach := _station_available(_world_snapshot, target_id.get_slice(":", 1)) if target_id.begins_with("station:") else origin.distance_to(target) <= float(BlockDefs.TILE) * 4.5
+		if not continuing_verified_transition and within_interaction_reach:
 			_set_desired_input(false, false, false)
 			return {"done": true, "reason": "already_at_target"}
 		# The generic airborne settling guard below runs *after* this branch, so
@@ -6210,6 +6211,7 @@ func _build_observation(now_msec: int) -> Dictionary:
 	snapshot["craft_blocked_outputs"] = _active_craft_blocked_outputs(now_msec)
 	snapshot["food_eat_cooldown_until_msec"] = _food_eat_cooldown_until_msec
 	snapshot["terrain_tiles"] = _terrain_observation(snapshot["self"] as Dictionary)
+	snapshot["known_stations"] = _known_station_observation()
 	snapshot["terrain_known_cells"] = _terrain_known_cell_window(snapshot["self"] as Dictionary)
 	snapshot["lava_retreat_required"] = _update_lava_retreat_state(snapshot["self"] as Dictionary)
 	snapshot["safe_exploration_waypoints"] = _safe_exploration_waypoints(snapshot["self"] as Dictionary)
@@ -6994,6 +6996,22 @@ func _is_host_authoritative_regenerating_source(tile_x: int, tile_y: int) -> boo
 		and bool(source.get("regenerates_on_mine", false))
 		and bool(source.get("preserves_support_on_mine", false))
 	)
+
+
+func _known_station_observation() -> Array:
+	# Local digging observations deliberately omit distant terrain. Stations are
+	# reusable destinations, so retain the compact list from the entire host
+	# terrain cache without pretending a distant station is within craft reach.
+	var stations: Array = []
+	for raw_key in _terrain_tiles:
+		var name := str(_terrain_tiles[raw_key])
+		if _normalized_block_name(name) not in ["workbench", "furnace"]:
+			continue
+		var coordinates := str(raw_key).split(":")
+		if coordinates.size() != 2:
+			continue
+		stations.append({"x": int(coordinates[0]), "y": int(coordinates[1]), "block_name": name})
+	return stations
 
 
 func _terrain_observation(self_state: Dictionary) -> Array:

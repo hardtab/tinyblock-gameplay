@@ -2195,10 +2195,21 @@ func _station_progression_action(observation: Dictionary, foraging: bool) -> Dic
 		return {}
 	var inventory := _inventory(observation)
 	var confirmed_inventory: Dictionary = observation.get("host_confirmed_inventory_summary", inventory) if observation.get("host_confirmed_inventory_summary", inventory) is Dictionary else inventory
+	var needed_station := _needed_station_for_affordable_recipe(observation, foraging)
 	for station_name in STATION_NAMES:
 		if int(inventory.get(station_name, 0)) <= 0 or _station_is_available(observation, station_name):
 			continue
-		if int(confirmed_inventory.get(station_name, 0)) <= 0:
+		# Keep carried stations in inventory until a currently affordable recipe
+		# actually needs them. If one already exists, use it instead of placing
+		# the carried copy. A temporarily blocked route must not turn into a
+		# duplicate-station factory either.
+		if _has_known_station(observation, station_name):
+			if needed_station == station_name:
+				var existing_station := _nearest_station_target(observation, station_name)
+				if not existing_station.is_empty():
+					return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, existing_station, 1800, 0.9)
+			continue
+		if needed_station != station_name or int(confirmed_inventory.get(station_name, 0)) <= 0:
 			continue
 		var placement := _station_place_target(observation, station_name)
 		if not placement.is_empty():
@@ -2206,7 +2217,6 @@ func _station_progression_action(observation: Dictionary, foraging: bool) -> Dic
 		var work_area := BuildPlanner.station_work_area_step(observation, station_name)
 		if not work_area.is_empty():
 			return _decision(Contract.GOAL_BUILD, Contract.ACTION_PLACE, work_area, 900, 0.93)
-	var needed_station := _needed_station_for_affordable_recipe(observation, foraging)
 	if needed_station.is_empty() or _station_is_available(observation, needed_station):
 		return {}
 	var station_target := _nearest_station_target(observation, needed_station)
@@ -2322,19 +2332,16 @@ func _nearest_station_target(observation: Dictionary, station_name: String) -> D
 	var blocked_targets: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
 	var best := {}
 	var best_distance := INF
-	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
-		if not raw_tile is Dictionary:
-			continue
-		var tile := raw_tile as Dictionary
-		var block_name := str(tile.get("block_name", ""))
-		if str(_block_entry(block_name).get("station", "")) != station_name:
-			continue
-		var tile_x := int(tile.get("x", 0))
-		var tile_y := int(tile.get("y", 0))
-		var target_id := "station:%s:%d:%d" % [station_name, tile_x, tile_y]
+	for station_target in _known_station_targets(observation, station_name):
+		var tile_x := int(station_target.get("x", 0))
+		var tile_y := int(station_target.get("y", 0))
+		var target_id := str(station_target.get("id", "station:%s:%d:%d" % [station_name, tile_x, tile_y]))
 		if int(blocked_targets.get(target_id, 0)) > now_msec:
 			continue
+		var raw_position: Variant = station_target.get("position", [])
 		var position := Vector2((float(tile_x) + 0.5) * 32.0, (float(tile_y) + 0.5) * 32.0)
+		if raw_position is Array and raw_position.size() >= 2:
+			position = Vector2(float(raw_position[0]), float(raw_position[1]))
 		var distance := self_position.distance_to(position)
 		if distance >= best_distance:
 			continue
@@ -2347,6 +2354,45 @@ func _nearest_station_target(observation: Dictionary, station_name: String) -> D
 			"distance": distance,
 		}
 	return best
+
+
+func _has_known_station(observation: Dictionary, station_name: String) -> bool:
+	return not _known_station_targets(observation, station_name).is_empty()
+
+
+## Merge visible terrain with BotSession's longer-lived station memory. The
+## memory can suppress duplicates even when a station is outside the current
+## terrain window; routing still filters cooldown-blocked targets separately.
+func _known_station_targets(observation: Dictionary, station_name: String) -> Array[Dictionary]:
+	var targets: Array[Dictionary] = []
+	var seen := {}
+	for field in ["terrain_tiles", "known_stations"]:
+		for raw_station in _as_array(observation.get(field, [])):
+			if not raw_station is Dictionary:
+				continue
+			var station := raw_station as Dictionary
+			var block_name := str(station.get("block_name", station.get("content_id", station.get("block", ""))))
+			if _station_name_for_block(block_name) != station_name:
+				continue
+			var tile_x := int(station.get("x", 0))
+			var tile_y := int(station.get("y", 0))
+			var target_id := "station:%s:%d:%d" % [station_name, tile_x, tile_y]
+			if seen.has(target_id):
+				continue
+			seen[target_id] = true
+			var target := {"id": target_id, "x": tile_x, "y": tile_y}
+			var raw_position: Variant = station.get("position", [])
+			if raw_position is Array and raw_position.size() >= 2:
+				target["position"] = [float(raw_position[0]), float(raw_position[1])]
+			targets.append(target)
+	return targets
+
+
+func _station_name_for_block(block_name: String) -> String:
+	var station := str(_block_entry(block_name).get("station", ""))
+	if station.is_empty():
+		station = _normalized_resource_name(block_name)
+	return station
 
 
 ## Craft only a material that unlocks a concrete, safe escape placement. This
@@ -2416,6 +2462,8 @@ func _craftable_output(observation: Dictionary) -> String:
 		var output: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
 		for raw_name in output:
 			var name := str(raw_name)
+			if name in STATION_NAMES and (_station_is_available(observation, name) or _has_known_station(observation, name)):
+				continue
 			if name in GENERIC_OUTPUTS and name in LOCAL_OPTIMISTIC_CRAFTS and name not in blocked_outputs and int(inventory.get(name, 0)) <= 0 and _recipe_inputs_available(recipe, inventory):
 				return name
 	return ""
@@ -2439,7 +2487,7 @@ func _floating_bridge_plank_output(observation: Dictionary) -> String:
 func _progression_output_satisfied(inventory: Dictionary, output_name: String, observation: Dictionary = {}, unlocked: Array = []) -> bool:
 	if int(inventory.get(output_name, 0)) > 0:
 		return true
-	if output_name in STATION_NAMES and _station_is_available(observation, output_name):
+	if output_name in STATION_NAMES and (_station_is_available(observation, output_name) or _has_known_station(observation, output_name)):
 		return true
 	if unlocked.is_empty() and observation.get("achievements", {}) is Dictionary:
 		var achievements := observation.get("achievements", {}) as Dictionary
@@ -2517,6 +2565,17 @@ func _stone_age_progression_action(observation: Dictionary, legal: PackedStringA
 		"craft_workbench":
 			return _stone_age_craft_or_gather(observation, legal, stage, "workbench", 4)
 		"place_workbench":
+			if bool(observation.get("placement_pending", false)):
+				if Contract.ACTION_WAIT in legal:
+					return _stone_age_decision(stage, Contract.ACTION_WAIT, {}, 700, 0.75, observation)
+				return {}
+			if _station_is_available(observation, "workbench"):
+				return {}
+			if _has_known_station(observation, "workbench"):
+				var existing_workbench := _nearest_station_target(observation, "workbench")
+				if not existing_workbench.is_empty() and Contract.ACTION_MOVE_TO in legal:
+					return _stone_age_decision(stage, Contract.ACTION_MOVE_TO, existing_workbench, 1800, 0.9, observation)
+				return {}
 			if int(inventory.get("workbench", 0)) > 0 and Contract.ACTION_PLACE in legal:
 				var station_target := _station_place_target(observation, "workbench")
 				if not station_target.is_empty():
@@ -3204,9 +3263,14 @@ func _required_station_action(station_name: String, observation: Dictionary, leg
 	var confirmed_inventory: Dictionary = observation.get("host_confirmed_inventory_summary", inventory) if observation.get("host_confirmed_inventory_summary", inventory) is Dictionary else inventory
 	# Reuse/pursue an already placed station before crafting a duplicate. If it is
 	# not currently near enough for the recipe, route toward the observed station.
-	var existing_station := _nearest_station_target(observation, station_name)
-	if not existing_station.is_empty() and Contract.ACTION_MOVE_TO in legal:
-		return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, existing_station, 1800, 0.9)
+	if _has_known_station(observation, station_name):
+		var existing_station := _nearest_station_target(observation, station_name)
+		if not existing_station.is_empty() and Contract.ACTION_MOVE_TO in legal:
+			return _decision(Contract.GOAL_ACHIEVEMENT, Contract.ACTION_MOVE_TO, existing_station, 1800, 0.9)
+		# A known station whose route is temporarily blocked is not a reason to
+		# manufacture and place another copy. The retry cooldown decides when to
+		# reconsider that same station.
+		return {}
 	if int(inventory.get(station_name, 0)) > 0:
 		if int(confirmed_inventory.get(station_name, 0)) <= 0:
 			return {}
