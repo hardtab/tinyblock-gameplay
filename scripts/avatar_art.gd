@@ -76,8 +76,8 @@ static func draw_avatar(
 		_draw_particles(canvas, origin, sx, sy, str(appearance.particles), animation_time)
 	if draw_shadow:
 		canvas.draw_rect(_rect(origin, sx, sy, 1.0, 25.0, 18.0, 4.0), Color(0.0, 0.0, 0.0, 0.16))
-	if str(appearance.get("outfit", "classic")) == "garon":
-		_draw_garon_wisp(canvas, origin, sx, sy, facing, animation_time)
+	if str(appearance.get("particles", "none")) == "garon":
+		_draw_garon_shoulder_particles(canvas, origin, sx, sy, facing, animation_time)
 
 	if str(appearance.get("outfit", "classic")) == "garon":
 		_draw_garon_legs(canvas, origin, sx, sy, pants)
@@ -92,29 +92,50 @@ static func draw_avatar(
 		_draw_garon_headwear(canvas, origin, sx, sy, shirt, hair)
 
 
-static func garon_wisp_position(origin: Vector2, sx: float, sy: float, facing: int, elapsed: float) -> Vector2:
-	var shoulder_x := 0.0 if facing >= 0 else 20.0
-	return _point(origin, sx, sy, shoulder_x + cos(elapsed * 0.7) * 0.2, 9.5 + sin(elapsed * 2.1) * 0.9)
+static func garon_shoulder_particles(origin: Vector2, sx: float, sy: float, facing: int, elapsed: float) -> Array[Dictionary]:
+	const EMIT_INTERVAL := 0.3
+	const LIFETIME := 1.2
+	var particles: Array[Dictionary] = []
+	var direction := 1.0 if facing >= 0 else -1.0
+	var emission_index := int(floor(maxf(0.0, elapsed) / EMIT_INTERVAL))
+	for age_step in range(4):
+		var index := emission_index - age_step
+		if index < 0:
+			break
+		var born_at := float(index) * EMIT_INTERVAL
+		var age := maxf(0.0, elapsed - born_at)
+		if age >= LIFETIME:
+			break
+		var phase := float(index) * 2.39996
+		var normalized_age := age / LIFETIME
+		var shoulder := _point(origin, sx, sy, 0.2 if direction > 0.0 else 19.8, 9.5)
+		var position := shoulder + Vector2(
+			-direction * (2.0 + 7.0 * normalized_age) + direction * sin(phase + age * 3.0) * 1.4,
+			-1.5 - 7.0 * normalized_age + cos(phase + age * 2.0) * 1.0
+		) * Vector2(sx, sy)
+		particles.append({
+			"position": position,
+			"age": age,
+			"lifetime": LIFETIME,
+			"alpha": pow(clampf(1.0 - normalized_age, 0.0, 1.0), 1.25),
+			"radius": 0.55 + 0.85 * normalized_age,
+			"phase": phase,
+		})
+	return particles
 
 
-static func _draw_garon_wisp(canvas: CanvasItem, origin: Vector2, sx: float, sy: float, facing: int, elapsed: float) -> void:
+static func _draw_garon_shoulder_particles(canvas: CanvasItem, origin: Vector2, sx: float, sy: float, facing: int, elapsed: float) -> void:
 	var unit := minf(sx, sy)
-	var center := garon_wisp_position(origin, sx, sy, facing, elapsed)
-	var pulse := 0.82 + 0.18 * sin(elapsed * 2.7)
 	var cyan := Color("#27e9ed")
-	var glow := Color(cyan, 0.15 * pulse)
-	canvas.draw_circle(center, 3.1 * unit, glow)
-	canvas.draw_circle(center, 2.0 * unit, Color(cyan, 0.42 * pulse))
-	var wisp := PackedVector2Array([
-		center + Vector2(-1.15, 0.0) * unit,
-		center + Vector2(-0.45, -1.35) * unit,
-		center + Vector2(0.55, -1.2) * unit,
-		center + Vector2(1.15, -0.1) * unit,
-		center + Vector2(0.45, 1.2) * unit,
-		center + Vector2(-0.55, 1.15) * unit,
-	])
-	canvas.draw_colored_polygon(wisp, Color(cyan, 0.95 * pulse))
-	canvas.draw_circle(center, 0.5 * unit, Color("#e8ffff", pulse))
+	for particle in garon_shoulder_particles(origin, sx, sy, facing, elapsed):
+		var position: Vector2 = particle["position"]
+		var alpha := float(particle["alpha"])
+		var radius := float(particle["radius"]) * unit
+		var pulse := 0.82 + 0.18 * sin(float(particle["phase"]) + elapsed * 4.0)
+		canvas.draw_circle(position, radius * 2.8, Color(cyan, 0.07 * alpha * pulse))
+		canvas.draw_circle(position, radius * 1.6, Color(cyan, 0.18 * alpha * pulse))
+		canvas.draw_arc(position, radius, 0.0, TAU, 12, Color(cyan.lightened(0.25), 0.85 * alpha * pulse), maxf(0.65, unit * 0.48), true)
+		canvas.draw_circle(position, maxf(0.45, radius * 0.24), Color("#e8ffff", alpha * pulse))
 
 
 static func _draw_garon_outfit(
