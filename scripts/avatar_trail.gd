@@ -9,10 +9,10 @@ const FIRE_LIFETIME := 0.4
 const FIRE_MAX_DISTANCE := 40.0
 const FIRE_SCALE := 0.6
 const FIRE_IDLE_INTERVAL := 0.32 / 1.5
-const IDLE_STYLES: Array[String] = ["fire", "fireflies", "stars"]
+const IDLE_STYLES: Array[String] = ["fire", "fireflies", "stars", "garon"]
 const TELEPORT_DISTANCE := 96.0
 const MAX_EMISSIONS_PER_STEP := 8
-const STYLES: Array[String] = ["flowers", "fireflies", "stars", "sparks", "fire"]
+const STYLES: Array[String] = ["flowers", "fireflies", "stars", "sparks", "fire", "garon"]
 
 var particles: Array[Dictionary] = []
 var _emitters: Dictionary = {}
@@ -58,7 +58,7 @@ func advance(delta: float, actors: Dictionary) -> void:
 			previous["carry"] = 0.0
 		elif bool(actor.get("moving", true)) and distance > 0.1:
 			previous["idle_time"] = 0.0
-			var spacing := SPACING / FIRE_DENSITY if style == "fire" else SPACING
+			var spacing := SPACING / FIRE_DENSITY if style == "fire" else (7.5 if style == "garon" else SPACING)
 			var next_distance := spacing - float(previous["carry"])
 			var emitted := 0
 			while next_distance <= distance and emitted < MAX_EMISSIONS_PER_STEP:
@@ -69,7 +69,7 @@ func advance(delta: float, actors: Dictionary) -> void:
 		else:
 			previous["carry"] = 0.0
 			previous["idle_time"] = float(previous.get("idle_time", 0.0)) + maxf(0.0, delta)
-			var idle_interval := FIRE_IDLE_INTERVAL if style == "fire" else 0.7
+			var idle_interval := FIRE_IDLE_INTERVAL if style == "fire" else (1.1 if style == "garon" else 0.7)
 			if style in IDLE_STYLES and float(previous["idle_time"]) >= idle_interval:
 				_spawn(player_id, position, style)
 				previous["idle_time"] = fposmod(float(previous["idle_time"]), idle_interval)
@@ -100,11 +100,12 @@ func _drop_emitter(player_id: String) -> void:
 func _spawn(player_id: String, position: Vector2, style: String) -> void:
 	_sequence += 1
 	var phase := fposmod(float(player_id.hash() % 1000) * 0.1 + float(_sequence) * 2.39996, TAU)
-	var lifetime := 2.0 if style == "flowers" else (FIRE_LIFETIME if style == "fire" else (0.8 if style == "sparks" else 1.3))
-	var drift := Vector2.ZERO if style == "flowers" else Vector2(sin(phase) * 2.0, -6.0 if style == "fireflies" else -10.0)
+	var lifetime := 2.0 if style == "flowers" else (FIRE_LIFETIME if style == "fire" else (0.55 if style == "garon" else (0.8 if style == "sparks" else 1.3)))
+	var drift := Vector2.ZERO if style == "flowers" else (Vector2(sin(phase) * 3.0, -5.0) if style == "garon" else Vector2(sin(phase) * 2.0, -6.0 if style == "fireflies" else -10.0))
+	var offset := Vector2(sin(phase) * 4.0, 0.0) if style == "garon" else Vector2(sin(phase) * 4.0, cos(phase) * 1.5)
 	particles.append({
 		"player_id": player_id, "style": style,
-		"position": position + Vector2(sin(phase) * 4.0, cos(phase) * 1.5),
+		"position": position + offset,
 		"drift": drift, "age": 0.0, "lifetime": lifetime, "phase": phase,
 	})
 	if particles.size() > MAX_PARTICLES:

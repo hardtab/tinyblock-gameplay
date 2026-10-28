@@ -14,6 +14,7 @@ const DEFAULT_APPEARANCE := {
 	"legs": "classic",
 	"face": "none",
 	"particles": "none",
+	"outfit": "classic",
 }
 const ENUM_OPTIONS := {
 	"body_shape": ["classic", "round", "boxy"],
@@ -21,7 +22,8 @@ const ENUM_OPTIONS := {
 	"arms": ["classic", "long", "tiny"],
 	"legs": ["classic", "short", "spring"],
 	"face": ["none", "mustache", "whiskers"],
-	"particles": ["none", "flowers", "fireflies", "stars", "sparks", "fire"],
+	"particles": ["none", "flowers", "fireflies", "stars", "sparks", "fire", "garon"],
+	"outfit": ["classic", "garon"],
 }
 
 
@@ -74,11 +76,93 @@ static func draw_avatar(
 		_draw_particles(canvas, origin, sx, sy, str(appearance.particles), animation_time)
 	if draw_shadow:
 		canvas.draw_rect(_rect(origin, sx, sy, 1.0, 25.0, 18.0, 4.0), Color(0.0, 0.0, 0.0, 0.16))
+	if str(appearance.get("outfit", "classic")) == "garon":
+		_draw_garon_wisp(canvas, origin, sx, sy, facing, animation_time)
 
-	_draw_legs(canvas, origin, sx, sy, pants, pants.darkened(0.24), skin, str(appearance.legs))
+	if str(appearance.get("outfit", "classic")) == "garon":
+		_draw_garon_legs(canvas, origin, sx, sy, pants)
+	else:
+		_draw_legs(canvas, origin, sx, sy, pants, pants.darkened(0.24), skin, str(appearance.legs))
 	_draw_torso(canvas, origin, sx, sy, shirt, shirt_dark, accent, str(appearance.body_shape))
 	_draw_arms(canvas, origin, sx, sy, shirt_dark, skin, str(appearance.arms))
+	if str(appearance.get("outfit", "classic")) == "garon":
+		_draw_garon_outfit(canvas, origin, sx, sy, shirt, accent, hair)
 	_draw_head(canvas, origin, sx, sy, skin, hair, Color("#1a1a1a"), facing, appearance)
+	if str(appearance.get("outfit", "classic")) == "garon":
+		_draw_garon_headwear(canvas, origin, sx, sy, shirt, hair)
+
+
+static func garon_wisp_position(origin: Vector2, sx: float, sy: float, facing: int, elapsed: float) -> Vector2:
+	var shoulder_x := 0.0 if facing >= 0 else 20.0
+	return _point(origin, sx, sy, shoulder_x + cos(elapsed * 0.7) * 0.2, 9.5 + sin(elapsed * 2.1) * 0.9)
+
+
+static func _draw_garon_wisp(canvas: CanvasItem, origin: Vector2, sx: float, sy: float, facing: int, elapsed: float) -> void:
+	var unit := minf(sx, sy)
+	var center := garon_wisp_position(origin, sx, sy, facing, elapsed)
+	var pulse := 0.82 + 0.18 * sin(elapsed * 2.7)
+	var cyan := Color("#27e9ed")
+	var glow := Color(cyan, 0.15 * pulse)
+	canvas.draw_circle(center, 3.1 * unit, glow)
+	canvas.draw_circle(center, 2.0 * unit, Color(cyan, 0.42 * pulse))
+	var wisp := PackedVector2Array([
+		center + Vector2(-1.15, 0.0) * unit,
+		center + Vector2(-0.45, -1.35) * unit,
+		center + Vector2(0.55, -1.2) * unit,
+		center + Vector2(1.15, -0.1) * unit,
+		center + Vector2(0.45, 1.2) * unit,
+		center + Vector2(-0.55, 1.15) * unit,
+	])
+	canvas.draw_colored_polygon(wisp, Color(cyan, 0.95 * pulse))
+	canvas.draw_circle(center, 0.5 * unit, Color("#e8ffff", pulse))
+
+
+static func _draw_garon_outfit(
+	canvas: CanvasItem, origin: Vector2, sx: float, sy: float,
+	shirt: Color, cyan: Color, purple: Color
+) -> void:
+	var unit := minf(sx, sy)
+	var black := Color("#11131a")
+	# Keep the shirt simple; add only the purple trim and belt from Garon's look.
+	canvas.draw_rect(_rect(origin, sx, sy, 3, 9, 14, 11), shirt)
+	canvas.draw_rect(_rect(origin, sx, sy, 3, 9, 14, 1.2), purple)
+	canvas.draw_rect(_rect(origin, sx, sy, 3, 18, 14, 1.6), purple.darkened(0.08))
+	canvas.draw_line(_point(origin, sx, sy, 4, 11), _point(origin, sx, sy, 4, 18), purple.darkened(0.12), maxf(0.8, 0.7 * unit), true)
+	canvas.draw_line(_point(origin, sx, sy, 16, 11), _point(origin, sx, sy, 16, 18), purple.darkened(0.12), maxf(0.8, 0.7 * unit), true)
+	# Lime sleeves stay visible, with small cyan marks and simple shoulder tabs.
+	for dot_y in [13.0, 15.3, 17.4]:
+		canvas.draw_rect(_rect(origin, sx, sy, 2.1, dot_y, 1.1, 1.1), cyan)
+		canvas.draw_rect(_rect(origin, sx, sy, 16.8, dot_y, 1.1, 1.1), cyan)
+	canvas.draw_rect(_rect(origin, sx, sy, 1, 10.5, 3.5, 1.1), cyan)
+	canvas.draw_rect(_rect(origin, sx, sy, 15.5, 10.5, 3.5, 1.1), cyan)
+	# Small belt clasp and dark gloves; the silhouette remains blocky and compact.
+	canvas.draw_rect(_rect(origin, sx, sy, 9.1, 18.1, 1.8, 1.5), black)
+	canvas.draw_rect(_rect(origin, sx, sy, 9.45, 18.35, 1.1, 1.0), cyan)
+	canvas.draw_rect(_rect(origin, sx, sy, 1, 21, 3, 2.3), black)
+	canvas.draw_rect(_rect(origin, sx, sy, 16, 21, 3, 2.3), black)
+	# Cyan seams split the dark legs and branch into small sparks at the feet.
+	for seam_x in [7.5, 12.5]:
+		canvas.draw_line(_point(origin, sx, sy, seam_x, 21), _point(origin, sx, sy, seam_x, 26.7), cyan, maxf(0.8, 0.7 * unit), true)
+	canvas.draw_line(_point(origin, sx, sy, 7.5, 26.2), _point(origin, sx, sy, 5.7, 27.4), cyan, maxf(0.8, 0.65 * unit), true)
+	canvas.draw_line(_point(origin, sx, sy, 7.5, 26.2), _point(origin, sx, sy, 9.0, 27.5), cyan, maxf(0.8, 0.65 * unit), true)
+	canvas.draw_line(_point(origin, sx, sy, 12.5, 26.2), _point(origin, sx, sy, 11.0, 27.5), cyan, maxf(0.8, 0.65 * unit), true)
+	canvas.draw_line(_point(origin, sx, sy, 12.5, 26.2), _point(origin, sx, sy, 14.3, 27.4), cyan, maxf(0.8, 0.65 * unit), true)
+
+
+static func _draw_garon_legs(canvas: CanvasItem, origin: Vector2, sx: float, sy: float, pants: Color) -> void:
+	# Garon wears two slim, straight trouser legs instead of the default spring legs.
+	canvas.draw_rect(_rect(origin, sx, sy, 5.5, 18, 9, 2), pants.darkened(0.12))
+	canvas.draw_rect(_rect(origin, sx, sy, 6, 19, 3, 8.5), pants)
+	canvas.draw_rect(_rect(origin, sx, sy, 11, 19, 3, 8.5), pants)
+
+
+static func _draw_garon_headwear(
+	canvas: CanvasItem, origin: Vector2, sx: float, sy: float,
+	band: Color, purple: Color
+) -> void:
+	# The existing square hair block doubles as the cap; add a thin lavender band.
+	canvas.draw_rect(_rect(origin, sx, sy, 4, 3.2, 12, 0.9), band)
+	canvas.draw_rect(_rect(origin, sx, sy, 4, 4.1, 12, 0.55), purple.darkened(0.12))
 
 
 static func _draw_torso(
@@ -225,6 +309,15 @@ static func _draw_particles(
 				var tail := point + Vector2(-cos(phase) * 2.0 * sx, 2.6 * sy)
 				canvas.draw_line(tail, point, Color("#ff8838", 0.9), maxf(0.8, unit), true)
 				canvas.draw_circle(point, maxf(0.8, unit * 0.7), Color("#ffe29a"))
+		"garon":
+			for index in range(3):
+				var phase := elapsed * 3.8 + float(index) * 2.1
+				var x := 4.0 + float(index) * 6.0 + sin(phase) * 1.5
+				var y := 24.0 + fposmod(float(index) * 2.2 + elapsed * 4.2, 3.5)
+				var point := _point(particle_origin, sx, sy, x, y)
+				var spark_color := Color("#27e9ed", 0.72 + 0.28 * sin(phase))
+				canvas.draw_line(point + Vector2(-0.8, 1.2) * unit, point + Vector2(0.8, -1.2) * unit, spark_color, maxf(0.8, unit * 0.75), true)
+				canvas.draw_circle(point, maxf(0.6, unit * 0.45), Color("#e8ffff"))
 
 		"fire":
 			const FIRE_PREVIEW_LIFETIME := 0.3
@@ -260,6 +353,14 @@ static func draw_trail_particle(canvas: CanvasItem, position: Vector2, style: St
 		"sparks":
 			canvas.draw_line(position + Vector2(sin(phase) * -2.0, 3.0) * unit, position, Color(1.0, 0.4, 0.15, alpha), unit)
 			canvas.draw_circle(position, radius * 0.6, Color(1.0, 0.9, 0.6, alpha))
+		"garon":
+			var flicker := 0.82 + 0.18 * sin(phase + age * 9.0)
+			var cyan := Color(0.12, 0.9, 0.93, alpha * flicker)
+			var tail := position + Vector2(sin(phase) * -2.0, 2.2) * unit
+			canvas.draw_line(tail, position, Color(0.12, 0.9, 0.93, alpha * 0.7), maxf(0.7, unit * 0.7), true)
+			canvas.draw_line(position + Vector2(-1.1, 0.0) * unit, position + Vector2(1.1, 0.0) * unit, cyan, maxf(0.7, unit * 0.65), true)
+			canvas.draw_line(position + Vector2(0.0, -1.1) * unit, position + Vector2(0.0, 1.1) * unit, cyan, maxf(0.7, unit * 0.65), true)
+			canvas.draw_circle(position, radius * 0.42, Color(0.9, 1.0, 1.0, alpha))
 		"fire":
 			var height := (4.0 + alpha * 4.0 + sin(phase + age * 17.0)) * unit
 			canvas.draw_circle(position - Vector2(0, height * 0.3), radius * 2.6, Color(1.0, 0.25, 0.04, alpha * 0.12))
@@ -287,7 +388,7 @@ static func draw_trail_glow(
 	darkness: float,
 	unit: float = 1.0
 ) -> void:
-	if style not in ["fireflies", "stars", "fire"]:
+	if style not in ["fireflies", "stars", "fire", "garon"]:
 		return
 	var particle_alpha := trail_alpha(age, lifetime)
 	if particle_alpha < 0.22:
@@ -301,6 +402,8 @@ static func draw_trail_glow(
 		color = Color(1.0, 0.94, 0.62)
 	elif style == "fire":
 		color = Color(1.0, 0.34, 0.1)
+	elif style == "garon":
+		color = Color(0.12, 0.9, 0.93)
 	var radius := clampf(5.0 * maxf(unit, 0.25), 3.5, 6.0)
 	var strength := night_factor * particle_alpha * pulse
 	# Low-alpha nested circles approximate a soft halo while keeping each glow

@@ -20,7 +20,8 @@ const ENUM_OPTIONS := {
 	"arms": ["classic", "long", "tiny"],
 	"legs": ["classic", "short", "spring"],
 	"face": ["none", "mustache", "whiskers"],
-	"particles": ["none", "flowers", "fireflies", "stars", "sparks", "fire"],
+	"particles": ["none", "flowers", "fireflies", "stars", "sparks", "fire", "garon"],
+	"outfit": ["classic", "garon"],
 }
 
 signal appearance_changed(skin: Dictionary)
@@ -81,6 +82,7 @@ func _skin_from_id(id: String) -> Dictionary:
 		"legs": "classic",
 		"face": "none",
 		"particles": "none",
+		"outfit": "classic",
 	}
 
 

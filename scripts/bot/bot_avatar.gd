@@ -31,6 +31,8 @@ static func random_appearance(rng: RandomNumberGenerator, previous: Variant = {}
 	for key in AvatarArt.ENUM_OPTIONS:
 		var values: Array = AvatarArt.ENUM_OPTIONS[key]
 		appearance[key] = values[generator.randi_range(0, values.size() - 1)]
+	# Garon is a player quick look, not a randomly assigned bot costume.
+	appearance["outfit"] = "classic"
 	appearance = AvatarArt.normalize_appearance(appearance)
 
 	if previous is Dictionary and not (previous as Dictionary).is_empty():
