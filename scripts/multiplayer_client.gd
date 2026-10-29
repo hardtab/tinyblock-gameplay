@@ -19,6 +19,13 @@ const RTC_PING_RESPONSE_GRACE_SECONDS := 3.0
 const RTC_RECONNECT_TIMEOUT_SECONDS := 6.0
 const RTC_MAX_RECONNECT_ATTEMPTS := 3
 const RTC_MAX_OFFER_GENERATION := 2147483647
+const RTC_MAX_FUTURE_OFFER_GENERATION_GAP := RTC_MAX_RECONNECT_ATTEMPTS + 1
+const RTC_MAX_FUTURE_OFFER_GENERATIONS_PER_PEER := RTC_MAX_RECONNECT_ATTEMPTS + 1
+const RTC_MAX_FUTURE_CANDIDATES_PER_PEER := 32
+const RTC_MAX_FUTURE_CANDIDATE_BYTES_PER_PEER := 16 * 1024
+const RTC_MAX_CANDIDATE_TEXT_LENGTH := 2048
+const RTC_MAX_CANDIDATE_MEDIA_LENGTH := 64
+const RTC_MAX_CONNECTION_ID_LENGTH := 128
 const RTC_DIAGNOSTIC_TRACE_LIMIT := 64
 const RTC_DIAGNOSTIC_CANDIDATES_PER_PEER := 8
 const RTC_SILENCE_RECOVERY_WEBSOCKET := "websocket"
@@ -60,6 +67,7 @@ var _rtc_channels: Dictionary = {}
 var _rtc_voice_channels: Dictionary = {}
 var _rtc_remote_description_set: Dictionary = {}
 var _rtc_pending_candidates: Dictionary = {}
+var _rtc_future_candidate_buffers: Dictionary = {}
 var _rtc_ready_peers: Dictionary = {}
 var _rtc_connection_ids: Dictionary = {}
 var _rtc_offer_generations: Dictionary = {}
@@ -461,6 +469,7 @@ func _handle_ws_packet(packet: PackedByteArray) -> void:
 	elif kind == "control" and type == "player_left":
 		var left_id := str(message.get("player_id", ""))
 		_known_players.erase(left_id)
+		_rtc_future_candidate_buffers.erase(left_id)
 		_close_rtc_peer(left_id, "player_left")
 		_rtc_highest_offer_generations.erase(left_id)
 		_rtc_highest_offer_connection_ids.erase(left_id)
@@ -589,6 +598,65 @@ static func _managed_rtc_generation_rejection_reason(protocol_version: int, inco
 	return "accepted" if current_generation > 0 and generation == current_generation else "generation_mismatch"
 
 
+static func managed_rtc_future_candidate_decision(
+	protocol_version: int,
+	incoming_generation: Variant,
+	incoming_connection_id: String,
+	highest_generation: int,
+	has_generation_slot: bool,
+	slot_connection_id: String,
+	buffered_generation_count: int,
+	buffered_candidate_count: int,
+	buffered_bytes: int,
+	candidate_bytes: int,
+) -> String:
+	if protocol_version != MANAGED_PROTOCOL_VERSION:
+		return "legacy_unsupported"
+	var generation := _managed_rtc_offer_generation_value(incoming_generation)
+	if generation <= 0:
+		return "invalid_generation"
+	if incoming_connection_id.is_empty() or incoming_connection_id.length() > RTC_MAX_CONNECTION_ID_LENGTH:
+		return "invalid_connection_id"
+	if generation <= highest_generation:
+		return "stale_generation"
+	if generation - highest_generation > RTC_MAX_FUTURE_OFFER_GENERATION_GAP:
+		return "future_generation_too_far"
+	if has_generation_slot and incoming_connection_id != slot_connection_id:
+		return "same_generation_connection_mismatch"
+	if not has_generation_slot and buffered_generation_count >= RTC_MAX_FUTURE_OFFER_GENERATIONS_PER_PEER:
+		return "future_generation_capacity"
+	if buffered_candidate_count >= RTC_MAX_FUTURE_CANDIDATES_PER_PEER or candidate_bytes < 0 or buffered_bytes + candidate_bytes > RTC_MAX_FUTURE_CANDIDATE_BYTES_PER_PEER:
+		return "future_candidate_capacity"
+	return "buffer"
+
+
+static func _managed_rtc_candidate_payload(payload: Dictionary) -> Dictionary:
+	var media_value: Variant = payload.get("media", "")
+	var index_value: Variant = payload.get("index", null)
+	var name_value: Variant = payload.get("name", "")
+	if typeof(media_value) != TYPE_STRING or typeof(name_value) != TYPE_STRING:
+		return {"ok": false, "reason": "invalid_candidate"}
+	var media := str(media_value)
+	var candidate_name := str(name_value)
+	if media.is_empty() or media.to_utf8_buffer().size() > RTC_MAX_CANDIDATE_MEDIA_LENGTH:
+		return {"ok": false, "reason": "invalid_candidate"}
+	if candidate_name.is_empty() or candidate_name.to_utf8_buffer().size() > RTC_MAX_CANDIDATE_TEXT_LENGTH:
+		return {"ok": false, "reason": "invalid_candidate"}
+	var candidate_index := -1
+	if typeof(index_value) == TYPE_INT:
+		candidate_index = int(index_value)
+	elif typeof(index_value) == TYPE_FLOAT:
+		var numeric_index := float(index_value)
+		if is_finite(numeric_index) and floorf(numeric_index) == numeric_index and numeric_index >= 0.0 and numeric_index <= 65535.0:
+			candidate_index = int(numeric_index)
+	if candidate_index < 0 or candidate_index > 65535:
+		return {"ok": false, "reason": "invalid_candidate"}
+	return {
+		"ok": true,
+		"candidate": {"media": media, "index": candidate_index, "name": candidate_name},
+	}
+
+
 func _managed_rtc_offer_rejection_reason(
 	incoming_generation: Variant,
 	incoming_connection_id: String,
@@ -667,7 +735,7 @@ func _rtc_diag_event(
 	for key in extra:
 		if key in [
 			"signal_type", "decision", "reason", "description_type", "result_code", "candidate_type",
-			"candidate_index", "candidate_action", "websocket_send_ok", "websocket_outbound_before_bytes",
+			"candidate_index", "candidate_count", "candidate_action", "websocket_send_ok", "websocket_outbound_before_bytes",
 			"websocket_outbound_after_bytes", "websocket_send_result", "send_error", "incoming_generation", "highest_generation",
 			"rtc_send_ok", "last_seen_age_ms", "probe_grace_ms", "close_reason",
 		]:
@@ -1070,22 +1138,52 @@ func _handle_rtc_signal(message: Dictionary) -> void:
 			payload.get("offer_generation", null),
 			int(_rtc_offer_generations.get(remote_id, 0)),
 		)
+		var candidate: Dictionary = {}
+		if session_protocol_version == MANAGED_PROTOCOL_VERSION:
+			var candidate_payload := _managed_rtc_candidate_payload(payload)
+			if not bool(candidate_payload.get("ok", false)):
+				_rtc_diag_event("rtc_candidate_rejected", remote_id, connection_id, incoming_generation, {"reason": str(candidate_payload.get("reason", "invalid_candidate"))})
+				return
+			candidate = candidate_payload.get("candidate", {})
+		else:
+			candidate = {
+				"media": str(payload.get("media", "")),
+				"index": int(payload.get("index", 0)),
+				"name": str(payload.get("name", "")),
+			}
 		if candidate_rejection_reason == "accepted" and connection_id.is_empty():
 			candidate_rejection_reason = "missing_connection_id"
 		elif candidate_rejection_reason == "accepted" and connection_id != str(_rtc_connection_ids.get(remote_id, "")):
 			candidate_rejection_reason = "connection_id_mismatch"
+		var current_generation := int(_rtc_offer_generations.get(remote_id, 0))
+		if role == "host" and session_protocol_version == MANAGED_PROTOCOL_VERSION and incoming_generation > current_generation:
+			var queue_result := _queue_future_rtc_candidate(remote_id, connection_id, incoming_generation, candidate)
+			if queue_result in ["buffer", "duplicate"]:
+				_rtc_diag_event("future_candidate_buffered", remote_id, connection_id, incoming_generation, {
+					"decision": "accept" if queue_result == "buffer" else "duplicate",
+					"candidate_type": _rtc_diag_candidate_type(str(candidate.get("name", ""))),
+					"candidate_index": int(candidate.get("index", 0)),
+				})
+				return
+			_rtc_diag_event("rtc_candidate_rejected", remote_id, connection_id, incoming_generation, {"reason": queue_result})
+			return
 		if candidate_rejection_reason != "accepted":
 			_rtc_diag_event("rtc_candidate_rejected", remote_id, connection_id, incoming_generation, {"reason": candidate_rejection_reason})
 			return
-		var candidate := {
-			"media": str(payload.get("media", "")),
-			"index": int(payload.get("index", 0)),
-			"name": str(payload.get("name", "")),
-		}
 		if not _rtc_peers.has(remote_id) or not bool(_rtc_remote_description_set.get(remote_id, false)):
 			if not _rtc_pending_candidates.has(remote_id):
 				_rtc_pending_candidates[remote_id] = []
-			(_rtc_pending_candidates[remote_id] as Array).append(candidate)
+			var pending_candidates: Array = _rtc_pending_candidates[remote_id]
+			if session_protocol_version == MANAGED_PROTOCOL_VERSION:
+				var pending_bytes := 0
+				for raw_candidate in pending_candidates:
+					if raw_candidate is Dictionary:
+						pending_bytes += _rtc_candidate_byte_size(raw_candidate as Dictionary)
+				if pending_candidates.size() >= RTC_MAX_FUTURE_CANDIDATES_PER_PEER or pending_bytes + _rtc_candidate_byte_size(candidate) > RTC_MAX_FUTURE_CANDIDATE_BYTES_PER_PEER:
+					_rtc_diag_event("rtc_candidate_rejected", remote_id, connection_id, incoming_generation, {"reason": "pending_candidate_capacity"})
+					return
+			pending_candidates.append(candidate)
+			_rtc_pending_candidates[remote_id] = pending_candidates
 			if _rtc_diag_can_record_candidate(remote_id, "remote"):
 				_rtc_diag_event("remote_candidate_queued", remote_id, connection_id, incoming_generation, {
 					"candidate_type": _rtc_diag_candidate_type(str(candidate.get("name", ""))),
@@ -1098,6 +1196,8 @@ func _handle_rtc_signal(message: Dictionary) -> void:
 
 func _set_rtc_remote_description(remote_id: String, type: String, sdp: String) -> void:
 	var peer: WebRTCPeerConnection = _rtc_peers.get(remote_id)
+	var connection_id := str(_rtc_connection_ids.get(remote_id, ""))
+	var offer_generation := int(_rtc_offer_generations.get(remote_id, -1))
 	var result_code := ERR_DOES_NOT_EXIST
 	var reason := "peer_missing"
 	if peer != null:
@@ -1114,20 +1214,138 @@ func _set_rtc_remote_description(remote_id: String, type: String, sdp: String) -
 	})
 	if peer == null or sdp.is_empty() or result_code != OK:
 		return
+	if not _rtc_callback_is_current(remote_id, peer, connection_id, offer_generation):
+		return
 	_rtc_remote_description_set[remote_id] = true
 	var pending: Array = _rtc_pending_candidates.get(remote_id, []) if _rtc_pending_candidates.get(remote_id, []) is Array else []
-	for raw_candidate in pending:
-		if raw_candidate is Dictionary:
-			_add_rtc_candidate(remote_id, raw_candidate as Dictionary)
 	_rtc_pending_candidates[remote_id] = []
+	if role == "host" and session_protocol_version == MANAGED_PROTOCOL_VERSION and type == "offer":
+		pending.append_array(_flush_future_rtc_candidates(remote_id, connection_id, offer_generation, peer))
+	for raw_candidate in pending:
+		if not _rtc_callback_is_current(remote_id, peer, connection_id, offer_generation):
+			break
+		if raw_candidate is Dictionary:
+			_add_rtc_candidate(remote_id, raw_candidate as Dictionary, peer, connection_id, offer_generation)
 
 
-func _add_rtc_candidate(remote_id: String, candidate: Dictionary) -> void:
+func _queue_future_rtc_candidate(remote_id: String, connection_id: String, generation: int, candidate: Dictionary) -> String:
+	var slots: Array = _rtc_future_candidate_buffers.get(remote_id, []) if _rtc_future_candidate_buffers.get(remote_id, []) is Array else []
+	var slot_index := -1
+	var slot_connection_id := ""
+	var buffered_candidate_count := 0
+	var buffered_bytes := 0
+	for index in slots.size():
+		var slot: Variant = slots[index]
+		if not slot is Dictionary:
+			continue
+		var slot_candidates: Variant = slot.get("candidates", [])
+		if not slot_candidates is Array:
+			continue
+		for raw_candidate in slot_candidates:
+			if raw_candidate is Dictionary:
+				buffered_candidate_count += 1
+				buffered_bytes += _rtc_candidate_byte_size(raw_candidate as Dictionary)
+		if int(slot.get("offer_generation", -1)) == generation:
+			slot_index = index
+			slot_connection_id = str(slot.get("connection_id", ""))
+			if slot_candidates.has(candidate):
+				return "duplicate"
+	var incoming_candidate_bytes := _rtc_candidate_byte_size(candidate)
+	var decision := managed_rtc_future_candidate_decision(
+		session_protocol_version,
+		generation,
+		connection_id,
+		int(_rtc_highest_offer_generations.get(remote_id, 0)),
+		slot_index >= 0,
+		slot_connection_id,
+		slots.size(),
+		buffered_candidate_count,
+		buffered_bytes,
+		incoming_candidate_bytes,
+	)
+	if decision != "buffer":
+		return decision
+	if slot_index < 0:
+		slots.append({"offer_generation": generation, "connection_id": connection_id, "candidates": []})
+		slot_index = slots.size() - 1
+	var target_slot: Dictionary = slots[slot_index]
+	var target_candidates: Array = target_slot.get("candidates", []) if target_slot.get("candidates", []) is Array else []
+	target_candidates.append(candidate.duplicate(true))
+	target_slot["candidates"] = target_candidates
+	slots[slot_index] = target_slot
+	_rtc_future_candidate_buffers[remote_id] = slots
+	return "buffer"
+
+
+func _flush_future_rtc_candidates(
+	remote_id: String,
+	connection_id: String,
+	generation: int,
+	expected_peer: WebRTCPeerConnection,
+) -> Array:
+	if (
+		expected_peer == null
+		or not bool(_rtc_remote_description_set.get(remote_id, false))
+		or not _rtc_callback_is_current(remote_id, expected_peer, connection_id, generation)
+	):
+		return []
+	var raw_slots: Variant = _rtc_future_candidate_buffers.get(remote_id, [])
+	var slots: Array = raw_slots if raw_slots is Array else []
+	var retained: Array = []
+	var flushed: Array = []
+	for raw_slot in slots:
+		if not raw_slot is Dictionary:
+			continue
+		var slot := raw_slot as Dictionary
+		var slot_generation := int(slot.get("offer_generation", -1))
+		var slot_connection_id := str(slot.get("connection_id", ""))
+		if slot_generation == generation and slot_connection_id == connection_id:
+			var candidates: Variant = slot.get("candidates", [])
+			if candidates is Array:
+				for raw_candidate in candidates:
+					if raw_candidate is Dictionary and flushed.size() < RTC_MAX_FUTURE_CANDIDATES_PER_PEER:
+						flushed.append((raw_candidate as Dictionary).duplicate(true))
+		elif slot_generation > generation and slot_generation - generation <= RTC_MAX_FUTURE_OFFER_GENERATION_GAP:
+			retained.append(slot)
+	if retained.is_empty():
+		_rtc_future_candidate_buffers.erase(remote_id)
+	else:
+		_rtc_future_candidate_buffers[remote_id] = retained
+	if not flushed.is_empty():
+		_rtc_diag_event("future_candidates_flushed", remote_id, connection_id, generation, {
+			"decision": "accept",
+			"candidate_count": flushed.size(),
+		})
+	return flushed
+
+
+static func _rtc_candidate_byte_size(candidate: Dictionary) -> int:
+	return str(candidate.get("media", "")).to_utf8_buffer().size() + str(candidate.get("name", "")).to_utf8_buffer().size() + 8
+
+
+func _add_rtc_candidate(
+	remote_id: String,
+	candidate: Dictionary,
+	expected_peer: WebRTCPeerConnection = null,
+	expected_connection_id: String = "",
+	expected_generation: int = -1,
+) -> void:
 	var peer: WebRTCPeerConnection = _rtc_peers.get(remote_id)
+	var connection_id := str(_rtc_connection_ids.get(remote_id, ""))
+	var generation := int(_rtc_offer_generations.get(remote_id, -1))
+	if expected_peer != null:
+		if (
+			peer != expected_peer
+			or connection_id != expected_connection_id
+			or generation != expected_generation
+			or not bool(_rtc_remote_description_set.get(remote_id, false))
+		):
+			return
+		peer = expected_peer
 	if peer != null:
 		var add_result := peer.add_ice_candidate(str(candidate.get("media", "")), int(candidate.get("index", 0)), str(candidate.get("name", "")))
 		if _rtc_diag_can_record_candidate(remote_id, "remote_added"):
-			_rtc_diag_event("remote_candidate_added", remote_id, str(_rtc_connection_ids.get(remote_id, "")), int(_rtc_offer_generations.get(remote_id, -1)), {
+			_rtc_diag_event("remote_candidate_added", remote_id, connection_id, generation, {
 				"candidate_type": _rtc_diag_candidate_type(str(candidate.get("name", ""))),
 				"candidate_index": int(candidate.get("index", 0)),
 				"result_code": add_result,
@@ -1331,6 +1549,7 @@ func _close_rtc(close_reason: String = "session_closed") -> void:
 	_rtc_offer_generations.clear()
 	_rtc_highest_offer_generations.clear()
 	_rtc_highest_offer_connection_ids.clear()
+	_rtc_future_candidate_buffers.clear()
 	_rtc_last_seen_msec.clear()
 	_rtc_last_ping_put_ok.clear()
 	_rtc_last_ping_sent_msec.clear()
