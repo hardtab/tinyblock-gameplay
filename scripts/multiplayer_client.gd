@@ -18,6 +18,7 @@ const RTC_SILENCE_TIMEOUT_SECONDS := 7.0
 const RTC_PING_RESPONSE_GRACE_SECONDS := 3.0
 const RTC_RECONNECT_TIMEOUT_SECONDS := 6.0
 const RTC_MAX_RECONNECT_ATTEMPTS := 3
+const MANAGED_HOST_GUEST_JOIN_GRACE_SECONDS := 60.0
 const RTC_MAX_OFFER_GENERATION := 2147483647
 const RTC_MAX_FUTURE_OFFER_GENERATION_GAP := RTC_MAX_RECONNECT_ATTEMPTS + 1
 const RTC_MAX_FUTURE_OFFER_GENERATIONS_PER_PEER := RTC_MAX_RECONNECT_ATTEMPTS + 1
@@ -86,6 +87,7 @@ var _rtc_last_seen_msec: Dictionary = {}
 var _rtc_last_ping_sent_msec: Dictionary = {}
 var _rtc_silence_probe_deadline_msec: Dictionary = {}
 var _rtc_silence_probe_diagnostics: Dictionary = {}
+var _managed_host_guest_join_deadline_msec: Dictionary = {}
 var _guest_host_id := ""
 var _guest_connected_message: Dictionary = {}
 var _guest_connect_time_left := 0.0
@@ -375,6 +377,7 @@ func _poll_websocket(delta: float) -> void:
 		session_id = ""
 		join_code = ""
 		_known_players.clear()
+		_managed_host_guest_join_deadline_msec.clear()
 		_guest_host_id = ""
 		_guest_connected_message.clear()
 		_guest_connect_time_left = 0.0
@@ -509,7 +512,41 @@ func _poll_rtc(delta: float) -> void:
 				"wait":
 					pass
 	_tick_rtc_reconnect(delta)
+	_reconcile_managed_host_guest_join_grace(now)
 	_rtc_diag_maybe_print_liveness_snapshot(Time.get_ticks_msec())
+
+
+func _reconcile_managed_host_guest_join_grace(now_msec: int) -> void:
+	if (
+		role != "host"
+		or session_protocol_version != MANAGED_PROTOCOL_VERSION
+		or not _dedicated_server_session
+	):
+		_managed_host_guest_join_deadline_msec.clear()
+		return
+
+	var expired_guest_ids: Array[String] = []
+	for raw_id in _known_players.keys():
+		var guest_id := str(raw_id)
+		if guest_id.is_empty() or str(_known_players.get(raw_id, "")) != "guest":
+			_managed_host_guest_join_deadline_msec.erase(guest_id)
+			continue
+
+		var game_channel: WebRTCDataChannel = _rtc_channels.get(guest_id)
+		if game_channel != null and game_channel.get_ready_state() == WebRTCDataChannel.STATE_OPEN:
+			_managed_host_guest_join_deadline_msec.erase(guest_id)
+			continue
+
+		if not _managed_host_guest_join_deadline_msec.has(guest_id):
+			_managed_host_guest_join_deadline_msec[guest_id] = now_msec + int(MANAGED_HOST_GUEST_JOIN_GRACE_SECONDS * 1000.0)
+		elif now_msec >= int(_managed_host_guest_join_deadline_msec[guest_id]):
+			expired_guest_ids.append(guest_id)
+
+	for guest_id in expired_guest_ids:
+		if _retire_host_guest(guest_id, "managed_join_timeout"):
+			_close_rtc_peer(guest_id, "managed_join_timeout")
+		else:
+			_managed_host_guest_join_deadline_msec.erase(guest_id)
 
 
 func _handle_ws_packet(packet: PackedByteArray) -> void:
@@ -537,6 +574,7 @@ func _handle_ws_packet(packet: PackedByteArray) -> void:
 	elif kind == "control" and type == "player_left":
 		var left_id := str(message.get("player_id", ""))
 		_known_players.erase(left_id)
+		_managed_host_guest_join_deadline_msec.erase(left_id)
 		_rtc_future_candidate_buffers.erase(left_id)
 		_close_rtc_peer(left_id, "player_left")
 		_rtc_highest_offer_generations.erase(left_id)
@@ -562,6 +600,7 @@ func _handle_connected(message: Dictionary) -> void:
 	if message.has("max_players"):
 		set_session_max_players(int(message.get("max_players", MAX_PLAYERS)))
 	_known_players.clear()
+	_managed_host_guest_join_deadline_msec.clear()
 	var players: Array = message.get("players", []) if message.get("players", []) is Array else []
 	for raw_player in players:
 		if raw_player is Dictionary:
@@ -1788,6 +1827,7 @@ func _close_rtc_peer(remote_id: String, close_reason: String = "unspecified") ->
 		liveness_summary["close_reason"] = close_reason if close_reason in [
 			"player_left", "guest_reconnect", "silent_timeout", "offer_creation_failed", "newer_offer",
 			"session_disconnect", "websocket_closed", "p2p_failed", "session_closed", "host_data_channel_closed",
+			"managed_join_timeout",
 		] else "other"
 		print("Managed RTC liveness final: " + JSON.stringify(liveness_summary))
 		_rtc_diagnostic_liveness_counters.erase(remote_id)
@@ -1858,6 +1898,7 @@ func _retire_host_guest(remote_id: String, reason: String) -> bool:
 	if role != "host" or remote_id.is_empty() or str(_known_players.get(remote_id, "")) != "guest":
 		return false
 	_known_players.erase(remote_id)
+	_managed_host_guest_join_deadline_msec.erase(remote_id)
 	_rtc_future_candidate_buffers.erase(remote_id)
 	_rtc_diag_event("guest_roster_retired", remote_id, str(_rtc_connection_ids.get(remote_id, "")), int(_rtc_offer_generations.get(remote_id, -1)), {
 		"reason": reason,
@@ -1898,6 +1939,7 @@ func _close_rtc(close_reason: String = "session_closed") -> void:
 	_rtc_last_ping_sent_msec.clear()
 	_rtc_silence_probe_deadline_msec.clear()
 	_rtc_silence_probe_diagnostics.clear()
+	_managed_host_guest_join_deadline_msec.clear()
 	_rtc_observed_state_signatures.clear()
 	_rtc_diagnostic_candidate_counts.clear()
 	_rtc_diagnostic_event_counts.clear()
