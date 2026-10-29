@@ -182,7 +182,12 @@ func get_store_status() -> Dictionary:
 	var auth := await ensure_session()
 	if not auth.get("ok", false):
 		return auth
-	return await _request_json(HTTPClient.METHOD_GET, "/v1/store/status", {}, true)
+	var path := "/v1/store/status"
+	if not installation_id.is_empty():
+		# The server checks this ID against the authenticated owner and uses its
+		# original creation timestamp to preserve earlier free cosmetics.
+		path += "?installation_id=" + installation_id.uri_encode()
+	return await _request_json(HTTPClient.METHOD_GET, path, {}, true)
 
 
 func verify_store_purchase(platform: String, product_id: String, store_payload: String) -> Dictionary:
