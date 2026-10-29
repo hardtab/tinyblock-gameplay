@@ -178,6 +178,203 @@ func get_content_batch(content_ids: Array) -> Dictionary:
 	)
 
 
+func get_store_status() -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	return await _request_json(HTTPClient.METHOD_GET, "/v1/store/status", {}, true)
+
+
+func verify_store_purchase(platform: String, product_id: String, store_payload: String) -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	var normalized_platform := platform.strip_edges().to_lower()
+	var payload := {"platform": normalized_platform, "product_id": product_id}
+	if normalized_platform == "ios":
+		payload["signed_transaction_jws"] = store_payload
+	elif normalized_platform == "android":
+		payload["purchase_token"] = store_payload
+	else:
+		return {"ok": false, "error": "unsupported_store_platform"}
+	return await _request_json(HTTPClient.METHOD_POST, "/v1/store/purchases/verify", payload, true)
+
+
+func reconcile_store_invalidation(platform: String, product_id: String, store_payload: String, kind: String) -> Dictionary:
+	var normalized_platform := platform.strip_edges().to_lower()
+	if normalized_platform != "ios" or kind.strip_edges().to_lower() != "refund":
+		return {"ok": false, "error": "unsupported_store_invalidation"}
+	if product_id.strip_edges().is_empty() or store_payload.strip_edges().is_empty():
+		return {"ok": false, "error": "invalid_store_invalidation"}
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	return await _request_json(
+		HTTPClient.METHOD_POST,
+		"/v1/store/purchases/reconcile",
+		{
+			"platform": normalized_platform,
+			"product_id": product_id,
+			"signed_transaction_jws": store_payload,
+			"kind": "refund",
+		},
+		true
+	)
+
+
+func restore_store_purchase(platform: String, product_id: String, store_payload: String) -> Dictionary:
+	var normalized_platform := platform.strip_edges().to_lower()
+	var payload := {"platform": normalized_platform, "product_id": product_id}
+	if normalized_platform == "ios":
+		payload["signed_transaction_jws"] = store_payload
+	elif normalized_platform == "android":
+		payload["purchase_token"] = store_payload
+	else:
+		return {"ok": false, "error": "unsupported_store_platform"}
+	var response: Dictionary = await _request_json(
+		HTTPClient.METHOD_POST,
+		"/v1/auth/store-restore",
+		payload,
+		false
+	)
+	if not response.get("ok", false):
+		return response
+	var body: Dictionary = response.get("body", {}) if response.get("body", {}) is Dictionary else {}
+	var restored_token := str(body.get("access_token", ""))
+	if restored_token.is_empty():
+		return {"ok": false, "error": "invalid_store_restore_response"}
+	access_token = restored_token
+	_save_session()
+	session_changed.emit(true)
+	return response
+
+
+func create_store_capability_claim(session_id: String) -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	return await _request_json(
+		HTTPClient.METHOD_POST,
+		"/v1/store/capabilities/claim",
+		{"session_id": session_id},
+		true
+	)
+
+
+func validate_store_capability_claim(session_id: String, player_id: String, capability_token: String) -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	return await _request_json(
+		HTTPClient.METHOD_POST,
+		"/v1/store/capabilities/validate",
+		{"session_id": session_id, "player_id": player_id, "capability_token": capability_token},
+		true
+	)
+
+
+func managed_create_server(world_name: String, access_mode: String) -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	var command_id := new_command_id()
+	return await _request_json(
+		HTTPClient.METHOD_POST,
+		"/v1/managed-servers",
+		{"world_name": world_name.strip_edges(), "access_mode": access_mode if access_mode in ["public", "invite_code"] else "public"},
+		true,
+		["Idempotency-Key: %s" % command_id]
+	)
+
+
+func managed_list_mine() -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	return await _request_json(HTTPClient.METHOD_GET, "/v1/managed-servers/mine", {}, true)
+
+
+func managed_list_public(limit: int = 20) -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	return await _request_json(
+		HTTPClient.METHOD_GET,
+		"/v1/managed-servers/public?limit=%d" % clampi(limit, 1, 50),
+		{},
+		true
+	)
+
+
+func managed_resolve_invite(invite_code: String) -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	return await _request_json(
+		HTTPClient.METHOD_POST,
+		"/v1/managed-servers/invites/resolve",
+		{"invite_code": invite_code.strip_edges()},
+		true
+	)
+
+
+func managed_get_status(world_id: String) -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	return await _request_json(
+		HTTPClient.METHOD_GET,
+		"/v1/managed-servers/%s/status" % world_id.uri_encode(),
+		{},
+		true
+	)
+
+
+func managed_set_access(world_id: String, access_mode: String) -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	if access_mode not in ["public", "invite_code"]:
+		return {"ok": false, "error": "invalid_access_mode"}
+	return await _request_json(
+		HTTPClient.METHOD_PATCH,
+		"/v1/managed-servers/%s/access" % world_id.uri_encode(),
+		{"access_mode": access_mode},
+		true
+	)
+
+
+func managed_join(world_id: String, invite_code: String = "") -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	var payload := {"protocol_version": MultiplayerClient.MANAGED_PROTOCOL_VERSION}
+	if not invite_code.strip_edges().is_empty():
+		payload["invite_code"] = invite_code.strip_edges()
+	var command_id := new_command_id()
+	return await _request_json(
+		HTTPClient.METHOD_POST,
+		"/v1/managed-servers/%s/join" % world_id.uri_encode(),
+		payload,
+		true,
+		["Idempotency-Key: %s" % command_id]
+	)
+
+
+func managed_reset(world_id: String, world_name: String) -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	var command_id := new_command_id()
+	return await _request_json(
+		HTTPClient.METHOD_POST,
+		"/v1/managed-servers/%s/reset" % world_id.uri_encode(),
+		{"world_name": world_name.strip_edges()},
+		true,
+		["Idempotency-Key: %s" % command_id]
+	)
+
+
 func wait_for_discovery(job_id: String, poll_after_ms: int = 1500, max_wait_seconds: float = 125.0) -> Dictionary:
 	var deadline_ms := Time.get_ticks_msec() + int(max_wait_seconds * 1000.0)
 	while Time.get_ticks_msec() < deadline_ms:

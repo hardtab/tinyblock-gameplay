@@ -44,6 +44,8 @@ const NO_TILE := Vector2i(2147483647, 2147483647)
 const LIGHT_CACHE_MARGIN := 10
 const LIGHT_REBUILD_INTERVAL_FRAMES := 15
 const MAX_CAVE_DARKNESS := 0.72
+const AVATAR_GLOW_EMISSION := 0.95
+const MAX_AVATAR_GLOW_SOURCES := 16
 const CAMERA_FOLLOW_SPEED_X := 7.67
 const CAMERA_FOLLOW_SPEED_Y_AIR := 7.67
 const CAMERA_FOLLOW_SPEED_Y_GROUND := 13.39
@@ -133,6 +135,8 @@ var _low_zoom_last_zoom := DEFAULT_ZOOM
 var _lighting_cache_area := Rect2i()
 var _lighting_cache: Dictionary = {}
 var _lighting_last_build_frame := -1000
+var _avatar_glow_sources: Array[Dictionary] = []
+var _avatar_glow_source_signature := ""
 var _lighting_sample_area := Rect2i()
 var _sampled_combined: Dictionary = {}
 var _sampled_daylight: Dictionary = {}
@@ -287,9 +291,9 @@ func _on_tideglass_bridge_cell_crystallized(position: Vector2i, step_index: int,
 		_reaction_layer.queue_redraw()
 
 
-func start_new_world(mode: String = WorldSim.WORLD_MODE_SKYBLOCK, access_mode: String = WorldSim.ACCESS_MODE_OFFLINE, keep_inventory_on_death: bool = false, prefer_starter_biome: bool = false) -> bool:
+func start_new_world(mode: String = WorldSim.WORLD_MODE_SKYBLOCK, access_mode: String = WorldSim.ACCESS_MODE_OFFLINE, keep_inventory_on_death: bool = false, prefer_starter_biome: bool = false, world_seed: int = 0) -> bool:
 	if mode == WorldSim.WORLD_MODE_PROCEDURAL:
-		sim.create_procedural_world(0, prefer_starter_biome)
+		sim.create_procedural_world(world_seed, prefer_starter_biome)
 	elif mode == WorldSim.WORLD_MODE_FLOATING_ISLANDS:
 		sim.create_floating_islands_world()
 	elif mode == WorldSim.WORLD_MODE_ONE_BLOCK:
@@ -419,6 +423,7 @@ func _process(_delta: float) -> void:
 	_update_health_indicator(_delta)
 	_update_avatar_trails(_delta)
 	_update_camera(_delta)
+	_sync_avatar_glow_lighting()
 	_update_render_layers()
 
 	queue_redraw()
@@ -727,6 +732,19 @@ func keyboard_mine_candidate() -> Vector2i:
 func keyboard_place_candidate() -> Vector2i:
 	if keyboard_mine_direction == Vector2i.ZERO:
 		return NO_TILE
+	if str(sim.selected) == "lighter":
+		var player_center := Vector2(
+			float(sim.player["x"]) + float(sim.player["w"]) * 0.5,
+			float(sim.player["y"]) + float(sim.player["h"]) * 0.5,
+		)
+		var aim := player_center + Vector2(keyboard_mine_direction) * BlockDefs.TILE * 4.5
+		var target: Dictionary = sim.raycast_from_player(aim)
+		if target.has("mine"):
+			var tile: Vector2i = target["mine"]
+			var block: Dictionary = sim.get_block(tile.x, tile.y)
+			if float(block.get("flammability", 0.0)) > 0.0 or str(block.get("name", "")) == "tnt":
+				return tile
+		return NO_TILE
 	var player_tile := Vector2i(
 		floori((float(sim.player["x"]) + float(sim.player["w"]) * 0.5) / BlockDefs.TILE),
 		floori((float(sim.player["y"]) + float(sim.player["h"]) * 0.5) / BlockDefs.TILE),
@@ -751,6 +769,12 @@ func try_keyboard_place() -> void:
 		return
 	_last_place_msec = now
 	var placed_name := str(sim.selected)
+	if placed_name == "lighter":
+		if multiplayer_guest:
+			multiplayer_action_requested.emit("ignite_with_lighter", {"x": tile.x, "y": tile.y})
+		else:
+			sim.ignite_with_lighter(tile.x, tile.y)
+		return
 	if multiplayer_guest:
 		var valid_request := sim.can_place_block(tile.x, tile.y)
 		_optimistically_place_multiplayer_block(tile.x, tile.y, placed_name)
@@ -804,6 +828,12 @@ func try_place_at_screen(screen_pos: Vector2) -> void:
 	if sim.try_open_station_inventory(tile.x, tile.y):
 		return
 	var placed_name := str(sim.selected)
+	if placed_name == "lighter":
+		if multiplayer_guest:
+			multiplayer_action_requested.emit("ignite_with_lighter", {"x": tile.x, "y": tile.y})
+		else:
+			sim.ignite_with_lighter(tile.x, tile.y)
+		return
 	if multiplayer_guest:
 		var valid_request := sim.can_place_block(tile.x, tile.y)
 		_optimistically_place_multiplayer_block(tile.x, tile.y, placed_name)
@@ -1646,6 +1676,74 @@ func _invalidate_lighting() -> void:
 	_lighting_dirty = true
 
 
+func _sync_avatar_glow_lighting() -> void:
+	var next_sources: Array[Dictionary] = []
+	var signature_parts: Array[String] = []
+	var source_area := _visible_tile_range().grow(_lighting_cache_margin())
+	if (
+		str(PlayerProfile.skin.get("glow", "none")) == "glow"
+		and Monetization.can_access_item("cosmetic.glow.glow")
+	):
+		_append_avatar_glow_source(
+			next_sources,
+			signature_parts,
+			"local",
+			Vector2(float(sim.player.get("x", 0.0)), float(sim.player.get("y", 0.0))),
+			float(sim.player.get("h", PLAYER_RENDER_HEIGHT)),
+			source_area,
+		)
+	var remote_ids: Array = remote_players.keys()
+	remote_ids.sort()
+	for raw_id in remote_ids:
+		if next_sources.size() >= MAX_AVATAR_GLOW_SOURCES:
+			break
+		var player_id := str(raw_id)
+		var remote: Dictionary = remote_players.get(player_id, {}) if remote_players.get(player_id, {}) is Dictionary else {}
+		var appearance: Dictionary = remote.get("skin", {}) if remote.get("skin", {}) is Dictionary else {}
+		if str(appearance.get("glow", "none")) != "glow":
+			continue
+		_append_avatar_glow_source(
+			next_sources,
+			signature_parts,
+			player_id,
+			_remote_player_render_position(player_id, remote),
+			PLAYER_RENDER_HEIGHT,
+			source_area,
+		)
+	var signature := "|".join(signature_parts)
+	if signature == _avatar_glow_source_signature:
+		return
+	_avatar_glow_source_signature = signature
+	_avatar_glow_sources = next_sources
+	_invalidate_lighting()
+
+
+func _append_avatar_glow_source(
+	sources: Array[Dictionary],
+	signature_parts: Array[String],
+	actor_id: String,
+	actor_position: Vector2,
+	actor_height: float,
+	source_area: Rect2i
+) -> void:
+	if (
+		sources.size() >= MAX_AVATAR_GLOW_SOURCES
+		or not is_finite(actor_position.x)
+		or not is_finite(actor_position.y)
+		or not is_finite(actor_height)
+	):
+		return
+	var tile := float(BlockDefs.TILE)
+	var tile_position := Vector2i(
+		floori((actor_position.x + PLAYER_RENDER_WIDTH * 0.5) / tile),
+		floori((actor_position.y + actor_height * 0.5) / tile),
+	)
+	if not source_area.has_point(tile_position):
+		return
+	sources.append({"position": tile_position, "emission": AVATAR_GLOW_EMISSION})
+	signature_parts.append("%s:%d:%d" % [actor_id, tile_position.x, tile_position.y])
+
+
 func _invalidate_world_render() -> void:
 	_world_render_dirty = true
 
@@ -2152,7 +2250,7 @@ func _ensure_lighting_cache(visible_area: Rect2i) -> void:
 	if not _lighting_cache.is_empty() and not area_changed and not rebuild_due:
 		return
 	_lighting_cache_area = wanted
-	_lighting_cache = sim.build_light_maps(wanted, visible_area.grow(1))
+	_lighting_cache = sim.build_light_maps(wanted, visible_area.grow(1), _avatar_glow_sources)
 	_lighting_sample_area = Rect2i()
 	_lighting_last_build_frame = anim_frame
 	_lighting_dirty = false

@@ -21,6 +21,7 @@ const ENUM_OPTIONS := {
 	"legs": ["classic", "short", "spring"],
 	"face": ["none", "mustache", "whiskers"],
 	"particles": ["none", "flowers", "fireflies", "stars", "sparks", "fire", "garon"],
+	"glow": ["none", "glow"],
 	"outfit": ["classic", "garon"],
 }
 
@@ -82,6 +83,7 @@ func _skin_from_id(id: String) -> Dictionary:
 		"legs": "classic",
 		"face": "none",
 		"particles": "none",
+		"glow": "none",
 		"outfit": "classic",
 	}
 

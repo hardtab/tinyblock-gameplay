@@ -477,7 +477,18 @@ var BLOCKS := {
 		"id": 69, "content_id": "core.item.bow", "solid": false, "fluid": false, "item": true, "hardness": 1,
 		"base": "#8a5a2e", "light": "#d8d5cb", "dark": "#442b18",
 		"definition": {"content_id": "core.item.bow", "kind": "item", "schema_version": "1.0", "display": {"name": {"en": "Bow"}, "description": {"en": "A ranged weapon. Hold the aim stick to draw, then release to fire."}}, "visual": {"shape": "bow", "pattern": "banded", "palette": ["#8a5a2e", "#d8d5cb", "#e9b86e"]}, "category": "weapon", "rarity": "common", "effects": {"mining_speed_multiplier": 1.0, "creature_damage": 1, "movement_speed_multiplier": 1.0, "jump_power_multiplier": 1.0}, "durability": {"max_uses": 384}, "tags": ["item", "weapon", "ranged", "bow", "crafted"], "mechanics": ["hotbar_active", "aim_and_release"]},
-	}
+	},
+	"tnt": {
+		"id": 70, "content_id": "core.tnt", "solid": true, "generated": false, "hardness": 8,
+		"pattern": "banded", "visual_seed": 70070, "base": "#aa2925", "mid": "#e74435", "dark": "#70201f", "light": "#ffc45c",
+		"flammability": 0.0,
+		"definition": {"content_id": "core.tnt", "kind": "block", "schema_version": "1.0", "display": {"name": {"en": "TNT"}, "description": {"en": "An explosive block. Light it to blast nearby terrain."}}, "tags": ["explosive", "crafted"]},
+	},
+	"lighter": {
+		"id": 71, "content_id": "core.item.lighter", "solid": false, "fluid": false, "item": true, "hardness": 1,
+		"base": "#444b52", "light": "#d7e3ec", "dark": "#22272b",
+		"definition": {"content_id": "core.item.lighter", "kind": "item", "schema_version": "1.0", "display": {"name": {"en": "Flint Lighter"}, "description": {"en": "A reusable tool for lighting TNT and flammable blocks."}}, "visual": {"shape": "lighter", "pattern": "metal", "palette": ["#454c54", "#bbc9d4", "#f7a63b"]}, "category": "fire_tool", "rarity": "common", "durability": {"max_uses": 128}, "tags": ["item", "tool", "fire", "crafted"], "mechanics": ["hotbar_active", "ignite"]},
+	},
 }
 
 const RECIPES: Array[Dictionary] = [
@@ -555,6 +566,8 @@ const CONTENT_RECIPES: Array[Dictionary] = [
 	{"in": {"core.rose_crystal": 1, "core.glass": 1, "core.charcoal": 1}, "out": {"core.crystal_lantern": 1}},
 	{"in": {"core.item.obsidian_pickaxe": 1, "core.emerald_crystal": 1, "core.moonstone_ore": 1, "core.rose_crystal": 1}, "out": {"core.item.resonance_pickaxe": 1}, "station": "workbench"},
 	{"in": {"core.magnetic_stone": 2, "core.lumenroot": 1}, "out": {"core.resonance_bricks": 2}},
+	{"in": {"core.charcoal": 2, "core.sand": 2}, "out": {"core.tnt": 1}, "required_capability": "demolitionist"},
+	{"in": {"core.item.flint": 1, "core.item.copper_ingot": 1}, "out": {"core.item.lighter": 1}, "required_capability": "demolitionist", "station": "workbench"},
 ]
 
 var block_by_id: Dictionary = {}
@@ -2068,10 +2081,14 @@ func draw_item(canvas: CanvasItem, dest: Rect2, definition: Dictionary) -> void:
 	elif shape == "feather":
 		canvas.draw_line(center + Vector2(-7, 11) * scale, center + Vector2(7, -11) * scale, handle, maxf(1.0, 1.6 * scale))
 		canvas.draw_colored_polygon(PackedVector2Array([center + Vector2(-5, 5) * scale, center + Vector2(7, -11) * scale, center + Vector2(4, 4) * scale]), head)
+	elif shape == "lighter":
+		canvas.draw_rect(Rect2(center + Vector2(-7, -5) * scale, Vector2(14, 15) * scale), handle)
+		canvas.draw_rect(Rect2(center + Vector2(-8, -8) * scale, Vector2(16, 5) * scale), head)
+		canvas.draw_rect(Rect2(center + Vector2(-3, 0) * scale, Vector2(6, 5) * scale), detail)
 	else:
 		canvas.draw_line(center + Vector2(-7, 10) * scale, center + Vector2(6, -8) * scale, handle, maxf(3.0, 4.0 * scale))
 	match shape:
-		"boots", "charm", "ingot", "berries", "meal", "bow", "arrow", "stick", "string", "flint", "feather": pass
+		"boots", "charm", "ingot", "berries", "meal", "bow", "arrow", "stick", "string", "flint", "feather", "lighter": pass
 		"hammer": canvas.draw_rect(Rect2(center + Vector2(-5, -12) * scale, Vector2(15, 7) * scale), head)
 		"blade":
 			canvas.draw_colored_polygon(PackedVector2Array([center + Vector2(3, -12) * scale, center + Vector2(10, -16) * scale, center + Vector2(7, -5) * scale]), head)
@@ -2172,6 +2189,12 @@ func draw_block(
 		_draw_workbench(canvas, x, y, sx, sy, block, modulate)
 	elif name == "furnace":
 		_draw_furnace(canvas, x, y, sx, sy, block, modulate)
+	elif name == "tnt":
+		canvas.draw_rect(Rect2(x, y, w, h), _c(block, "base") * modulate)
+		canvas.draw_rect(Rect2(x, y + h * 0.36, w, h * 0.3), _c(block, "light") * modulate)
+		for stripe in 3:
+			var stripe_x := x + w * (0.28 + float(stripe) * 0.22)
+			canvas.draw_rect(Rect2(stripe_x, y + h * 0.39, maxf(1.0, w * 0.08), h * 0.24), _c(block, "dark") * modulate)
 	elif block.get("generated", false):
 		_draw_generated(canvas, tx, ty, x, y, w, h, sx, sy, block, modulate)
 	else:

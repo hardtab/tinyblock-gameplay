@@ -80,6 +80,8 @@ var craft_slots: Array = [null, null, null, null]
 var craft_slot_durability: Array[int] = [0, 0, 0, 0]
 var craft_pick: String = ""
 var known_recipes: Array[Dictionary] = []
+# Server-verified capabilities for the local actor; never serialized with world state.
+var crafting_capabilities: Dictionary = {}
 var applied_discovery_jobs: Dictionary = {}
 var block_count: int = 0
 var fluid_tick: int = 0
@@ -171,6 +173,11 @@ const WEATHER_SKY_SCAN_HEIGHT := 128
 const GRANULAR_TICK_EVERY := 4
 const FIRE_TICK_EVERY := 12
 const FIRE_BURN_STEPS := 24
+const TNT_FUSE_STEPS := 4
+const TNT_CHAIN_FUSE_STEPS := 2
+const TNT_EXPLOSION_RADIUS := 2
+const LIGHTER_ITEM_NAME := "lighter"
+const TNT_BLOCK_NAME := "tnt"
 const FIRE_SOURCE_IGNITION_CHANCE := 0.22
 const FIRE_SPREAD_CHANCE := 0.14
 const FIRE_IGNITION_TEMPERATURE := 0.75
@@ -442,6 +449,7 @@ const LIGHT_SKY_SCAN_TILES := 128
 const DAYLIGHT_FALLOFF := 0.0275
 const EMISSIVE_FALLOFF := 0.085
 const SOLID_VISUAL_FALLOFF := 0.08
+const MAX_TRANSIENT_LIGHT_SOURCES := 16
 const CLIMATE_TICK_EVERY := 180
 const WATER_FREEZE_TEMPERATURE := -0.1
 const ICE_MELT_TEMPERATURE := 0.05
@@ -5733,6 +5741,13 @@ func deserialize_state(state: Dictionary) -> bool:
 		creature["block_name"] = block_name
 		loaded_creatures[creature_id] = creature
 
+	var saved_generation_data: Dictionary = state.get("generation", {}) if state.get("generation", {}) is Dictionary else {}
+	var saved_one_block_data: Dictionary = state.get("one_block", {}) if state.get("one_block", {}) is Dictionary else {}
+	var saved_one_block_position := Vector2i(
+		int(saved_one_block_data.get("x", ISLAND_CX)),
+		int(saved_one_block_data.get("y", ISLAND_CY))
+	)
+	var saved_is_one_block := str(saved_generation_data.get("mode", WORLD_MODE_SKYBLOCK)) == WORLD_MODE_ONE_BLOCK
 	var loaded_burning: Dictionary = {}
 	var raw_burning = state.get("burning_tiles", [])
 	if not raw_burning is Array:
@@ -5746,8 +5761,9 @@ func deserialize_state(state: Dictionary) -> bool:
 		if not in_bounds(pos.x, pos.y) or not loaded_tiles.has(pos) or steps <= 0:
 			continue
 		var block := BlockDefs.get_block_by_id(int(loaded_tiles[pos]))
-		if float(block.get("flammability", 0.0)) > 0.0:
-			loaded_burning[pos] = mini(steps, FIRE_BURN_STEPS * 2)
+		var is_tnt := str(block.get("name", "")) == TNT_BLOCK_NAME
+		if (float(block.get("flammability", 0.0)) > 0.0 or is_tnt) and not (is_tnt and saved_is_one_block and pos == saved_one_block_position):
+			loaded_burning[pos] = mini(steps, TNT_FUSE_STEPS if is_tnt else FIRE_BURN_STEPS * 2)
 
 	var loaded_containers: Dictionary = {}
 	var raw_containers = state.get("containers", [])
@@ -6874,13 +6890,49 @@ func ignite_tile(pos: Vector2i) -> bool:
 	return true
 
 
+func ignite_with_lighter(tx: int, ty: int) -> bool:
+	if not in_bounds(tx, ty) or not player_near(tx, ty):
+		return false
+	if selected != LIGHTER_ITEM_NAME or int(inventory.get(LIGHTER_ITEM_NAME, 0)) <= 0:
+		return false
+	var pos := Vector2i(tx, ty)
+	if burning_tiles.has(pos) or _touches_water(pos) or is_one_use_cache_at(tx, ty) or mine_preserves_support(tx, ty):
+		return false
+	var block := get_block(tx, ty)
+	var ignited := false
+	if str(block.get("name", "")) == TNT_BLOCK_NAME:
+		ignited = _start_tnt_fuse(pos)
+	elif is_flammable(block):
+		ignited = ignite_tile(pos)
+	if not ignited or not _consume_inventory_item_use(LIGHTER_ITEM_NAME):
+		return false
+	if not _suspend_state_changed:
+		lighting_changed.emit()
+		state_changed.emit()
+		tile_changed.emit(tx, ty, block_id(tx, ty), get_fluid_level(tx, ty), is_fluid_falling_at(tx, ty))
+	return true
+
+
+func _start_tnt_fuse(pos: Vector2i, fuse_steps: int = TNT_FUSE_STEPS) -> bool:
+	if not in_bounds(pos.x, pos.y) or str(get_block(pos.x, pos.y).get("name", "")) != TNT_BLOCK_NAME:
+		return false
+	if _touches_water(pos) or is_one_use_cache_at(pos.x, pos.y) or mine_preserves_support(pos.x, pos.y) or burning_tiles.has(pos):
+		return false
+	burning_tiles[pos] = clampi(fuse_steps, 1, TNT_FUSE_STEPS)
+	return true
+
+
 func apply_authoritative_fire_state(x: int, y: int, steps: int) -> void:
 	if not in_bounds(x, y):
 		return
 	var pos := Vector2i(x, y)
 	var normalized_steps := maxi(0, steps)
-	if normalized_steps > 0 and (block_id(x, y) == 0 or not is_flammable(get_block(x, y)) or is_one_use_cache_at(x, y)):
+	var block := get_block(x, y)
+	var is_fire_target := is_flammable(block) or str(block.get("name", "")) == TNT_BLOCK_NAME
+	if normalized_steps > 0 and (block_id(x, y) == 0 or not is_fire_target or is_one_use_cache_at(x, y) or mine_preserves_support(x, y)):
 		normalized_steps = 0
+	elif normalized_steps > 0:
+		normalized_steps = mini(normalized_steps, TNT_FUSE_STEPS if str(block.get("name", "")) == TNT_BLOCK_NAME else FIRE_BURN_STEPS * 2)
 	var previous_steps := int(burning_tiles.get(pos, 0))
 	if previous_steps == normalized_steps:
 		return
@@ -6898,7 +6950,12 @@ func _try_ignite_tile(pos: Vector2i, roll: float, chance_scale: float) -> bool:
 	# random spread cannot immediately relight a water-cooled block.
 	if _touches_water(pos) or is_one_use_cache_at(pos.x, pos.y):
 		return false
-	var flammability := clampf(float(get_block(pos.x, pos.y).get("flammability", 0.0)), 0.0, 1.0)
+	var block := get_block(pos.x, pos.y)
+	if str(block.get("name", "")) == TNT_BLOCK_NAME:
+		if burning_tiles.has(pos) or roll >= chance_scale:
+			return false
+		return _start_tnt_fuse(pos, TNT_CHAIN_FUSE_STEPS)
+	var flammability := clampf(float(block.get("flammability", 0.0)), 0.0, 1.0)
 	if flammability <= 0.0 or roll >= flammability * chance_scale:
 		return false
 	return ignite_tile(pos)
@@ -6919,6 +6976,7 @@ func tick_fire() -> void:
 	var burning_before: Dictionary = burning_tiles.duplicate()
 	var changed := false
 	var static_changed := false
+	var changed_tile_positions: Dictionary = {}
 	var previous_suspend := _suspend_state_changed
 	_suspend_state_changed = true
 	for source_pos: Vector2i in _active_tile_positions():
@@ -6932,17 +6990,27 @@ func tick_fire() -> void:
 		var pos := raw_pos as Vector2i
 		if not _is_in_active_simulation(pos):
 			continue
-		if not tiles.has(pos) or not is_flammable(get_block(pos.x, pos.y)) or _touches_water(pos) or is_one_use_cache_at(pos.x, pos.y):
+		var block := get_block(pos.x, pos.y)
+		var is_tnt := str(block.get("name", "")) == TNT_BLOCK_NAME
+		if not tiles.has(pos) or (not is_tnt and not is_flammable(block)) or _touches_water(pos) or is_one_use_cache_at(pos.x, pos.y):
 			burning_tiles.erase(pos)
 			changed = true
 			continue
-		for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
-			changed = _try_ignite_tile(pos + offset, randf(), FIRE_SPREAD_CHANCE) or changed
+		if not is_tnt:
+			for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+				changed = _try_ignite_tile(pos + offset, randf(), FIRE_SPREAD_CHANCE) or changed
 		var steps_left := int(burning_tiles.get(pos, 1)) - 1
 		if steps_left <= 0:
 			burning_tiles.erase(pos)
-			tree_growth.erase(pos)
-			set_block(pos.x, pos.y, 0)
+			if is_tnt:
+				set_block(pos.x, pos.y, 0)
+				changed_tile_positions[pos] = true
+				for affected_pos: Vector2i in _explode_tnt(pos):
+					changed_tile_positions[affected_pos] = true
+			else:
+				tree_growth.erase(pos)
+				set_block(pos.x, pos.y, 0)
+				changed_tile_positions[pos] = true
 			static_changed = true
 		else:
 			burning_tiles[pos] = steps_left
@@ -6965,6 +7033,8 @@ func tick_fire() -> void:
 			var after_pos := raw_pos as Vector2i
 			if not burning_before.has(after_pos):
 				fire_transition_positions[after_pos] = true
+		for raw_pos in changed_tile_positions.keys():
+			fire_transition_positions[raw_pos as Vector2i] = true
 		var ordered_positions: Array = fire_transition_positions.keys()
 		ordered_positions.sort_custom(func(a: Vector2i, b: Vector2i): return a.y < b.y or (a.y == b.y and a.x < b.x))
 		for raw_pos in ordered_positions:
@@ -6976,6 +7046,44 @@ func tick_fire() -> void:
 				get_fluid_level(transition_pos.x, transition_pos.y),
 				is_fluid_falling_at(transition_pos.x, transition_pos.y),
 			)
+
+
+func _explode_tnt(center: Vector2i) -> Array[Vector2i]:
+	var affected: Array[Vector2i] = []
+	for y_offset in range(-TNT_EXPLOSION_RADIUS, TNT_EXPLOSION_RADIUS + 1):
+		for x_offset in range(-TNT_EXPLOSION_RADIUS, TNT_EXPLOSION_RADIUS + 1):
+			if x_offset * x_offset + y_offset * y_offset > TNT_EXPLOSION_RADIUS * TNT_EXPLOSION_RADIUS:
+				continue
+			var pos := center + Vector2i(x_offset, y_offset)
+			if not in_bounds(pos.x, pos.y):
+				continue
+			if pos == center:
+				continue
+			var plant := plant_block_at(pos.x, pos.y)
+			if not plant.is_empty() and remove_plant_at(pos.x, pos.y, false):
+				affected.append(pos)
+			var block := get_block(pos.x, pos.y)
+			if int(block.get("id", 0)) == 0:
+				continue
+			if str(block.get("name", "")) == TNT_BLOCK_NAME:
+				if _start_tnt_fuse(pos, TNT_CHAIN_FUSE_STEPS):
+					affected.append(pos)
+				continue
+			if bool(block.get("container", false)) or bool(block.get("fluid", false)) or bool(block.get("item", false)):
+				continue
+			if is_one_use_cache_at(pos.x, pos.y) or is_death_cache_at(pos.x, pos.y) or mine_preserves_support(pos.x, pos.y):
+				continue
+			if bool(block.get("indestructible", false)) or int(block.get("hardness", 0)) > 24:
+				continue
+			var definition: Dictionary = block.get("definition", {}) if block.get("definition", {}) is Dictionary else {}
+			var tags: Array = definition.get("tags", []) if definition.get("tags", []) is Array else []
+			if "indestructible" in tags or "spawn_protected" in tags:
+				continue
+			tree_growth.erase(pos)
+			plant_growth.erase(pos)
+			set_block(pos.x, pos.y, 0)
+			affected.append(pos)
+	return affected
 
 
 func _propagate_tile_light(area: Rect2i, values: Dictionary, queue: Array[Vector2i], falloff: float) -> void:
@@ -7121,7 +7229,11 @@ func _packed_light_to_dictionary(
 	return out
 
 
-func build_light_maps(area: Rect2i, visual_area: Rect2i = Rect2i()) -> Dictionary:
+func build_light_maps(
+	area: Rect2i,
+	visual_area: Rect2i = Rect2i(),
+	transient_light_sources: Array = []
+) -> Dictionary:
 	if visual_area.size.x <= 0 or visual_area.size.y <= 0:
 		visual_area = area
 	var width := area.size.x
@@ -7189,6 +7301,24 @@ func build_light_maps(area: Rect2i, visual_area: Rect2i = Rect2i()) -> Dictionar
 		if creature_emission > warm[creature_index]:
 			warm[creature_index] = creature_emission
 			warm_queue.append(creature_index)
+	# Avatar glows are transient emitters supplied by the renderer. They use the
+	# normal bounded light propagation without becoming world tiles or save data.
+	for source_index in mini(transient_light_sources.size(), MAX_TRANSIENT_LIGHT_SOURCES):
+		var source: Variant = transient_light_sources[source_index]
+		if not source is Dictionary:
+			continue
+		var source_position: Variant = source.get("position", Vector2i(-1, -1))
+		if not source_position is Vector2i or not area.has_point(source_position):
+			continue
+		var emission := float(source.get("emission", 0.0))
+		if not is_finite(emission) or emission <= 0.01:
+			continue
+		var source_local: Vector2i = source_position - area.position
+		var source_map_index := source_local.y * width + source_local.x
+		var source_level := clampf(emission, 0.0, 1.0)
+		if source_level > warm[source_map_index]:
+			warm[source_map_index] = source_level
+			warm_queue.append(source_map_index)
 	_propagate_packed_light(area, daylight, transmission, daylight_queue, DAYLIGHT_FALLOFF)
 	_propagate_packed_light(area, warm, transmission, warm_queue, EMISSIVE_FALLOFF)
 	var combined := daylight.duplicate()
@@ -11874,7 +12004,7 @@ func equipment_slot_for_item(block_name: String) -> String:
 	var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
 	match str(definition.get("category", "")):
 		"mobility_tool": return "feet"
-		"mining_tool", "weapon", "hybrid": return "hand"
+		"mining_tool", "weapon", "hybrid", "fire_tool": return "hand"
 		_: return ""
 
 
@@ -11962,6 +12092,44 @@ func damage_equipped_item(slot_name: String, amount: int = 1) -> bool:
 	inventory_changed.emit()
 	state_changed.emit()
 	return broke
+
+
+func _consume_inventory_item_use(block_name: String) -> bool:
+	if int(inventory.get(block_name, 0)) <= 0:
+		return false
+	var maximum := item_max_durability(block_name)
+	if maximum <= 0:
+		return false
+	_normalize_item_durability(block_name)
+	var values: Array = item_durability.get(block_name, [])
+	if values.is_empty():
+		return false
+	var remaining_uses := int(values[0]) - 1
+	if remaining_uses <= 0:
+		values.pop_front()
+		inventory[block_name] = int(inventory.get(block_name, 0)) - 1
+		Sfx.tool_break()
+	else:
+		values[0] = remaining_uses
+	if int(inventory.get(block_name, 0)) <= 0:
+		inventory.erase(block_name)
+		inv_order.erase(block_name)
+		item_durability.erase(block_name)
+		for index in hotbar_slots.size():
+			if hotbar_slots[index] == block_name:
+				hotbar_slots[index] = ""
+		_clear_equipment_reference(block_name)
+		if craft_pick == block_name:
+			craft_pick = ""
+		if selected == block_name:
+			_reselect_after_remove()
+	elif values.is_empty():
+		_normalize_item_durability(block_name)
+	else:
+		item_durability[block_name] = values
+	inventory_changed.emit()
+	state_changed.emit()
+	return true
 
 
 func _footwear_distance_per_use(block_name: String) -> float:
@@ -12547,7 +12715,35 @@ func _resolve_content_recipe(content_recipe: Dictionary) -> Dictionary:
 	var station := str(content_recipe.get("station", ""))
 	if not station.is_empty():
 		resolved["station"] = station
+	var required_capability := str(content_recipe.get("required_capability", "")).strip_edges().to_lower()
+	if not required_capability.is_empty():
+		resolved["required_capability"] = required_capability
 	return resolved
+
+
+func set_crafting_capabilities(capabilities: Array) -> void:
+	crafting_capabilities.clear()
+	for raw_capability in capabilities:
+		var capability := str(raw_capability).strip_edges().to_lower()
+		if not capability.is_empty() and capability.length() <= 64:
+			crafting_capabilities[capability] = true
+
+
+func has_crafting_capability(capability: String) -> bool:
+	var normalized := capability.strip_edges().to_lower()
+	return normalized.is_empty() or bool(crafting_capabilities.get(normalized, false))
+
+
+func recipe_capability_available(recipe: Dictionary) -> bool:
+	var required_capability := str(recipe.get("required_capability", ""))
+	var outputs: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
+	for raw_output_name in outputs:
+		var output_name := str(raw_output_name)
+		var resolved_output_name := _block_name_for_content_id(output_name)
+		if output_name in [TNT_BLOCK_NAME, LIGHTER_ITEM_NAME] or resolved_output_name in [TNT_BLOCK_NAME, LIGHTER_ITEM_NAME]:
+			required_capability = "demolitionist"
+			break
+	return has_crafting_capability(required_capability)
 
 
 func nearby_station(station: String) -> bool:
@@ -12573,10 +12769,11 @@ func recipe_station_available(recipe: Dictionary) -> bool:
 func get_all_recipes() -> Array[Dictionary]:
 	var recipes: Array[Dictionary] = []
 	for recipe: Dictionary in BlockDefs.RECIPES:
-		recipes.append(recipe)
+		if recipe_capability_available(recipe):
+			recipes.append(recipe)
 	for content_recipe: Dictionary in BlockDefs.CONTENT_RECIPES:
 		var resolved := _resolve_content_recipe(content_recipe)
-		if not resolved.is_empty():
+		if not resolved.is_empty() and recipe_capability_available(resolved):
 			recipes.append(resolved)
 	# Creature collectibles keep their identity until the player deliberately
 	# chooses to prepare one. Creatures large enough to provide a real meal get
@@ -12591,7 +12788,8 @@ func get_all_recipes() -> Array[Dictionary]:
 				"system": true,
 			})
 	for recipe: Dictionary in known_recipes:
-		recipes.append(recipe)
+		if recipe_capability_available(recipe):
+			recipes.append(recipe)
 	return recipes
 
 
@@ -12636,6 +12834,8 @@ func get_contextual_recipes() -> Array[Dictionary]:
 
 func can_fill_craft_from_recipe(recipe: Dictionary) -> bool:
 	if not recipe.has("in") or not recipe["in"] is Dictionary:
+		return false
+	if not recipe_capability_available(recipe):
 		return false
 	if not recipe_station_available(recipe):
 		return false

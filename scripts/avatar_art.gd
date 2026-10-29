@@ -14,6 +14,7 @@ const DEFAULT_APPEARANCE := {
 	"legs": "classic",
 	"face": "none",
 	"particles": "none",
+	"glow": "none",
 	"outfit": "classic",
 }
 const ENUM_OPTIONS := {
@@ -23,6 +24,7 @@ const ENUM_OPTIONS := {
 	"legs": ["classic", "short", "spring"],
 	"face": ["none", "mustache", "whiskers"],
 	"particles": ["none", "flowers", "fireflies", "stars", "sparks", "fire", "garon"],
+	"glow": ["none", "glow"],
 	"outfit": ["classic", "garon"],
 }
 

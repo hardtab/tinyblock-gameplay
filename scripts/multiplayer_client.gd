@@ -8,6 +8,7 @@ signal voice_packet_received(sender_player_id: String, sequence: int, audio: Pac
 
 const PROTOCOL_VERSION := 2
 const DUEL_PROTOCOL_VERSION := 3
+const MANAGED_PROTOCOL_VERSION := 4
 const CLIENT_VERSION_SETTING := "application/config/version"
 const MAX_PLAYERS := 4
 const HEARTBEAT_SECONDS := 15.0
