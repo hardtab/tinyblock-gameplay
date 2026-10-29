@@ -41,6 +41,8 @@ var player_id := ""
 var session_id := ""
 var join_code := ""
 var transport_mode := "websocket"
+var last_websocket_close_code := -1
+var last_websocket_close_was_clean := false
 var websocket_fallback_enabled := false
 var session_protocol_version := PROTOCOL_VERSION
 var _session_max_players := MAX_PLAYERS
@@ -178,6 +180,8 @@ func send_voice_frame(audio: PackedByteArray, sequence: int) -> bool:
 
 func connect_with_ticket(websocket_url: String, ticket: String, code: String = "", allow_websocket_fallback: bool = false, protocol_version: int = PROTOCOL_VERSION) -> Error:
 	disconnect_from_session()
+	last_websocket_close_code = -1
+	last_websocket_close_was_clean = false
 	if websocket_url.is_empty() or ticket.is_empty():
 		return ERR_INVALID_PARAMETER
 	join_code = code
@@ -292,6 +296,8 @@ func _poll_websocket(delta: float) -> void:
 			_handle_ws_packet(socket.get_packet())
 	elif state == WebSocketPeer.STATE_CLOSED:
 		var reason := socket.get_close_reason()
+		last_websocket_close_code = socket.get_close_code()
+		last_websocket_close_was_clean = socket.was_clean_close()
 		socket = null
 		_close_rtc()
 		role = ""
@@ -530,6 +536,8 @@ func _fail_p2p_connection() -> void:
 	var active_socket := socket
 	socket = null
 	if active_socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
+		last_websocket_close_code = 4000
+		last_websocket_close_was_clean = false
 		active_socket.close(4000, "p2p_unavailable")
 	_close_rtc()
 	role = ""
