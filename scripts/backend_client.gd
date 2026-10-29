@@ -6,15 +6,138 @@ const SESSION_PATH := "user://backend_session.json"
 const PENDING_DISCOVERY_PATH := "user://pending_discovery.json"
 const REQUEST_TIMEOUT := 20.0
 const REQUEST_ATTEMPTS := 3
+const BACKEND_API_URL_ENV := "TINYBLOCK_BACKEND_API_URL"
+const MANAGED_CONTROL_DIR_ENV := "TINYBLOCK_MANAGED_CONTROL_DIR"
 
 var api_url := ""
 var access_token := ""
 var installation_id := ""
+var _managed_runtime := false
+var _configuration_error := ""
+var _managed_auth_rejected := false
 
 
 func _ready() -> void:
-	api_url = str(ProjectSettings.get_setting("tinyblock/backend_api_url", "")).trim_suffix("/")
-	_load_session()
+	_managed_runtime = _is_managed_dedicated_runtime()
+	var override_url := OS.get_environment(BACKEND_API_URL_ENV).strip_edges()
+	if _managed_runtime and override_url.is_empty():
+		_fail_managed_configuration("managed_backend_api_url_missing")
+		return
+	if not override_url.is_empty():
+		api_url = _normalize_api_base_url(override_url)
+		if api_url.is_empty():
+			if _managed_runtime:
+				_fail_managed_configuration("managed_backend_api_url_invalid")
+			else:
+				_configuration_error = "backend_api_url_invalid"
+			return
+	else:
+		var configured_url := str(ProjectSettings.get_setting("tinyblock/backend_api_url", "")).strip_edges()
+		api_url = _normalize_api_base_url(configured_url)
+		if api_url.is_empty():
+			_configuration_error = "backend_not_configured" if configured_url.is_empty() else "backend_api_url_invalid"
+			return
+	if _managed_runtime:
+		_load_managed_session()
+	else:
+		_load_session()
+
+
+func _is_managed_dedicated_runtime() -> bool:
+	if not OS.get_environment(MANAGED_CONTROL_DIR_ENV).strip_edges().is_empty():
+		return true
+	var arguments := OS.get_cmdline_args()
+	arguments.append_array(OS.get_cmdline_user_args())
+	var dedicated := OS.has_feature("dedicated_server") or arguments.has("--tinyblock-server")
+	if not dedicated:
+		return false
+	for index in range(maxi(0, arguments.size() - 1)):
+		if arguments[index] == "--world" and str(arguments[index + 1]).begins_with("world_managed_"):
+			return true
+	return false
+
+
+func _normalize_api_base_url(raw_url: String) -> String:
+	var candidate := raw_url.strip_edges()
+	if candidate.is_empty() or candidate.contains("?") or candidate.contains("#") or candidate.contains("\\"):
+		return ""
+	for code in candidate.to_utf8_buffer():
+		if code <= 32 or code >= 127:
+			return ""
+	var separator := candidate.find("://")
+	if separator <= 0:
+		return ""
+	var scheme := candidate.substr(0, separator).to_lower()
+	if scheme not in ["https", "http"]:
+		return ""
+	var remainder := candidate.substr(separator + 3)
+	var path_offset := remainder.find("/")
+	var authority := remainder if path_offset < 0 else remainder.substr(0, path_offset)
+	var base_path := "" if path_offset < 0 else remainder.substr(path_offset)
+	if authority.is_empty() or authority.contains("@") or authority.find(":") != authority.rfind(":"):
+		return ""
+	var host := authority
+	var port_suffix := ""
+	var port_offset := authority.rfind(":")
+	if port_offset >= 0:
+		host = authority.substr(0, port_offset)
+		var port_text := authority.substr(port_offset + 1)
+		if port_text.is_empty():
+			return ""
+		for code in port_text.to_utf8_buffer():
+			if code < 48 or code > 57:
+				return ""
+		var port := int(port_text)
+		if port < 1 or port > 65535:
+			return ""
+		port_suffix = ":%d" % port
+	if not _is_valid_api_host(host):
+		return ""
+	if scheme == "http" and host.to_lower() not in ["localhost", "127.0.0.1"]:
+		return ""
+	for segment in base_path.split("/"):
+		if segment in [".", ".."]:
+			return ""
+	if base_path == "/":
+		base_path = ""
+	elif base_path.ends_with("/"):
+		base_path = base_path.trim_suffix("/")
+	for code in base_path.to_utf8_buffer():
+		if not (code >= 48 and code <= 57) and not (code >= 65 and code <= 90) and not (code >= 97 and code <= 122) and code not in [45, 46, 47, 95, 126]:
+			return ""
+	return "%s://%s%s%s" % [scheme, host.to_lower(), port_suffix, base_path]
+
+
+func _is_valid_api_host(host: String) -> bool:
+	if host.is_empty() or host.begins_with(".") or host.ends_with(".") or host.contains(".."):
+		return false
+	for label in host.split("."):
+		if label.is_empty() or label.begins_with("-") or label.ends_with("-"):
+			return false
+		for code in label.to_utf8_buffer():
+			if not (code >= 48 and code <= 57) and not (code >= 65 and code <= 90) and not (code >= 97 and code <= 122) and code != 45:
+				return false
+	return true
+
+
+func _fail_managed_configuration(error_code: String) -> void:
+	_configuration_error = error_code
+	api_url = ""
+	access_token = ""
+	installation_id = ""
+
+
+func _network_block_error() -> String:
+	if not _configuration_error.is_empty():
+		return _configuration_error
+	if api_url.is_empty():
+		return "backend_not_configured"
+	if _managed_runtime:
+		if _managed_auth_rejected:
+			return "managed_runtime_auth_rejected"
+		if access_token.is_empty() or installation_id.is_empty():
+			return "managed_runtime_auth_missing"
+	return ""
 
 
 func is_configured() -> bool:
@@ -22,8 +145,9 @@ func is_configured() -> bool:
 
 
 func ensure_session() -> Dictionary:
-	if not is_configured():
-		return {"ok": false, "error": "backend_not_configured"}
+	var blocked := _network_block_error()
+	if not blocked.is_empty():
+		return {"ok": false, "error": blocked}
 	if not access_token.is_empty():
 		return {"ok": true, "access_token": access_token}
 	if installation_id.is_empty():
@@ -396,6 +520,9 @@ func wait_for_discovery(job_id: String, poll_after_ms: int = 1500, max_wait_seco
 
 
 func _request_json(method: HTTPClient.Method, path: String, body: Dictionary, authorized: bool, extra_headers: Array[String] = []) -> Dictionary:
+	var blocked := _network_block_error()
+	if not blocked.is_empty():
+		return {"ok": false, "error": blocked}
 	var last: Dictionary = {"ok": false, "error": "request_failed"}
 	for attempt in REQUEST_ATTEMPTS:
 		last = await _request_json_once(method, path, body, authorized, extra_headers)
@@ -440,6 +567,8 @@ func _request_json_once(method: HTTPClient.Method, path: String, body: Dictionar
 		parsed = {"raw": raw_body}
 	if status_code == 401 and authorized:
 		access_token = ""
+		if _managed_runtime:
+			_managed_auth_rejected = true
 		_save_session()
 		session_changed.emit(false)
 	return {
@@ -463,11 +592,54 @@ func _load_session() -> void:
 	access_token = str(parsed.get("access_token", ""))
 
 
+func _load_managed_session() -> void:
+	if not FileAccess.file_exists(SESSION_PATH):
+		_fail_managed_configuration("managed_runtime_auth_missing")
+		return
+	var file := FileAccess.open(SESSION_PATH, FileAccess.READ)
+	if file == null or file.get_length() <= 0 or file.get_length() > 16384:
+		_fail_managed_configuration("managed_runtime_auth_invalid")
+		return
+	var contents := file.get_as_text()
+	file.close()
+	var parsed: Variant = JSON.parse_string(contents)
+	if not parsed is Dictionary:
+		_fail_managed_configuration("managed_runtime_auth_invalid")
+		return
+	var session_url := _normalize_api_base_url(str(parsed.get("api_url", "")))
+	if session_url.is_empty():
+		_fail_managed_configuration("managed_runtime_auth_invalid")
+		return
+	if session_url != api_url:
+		_fail_managed_configuration("managed_backend_api_url_mismatch")
+		return
+	var session_token := str(parsed.get("access_token", ""))
+	var session_installation_id := str(parsed.get("installation_id", ""))
+	if not _is_safe_runtime_value(session_token, 8192) or not _is_safe_runtime_value(session_installation_id, 128):
+		_fail_managed_configuration("managed_runtime_auth_invalid")
+		return
+	access_token = session_token
+	installation_id = session_installation_id
+
+
+func _is_safe_runtime_value(value: String, maximum_length: int) -> bool:
+	if value.is_empty() or value.length() > maximum_length:
+		return false
+	for code in value.to_utf8_buffer():
+		if code <= 32 or code >= 127:
+			return false
+	return true
+
+
 func _save_session() -> void:
 	var file := FileAccess.open(SESSION_PATH, FileAccess.WRITE)
 	if file == null:
 		return
-	file.store_string(JSON.stringify({
+	var session := {
 		"installation_id": installation_id,
 		"access_token": access_token,
-	}))
+	}
+	if _managed_runtime:
+		session["api_url"] = api_url
+	file.store_string(JSON.stringify(session))
+	file.close()
