@@ -935,8 +935,9 @@ func _create_rtc_peer(remote_id: String, connection_id: String = "", offer_gener
 		channel.close()
 		peer.close()
 		return false
-	peer.session_description_created.connect(_on_rtc_session_created.bind(remote_id, peer, connection_id, offer_generation))
-	peer.ice_candidate_created.connect(_on_rtc_ice_candidate.bind(remote_id, peer, connection_id, offer_generation))
+	var peer_instance_id := peer.get_instance_id()
+	peer.session_description_created.connect(_on_rtc_session_created.bind(remote_id, peer_instance_id, connection_id, offer_generation))
+	peer.ice_candidate_created.connect(_on_rtc_ice_candidate.bind(remote_id, peer_instance_id, connection_id, offer_generation))
 	_rtc_peers[remote_id] = peer
 	_rtc_channels[remote_id] = channel
 	_rtc_voice_channels[remote_id] = voice_channel
@@ -948,10 +949,20 @@ func _create_rtc_peer(remote_id: String, connection_id: String = "", offer_gener
 	return true
 
 
-func _rtc_callback_is_current(remote_id: String, origin_peer: WebRTCPeerConnection, connection_id: String, offer_generation: int) -> bool:
+func _rtc_callback_is_current(remote_id: String, origin_peer_instance_id: int, connection_id: String, offer_generation: int) -> bool:
+	var current_peer: WebRTCPeerConnection = _rtc_peers.get(remote_id)
 	return (
-		origin_peer != null
-		and _rtc_peers.get(remote_id) == origin_peer
+		current_peer != null
+		and current_peer.get_instance_id() == origin_peer_instance_id
+		and str(_rtc_connection_ids.get(remote_id, "")) == connection_id
+		and int(_rtc_offer_generations.get(remote_id, -1)) == offer_generation
+	)
+
+
+func _rtc_peer_is_current(remote_id: String, expected_peer: WebRTCPeerConnection, connection_id: String, offer_generation: int) -> bool:
+	return (
+		expected_peer != null
+		and _rtc_peers.get(remote_id) == expected_peer
 		and str(_rtc_connection_ids.get(remote_id, "")) == connection_id
 		and int(_rtc_offer_generations.get(remote_id, -1)) == offer_generation
 	)
@@ -970,14 +981,17 @@ func _on_rtc_session_created(
 	type: String,
 	sdp: String,
 	remote_id: String,
-	origin_peer: WebRTCPeerConnection,
+	origin_peer_instance_id: int,
 	connection_id: String,
 	offer_generation: int,
 ) -> void:
-	if not _rtc_callback_is_current(remote_id, origin_peer, connection_id, offer_generation):
+	if not _rtc_callback_is_current(remote_id, origin_peer_instance_id, connection_id, offer_generation):
 		_rtc_diag_event("stale_sdp_callback_dropped", remote_id, connection_id, offer_generation, {"description_type": type})
 		return
-	var local_description_result := origin_peer.set_local_description(type, sdp)
+	var peer: WebRTCPeerConnection = _rtc_peers.get(remote_id)
+	if peer == null:
+		return
+	var local_description_result := peer.set_local_description(type, sdp)
 	_rtc_diag_event("local_sdp_result", remote_id, connection_id, offer_generation, {"description_type": type, "result_code": local_description_result})
 	if local_description_result != OK:
 		return
@@ -1014,11 +1028,11 @@ func _on_rtc_ice_candidate(
 	index: int,
 	name: String,
 	remote_id: String,
-	origin_peer: WebRTCPeerConnection,
+	origin_peer_instance_id: int,
 	connection_id: String,
 	offer_generation: int,
 ) -> void:
-	if not _rtc_callback_is_current(remote_id, origin_peer, connection_id, offer_generation):
+	if not _rtc_callback_is_current(remote_id, origin_peer_instance_id, connection_id, offer_generation):
 		_rtc_diag_event("stale_ice_callback_dropped", remote_id, connection_id, offer_generation, {"candidate_type": _rtc_diag_candidate_type(name)})
 		return
 	var payload := _rtc_signal_payload(remote_id, {"media": media, "index": index, "name": name})
@@ -1214,7 +1228,7 @@ func _set_rtc_remote_description(remote_id: String, type: String, sdp: String) -
 	})
 	if peer == null or sdp.is_empty() or result_code != OK:
 		return
-	if not _rtc_callback_is_current(remote_id, peer, connection_id, offer_generation):
+	if not _rtc_peer_is_current(remote_id, peer, connection_id, offer_generation):
 		return
 	_rtc_remote_description_set[remote_id] = true
 	var pending: Array = _rtc_pending_candidates.get(remote_id, []) if _rtc_pending_candidates.get(remote_id, []) is Array else []
@@ -1222,7 +1236,7 @@ func _set_rtc_remote_description(remote_id: String, type: String, sdp: String) -
 	if role == "host" and session_protocol_version == MANAGED_PROTOCOL_VERSION and type == "offer":
 		pending.append_array(_flush_future_rtc_candidates(remote_id, connection_id, offer_generation, peer))
 	for raw_candidate in pending:
-		if not _rtc_callback_is_current(remote_id, peer, connection_id, offer_generation):
+		if not _rtc_peer_is_current(remote_id, peer, connection_id, offer_generation):
 			break
 		if raw_candidate is Dictionary:
 			_add_rtc_candidate(remote_id, raw_candidate as Dictionary, peer, connection_id, offer_generation)
@@ -1286,7 +1300,7 @@ func _flush_future_rtc_candidates(
 	if (
 		expected_peer == null
 		or not bool(_rtc_remote_description_set.get(remote_id, false))
-		or not _rtc_callback_is_current(remote_id, expected_peer, connection_id, generation)
+		or not _rtc_peer_is_current(remote_id, expected_peer, connection_id, generation)
 	):
 		return []
 	var raw_slots: Variant = _rtc_future_candidate_buffers.get(remote_id, [])
