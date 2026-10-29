@@ -806,7 +806,8 @@ func _rtc_diag_event(
 	for key in extra:
 		if key in [
 			"signal_type", "decision", "reason", "description_type", "result_code", "candidate_type",
-			"candidate_index", "candidate_count", "candidate_action", "websocket_send_ok", "websocket_outbound_before_bytes",
+			"candidate_index", "candidate_count", "candidate_action", "candidate_transport", "candidate_address_family",
+			"candidate_port_bucket", "candidate_endpoint_key", "websocket_send_ok", "websocket_outbound_before_bytes",
 			"websocket_outbound_after_bytes", "websocket_send_result", "send_error", "incoming_generation", "highest_generation",
 			"rtc_send_ok", "last_seen_age_ms", "last_ping_age_ms", "probe_grace_ms", "data_channel_buffered_bytes", "close_reason",
 		]:
@@ -944,11 +945,54 @@ func _rtc_diag_record_peer_state(remote_id: String, peer: WebRTCPeerConnection) 
 
 
 func _rtc_diag_candidate_type(candidate: String) -> String:
-	var lower_candidate := candidate.to_lower()
-	for candidate_type in ["host", "srflx", "prflx", "relay"]:
-		if lower_candidate.contains(" typ %s " % candidate_type):
-			return candidate_type
+	var fields := candidate.strip_edges().to_lower().replace("\t", " ").split(" ", false)
+	for index in range(fields.size() - 1):
+		if fields[index] == "typ" and fields[index + 1] in ["host", "srflx", "prflx", "relay"]:
+			return fields[index + 1]
 	return "other"
+
+
+func _rtc_diag_candidate_metadata(candidate: String, connection_id: String = "") -> Dictionary:
+	var metadata := {
+		"candidate_transport": "unknown",
+		"candidate_address_family": "unknown",
+		"candidate_port_bucket": "unknown",
+		"candidate_endpoint_key": "",
+	}
+	var fields := candidate.strip_edges().to_lower().replace("\t", " ").split(" ", false)
+	if fields.size() < 6:
+		return metadata
+	var transport := str(fields[2])
+	if transport not in ["udp", "tcp"]:
+		return metadata
+	var address := str(fields[4])
+	var port_text := str(fields[5])
+	if not port_text.is_valid_int():
+		return metadata
+	var port := int(port_text)
+	if port < 1 or port > 65535:
+		return metadata
+	metadata["candidate_transport"] = transport
+	if address.contains(":"):
+		metadata["candidate_address_family"] = "ipv6"
+	else:
+		var octets := address.split(".", false)
+		var is_ipv4 := octets.size() == 4
+		for octet in octets:
+			if not octet.is_valid_int() or int(octet) < 0 or int(octet) > 255:
+				is_ipv4 = false
+				break
+		metadata["candidate_address_family"] = "ipv4" if is_ipv4 else "hostname"
+	if port < 1024:
+		metadata["candidate_port_bucket"] = "system"
+	elif port < 49152:
+		metadata["candidate_port_bucket"] = "registered"
+	else:
+		metadata["candidate_port_bucket"] = "ephemeral"
+	var salt := "%s|%s" % [session_id, connection_id]
+	if not salt.replace("|", "").is_empty():
+		metadata["candidate_endpoint_key"] = ("%s|%s|%s|%d" % [salt, address, transport, port]).sha256_text().substr(0, 12)
+	return metadata
 
 
 func _rtc_diag_can_record_candidate(remote_id: String, direction: String) -> bool:
@@ -1230,7 +1274,7 @@ func _on_rtc_ice_candidate(
 			"seq": 0,
 		})
 	if record_candidate:
-		_rtc_diag_event("rtc_signal_sent", remote_id, connection_id, offer_generation, {
+		var candidate_diagnostics := {
 			"signal_type": "rtc_candidate",
 			"candidate_type": candidate_type,
 			"candidate_index": index,
@@ -1238,7 +1282,9 @@ func _on_rtc_ice_candidate(
 			"websocket_send_result": send_result,
 			"websocket_outbound_before_bytes": outbound_before,
 			"websocket_outbound_after_bytes": _rtc_websocket_buffered_bytes(),
-		})
+		}
+		candidate_diagnostics.merge(_rtc_diag_candidate_metadata(name, connection_id), true)
+		_rtc_diag_event("rtc_signal_sent", remote_id, connection_id, offer_generation, candidate_diagnostics)
 
 
 func _handle_rtc_signal(message: Dictionary) -> void:
@@ -1354,11 +1400,13 @@ func _handle_rtc_signal(message: Dictionary) -> void:
 		if role == "host" and session_protocol_version == MANAGED_PROTOCOL_VERSION and incoming_generation > current_generation:
 			var queue_result := _queue_future_rtc_candidate(remote_id, connection_id, incoming_generation, candidate)
 			if queue_result in ["buffer", "duplicate"]:
-				_rtc_diag_event("future_candidate_buffered", remote_id, connection_id, incoming_generation, {
+				var candidate_diagnostics := {
 					"decision": "accept" if queue_result == "buffer" else "duplicate",
 					"candidate_type": _rtc_diag_candidate_type(str(candidate.get("name", ""))),
 					"candidate_index": int(candidate.get("index", 0)),
-				})
+				}
+				candidate_diagnostics.merge(_rtc_diag_candidate_metadata(str(candidate.get("name", "")), connection_id), true)
+				_rtc_diag_event("future_candidate_buffered", remote_id, connection_id, incoming_generation, candidate_diagnostics)
 				return
 			_rtc_diag_event("rtc_candidate_rejected", remote_id, connection_id, incoming_generation, {"reason": queue_result})
 			return
@@ -1380,11 +1428,13 @@ func _handle_rtc_signal(message: Dictionary) -> void:
 			pending_candidates.append(candidate)
 			_rtc_pending_candidates[remote_id] = pending_candidates
 			if _rtc_diag_can_record_candidate(remote_id, "remote"):
-				_rtc_diag_event("remote_candidate_queued", remote_id, connection_id, incoming_generation, {
+				var candidate_diagnostics := {
 					"candidate_type": _rtc_diag_candidate_type(str(candidate.get("name", ""))),
 					"candidate_index": int(candidate.get("index", 0)),
 					"candidate_action": "queued",
-				})
+				}
+				candidate_diagnostics.merge(_rtc_diag_candidate_metadata(str(candidate.get("name", "")), connection_id), true)
+				_rtc_diag_event("remote_candidate_queued", remote_id, connection_id, incoming_generation, candidate_diagnostics)
 		else:
 			_add_rtc_candidate(remote_id, candidate)
 
@@ -1540,12 +1590,14 @@ func _add_rtc_candidate(
 	if peer != null:
 		var add_result := peer.add_ice_candidate(str(candidate.get("media", "")), int(candidate.get("index", 0)), str(candidate.get("name", "")))
 		if _rtc_diag_can_record_candidate(remote_id, "remote_added"):
-			_rtc_diag_event("remote_candidate_added", remote_id, connection_id, generation, {
+			var candidate_diagnostics := {
 				"candidate_type": _rtc_diag_candidate_type(str(candidate.get("name", ""))),
 				"candidate_index": int(candidate.get("index", 0)),
 				"result_code": add_result,
 				"candidate_action": "added",
-			})
+			}
+			candidate_diagnostics.merge(_rtc_diag_candidate_metadata(str(candidate.get("name", "")), connection_id), true)
+			_rtc_diag_event("remote_candidate_added", remote_id, connection_id, generation, candidate_diagnostics)
 
 
 func _handle_rtc_packet(remote_id: String, packet: PackedByteArray) -> void:
