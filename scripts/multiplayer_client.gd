@@ -233,7 +233,7 @@ func disconnect_from_session() -> void:
 			socket.close(1000, "leaving")
 		socket = null
 	var had_session := not role.is_empty()
-	_close_rtc()
+	_close_rtc("session_disconnect")
 	role = ""
 	player_id = ""
 	session_id = ""
@@ -331,7 +331,7 @@ func _poll_websocket(delta: float) -> void:
 		last_websocket_close_code = socket.get_close_code()
 		last_websocket_close_was_clean = last_websocket_close_code != -1
 		socket = null
-		_close_rtc()
+		_close_rtc("websocket_closed")
 		role = ""
 		player_id = ""
 		session_id = ""
@@ -461,7 +461,7 @@ func _handle_ws_packet(packet: PackedByteArray) -> void:
 	elif kind == "control" and type == "player_left":
 		var left_id := str(message.get("player_id", ""))
 		_known_players.erase(left_id)
-		_close_rtc_peer(left_id)
+		_close_rtc_peer(left_id, "player_left")
 		_rtc_highest_offer_generations.erase(left_id)
 		_rtc_highest_offer_connection_ids.erase(left_id)
 	if type in ["rtc_offer", "rtc_answer", "rtc_candidate"]:
@@ -527,7 +527,7 @@ func _schedule_rtc_reconnect(reason: String = "retry_timeout") -> void:
 		return
 	if _rtc_reconnecting:
 		return
-	_close_rtc_peer(_guest_host_id)
+	_close_rtc_peer(_guest_host_id, "guest_reconnect")
 	_rtc_reconnect_attempt += 1
 	if _rtc_reconnect_attempt > RTC_MAX_RECONNECT_ATTEMPTS:
 		_fail_p2p_connection()
@@ -669,7 +669,7 @@ func _rtc_diag_event(
 			"signal_type", "decision", "reason", "description_type", "result_code", "candidate_type",
 			"candidate_index", "candidate_action", "websocket_send_ok", "websocket_outbound_before_bytes",
 			"websocket_outbound_after_bytes", "websocket_send_result", "send_error", "incoming_generation", "highest_generation",
-			"rtc_send_ok", "last_seen_age_ms", "probe_grace_ms",
+			"rtc_send_ok", "last_seen_age_ms", "probe_grace_ms", "close_reason",
 		]:
 			entry[key] = extra[key]
 	_rtc_diagnostic_trace.append(entry)
@@ -745,7 +745,7 @@ func _recover_silent_rtc_peer(remote_id: String) -> void:
 			last_rtc_silence_diagnostics["connection_state"],
 			last_rtc_silence_diagnostics["game_channel_state"],
 		])
-	_close_rtc_peer(remote_id)
+	_close_rtc_peer(remote_id, "silent_timeout")
 	match recovery_mode:
 		RTC_SILENCE_RECOVERY_WEBSOCKET:
 			_reset_rtc_reconnect_state()
@@ -780,7 +780,7 @@ func _start_rtc_reconnect() -> void:
 		return
 	var peer: WebRTCPeerConnection = _rtc_peers.get(_guest_host_id)
 	if peer == null or peer.create_offer() != OK:
-		_close_rtc_peer(_guest_host_id)
+		_close_rtc_peer(_guest_host_id, "offer_creation_failed")
 		_rtc_reconnecting = false
 		_schedule_rtc_reconnect("offer_creation_failed")
 		return
@@ -809,7 +809,7 @@ func _fail_p2p_connection() -> void:
 		last_websocket_close_code = 4000
 		last_websocket_close_was_clean = false
 		active_socket.close(4000, "p2p_unavailable")
-	_close_rtc()
+	_close_rtc("p2p_failed")
 	role = ""
 	player_id = ""
 	session_id = ""
@@ -1031,7 +1031,7 @@ func _handle_rtc_signal(message: Dictionary) -> void:
 				"reason": "newer_offer",
 				"incoming_generation": incoming_generation,
 			})
-			_close_rtc_peer(remote_id)
+			_close_rtc_peer(remote_id, "newer_offer")
 		if not _create_rtc_peer(remote_id, connection_id, offer_generation):
 			_rtc_diag_event("rtc_offer_rejected", remote_id, connection_id, incoming_generation, {"reason": "peer_create_failed"})
 			return
@@ -1282,9 +1282,11 @@ func _set_transport_mode(mode: String) -> void:
 	transport_changed.emit(mode)
 
 
-func _close_rtc_peer(remote_id: String) -> void:
+func _close_rtc_peer(remote_id: String, close_reason: String = "unspecified") -> void:
 	if _rtc_peers.has(remote_id):
-		_rtc_diag_event("peer_closed", remote_id, str(_rtc_connection_ids.get(remote_id, "")), int(_rtc_offer_generations.get(remote_id, -1)))
+		_rtc_diag_event("peer_closed", remote_id, str(_rtc_connection_ids.get(remote_id, "")), int(_rtc_offer_generations.get(remote_id, -1)), {
+			"close_reason": close_reason,
+		})
 	if _rtc_channels.has(remote_id):
 		var channel: WebRTCDataChannel = _rtc_channels[remote_id]
 		if channel != null:
@@ -1316,9 +1318,9 @@ func _close_rtc_peer(remote_id: String) -> void:
 		_rtc_diagnostic_candidate_counts.erase("%s:%s" % [remote_id, direction])
 
 
-func _close_rtc() -> void:
+func _close_rtc(close_reason: String = "session_closed") -> void:
 	for raw_peer_id in _rtc_peers.keys():
-		_close_rtc_peer(str(raw_peer_id))
+		_close_rtc_peer(str(raw_peer_id), close_reason)
 	_rtc_peers.clear()
 	_rtc_channels.clear()
 	_rtc_voice_channels.clear()
