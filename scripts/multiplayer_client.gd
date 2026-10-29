@@ -48,6 +48,12 @@ const RTC_CONFIGURATION := {
 		{"urls": ["stun:global.stun.twilio.com:3478"]},
 	]
 }
+const MANAGED_HOST_RTC_CONFIGURATION := {
+	"iceServers": [
+		{"urls": ["stun:stun.cloudflare.com:3478"]},
+		{"urls": ["stun:global.stun.twilio.com:3478"]},
+	]
+}
 
 var socket: WebSocketPeer
 var role := ""
@@ -1138,7 +1144,9 @@ func _create_rtc_peer(remote_id: String, connection_id: String = "", offer_gener
 		_rtc_diag_event("peer_create_rejected", remote_id, connection_id, offer_generation, {"reason": "invalid_generation"})
 		return false
 	var peer := WebRTCPeerConnection.new()
-	var initialize_result := peer.initialize(RTC_CONFIGURATION)
+	var initialize_result := peer.initialize(
+		rtc_configuration_for_session(role, session_protocol_version, _dedicated_server_session)
+	)
 	if initialize_result != OK:
 		_rtc_diag_event("peer_create_failed", remote_id, connection_id, offer_generation, {"reason": "initialize", "result_code": initialize_result})
 		return false
@@ -1170,6 +1178,12 @@ func _create_rtc_peer(remote_id: String, connection_id: String = "", offer_gener
 	_rtc_offer_generations[remote_id] = offer_generation
 	_rtc_diag_event("peer_created", remote_id, connection_id, offer_generation)
 	return true
+
+
+static func rtc_configuration_for_session(peer_role: String, protocol_version: int, dedicated_server: bool) -> Dictionary:
+	if peer_role == "host" and protocol_version == MANAGED_PROTOCOL_VERSION and dedicated_server:
+		return MANAGED_HOST_RTC_CONFIGURATION.duplicate(true)
+	return RTC_CONFIGURATION.duplicate(true)
 
 
 func _rtc_callback_is_current(remote_id: String, origin_peer_instance_id: int, connection_id: String, offer_generation: int) -> bool:
