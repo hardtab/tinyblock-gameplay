@@ -28,6 +28,9 @@ const RTC_MAX_CANDIDATE_MEDIA_LENGTH := 64
 const RTC_MAX_CONNECTION_ID_LENGTH := 128
 const RTC_DIAGNOSTIC_TRACE_LIMIT := 64
 const RTC_DIAGNOSTIC_CANDIDATES_PER_PEER := 8
+const RTC_DIAGNOSTIC_LIVENESS_EVENTS_PER_PEER := 32
+const RTC_DIAGNOSTIC_LIVENESS_SAMPLE_INTERVAL_MSEC := 15000
+const RTC_DIAGNOSTIC_LIVENESS_SNAPSHOT_INTERVAL_MSEC := 15000
 const RTC_SILENCE_RECOVERY_WEBSOCKET := "websocket"
 const RTC_SILENCE_RECOVERY_RECONNECT := "reconnecting"
 const RTC_SILENCE_RECOVERY_DROP_PEER := "drop_peer"
@@ -90,6 +93,10 @@ var _rtc_diagnostic_trace: Array[Dictionary] = []
 var _rtc_observed_state_signatures: Dictionary = {}
 var _rtc_diagnostic_candidate_counts: Dictionary = {}
 var _rtc_diagnostic_event_counts: Dictionary = {}
+var _rtc_diagnostic_liveness_event_counts: Dictionary = {}
+var _rtc_diagnostic_liveness_sample_msec: Dictionary = {}
+var _rtc_diagnostic_liveness_counters: Dictionary = {}
+var _rtc_diagnostic_liveness_snapshot_msec := 0
 var rtc_diagnostics_enabled := false
 var last_rtc_silence_diagnostics: Dictionary = {}
 var _rtc_reconnect_attempt := 0
@@ -232,6 +239,10 @@ func connect_with_ticket(websocket_url: String, ticket: String, code: String = "
 	_rtc_observed_state_signatures.clear()
 	_rtc_diagnostic_candidate_counts.clear()
 	_rtc_diagnostic_event_counts.clear()
+	_rtc_diagnostic_liveness_event_counts.clear()
+	_rtc_diagnostic_liveness_sample_msec.clear()
+	_rtc_diagnostic_liveness_counters.clear()
+	_rtc_diagnostic_liveness_snapshot_msec = 0
 	_rtc_offer_generation = 0
 	_rtc_highest_offer_generations.clear()
 	_rtc_highest_offer_connection_ids.clear()
@@ -427,10 +438,22 @@ func _poll_rtc(delta: float) -> void:
 		if _rtc_ping_left <= 0.0:
 			_rtc_ping_left = RTC_PING_SECONDS
 			for ping_peer_id in open_game_peers:
+				var ping_now := Time.get_ticks_msec()
+				var previous_ping_sent := int(_rtc_last_ping_sent_msec.get(ping_peer_id, 0))
+				var ping_channel: WebRTCDataChannel = _rtc_channels.get(ping_peer_id)
+				var ping_connection_id := str(_rtc_connection_ids.get(ping_peer_id, ""))
+				var ping_generation := int(_rtc_offer_generations.get(ping_peer_id, -1))
 				var ping_put_ok := _send_rtc(ping_peer_id, {"kind": "control", "type": "p2p_ping", "payload": {"sent_msec": now}})
+				_rtc_diag_record_liveness("ping_send", ping_peer_id, ping_connection_id, ping_generation, ping_put_ok)
 				_rtc_last_ping_put_ok[ping_peer_id] = ping_put_ok
 				if ping_put_ok:
-					_rtc_last_ping_sent_msec[ping_peer_id] = now
+					_rtc_last_ping_sent_msec[ping_peer_id] = ping_now
+				_rtc_diag_liveness_sample("rtc_ping_sent", ping_peer_id, ping_connection_id, ping_generation, {
+						"rtc_send_ok": ping_put_ok,
+						"last_seen_age_ms": clampi(ping_now - int(_rtc_last_seen_msec.get(ping_peer_id, ping_now)), 0, 600000),
+						"last_ping_age_ms": clampi(ping_now - previous_ping_sent, 0, 600000) if previous_ping_sent > 0 else 0,
+						"data_channel_buffered_bytes": ping_channel.get_buffered_amount() if ping_channel != null else -1,
+					}, not ping_put_ok)
 		for silent_peer_id in open_game_peers:
 			var last_seen := int(_rtc_last_seen_msec.get(silent_peer_id, now))
 			var probe_deadline := int(_rtc_silence_probe_deadline_msec.get(silent_peer_id, 0))
@@ -448,6 +471,13 @@ func _poll_rtc(delta: float) -> void:
 					var probe_put_ok: bool = already_probed_this_frame
 					if not probe_put_ok:
 						probe_put_ok = _send_rtc(silent_peer_id, {"kind": "control", "type": "p2p_ping", "payload": {"sent_msec": now}})
+						_rtc_diag_record_liveness(
+							"ping_send",
+							silent_peer_id,
+							str(_rtc_connection_ids.get(silent_peer_id, "")),
+							int(_rtc_offer_generations.get(silent_peer_id, -1)),
+							probe_put_ok,
+						)
 						_rtc_last_ping_put_ok[silent_peer_id] = probe_put_ok
 						if probe_put_ok:
 							_rtc_last_ping_sent_msec[silent_peer_id] = now
@@ -464,13 +494,16 @@ func _poll_rtc(delta: float) -> void:
 					_rtc_diag_event("silence_probe", silent_peer_id, str(_rtc_connection_ids.get(silent_peer_id, "")), int(_rtc_offer_generations.get(silent_peer_id, -1)), {
 						"rtc_send_ok": probe_put_ok,
 						"last_seen_age_ms": clampi(now - last_seen, 0, 600000),
+						"last_ping_age_ms": clampi(now - int(_rtc_last_ping_sent_msec.get(silent_peer_id, now)), 0, 600000),
 						"probe_grace_ms": int(RTC_PING_RESPONSE_GRACE_SECONDS * 1000.0),
-					})
+						"data_channel_buffered_bytes": probe_channel.get_buffered_amount() if probe_channel != null else -1,
+					}, true)
 				"recover":
 					_recover_silent_rtc_peer(silent_peer_id)
 				"wait":
 					pass
 	_tick_rtc_reconnect(delta)
+	_rtc_diag_maybe_print_liveness_snapshot(Time.get_ticks_msec())
 
 
 func _handle_ws_packet(packet: PackedByteArray) -> void:
@@ -725,16 +758,25 @@ func _rtc_diag_event(
 	connection_id: String = "",
 	offer_generation: int = -1,
 	extra: Dictionary = {},
+	is_liveness: bool = false,
 ) -> void:
 	if not rtc_diagnostics_enabled:
 		return
 	var event_key := remote_id if not remote_id.is_empty() else "session"
-	if not _rtc_diagnostic_event_counts.has(event_key) and _rtc_diagnostic_event_counts.size() >= maxi(1, _session_max_players):
-		return
-	var event_count := int(_rtc_diagnostic_event_counts.get(event_key, 0))
-	if event_count >= 24:
-		return
-	_rtc_diagnostic_event_counts[event_key] = event_count + 1
+	if is_liveness:
+		if not _rtc_diagnostic_liveness_event_counts.has(event_key) and _rtc_diagnostic_liveness_event_counts.size() >= maxi(1, _session_max_players):
+			return
+		var liveness_count := int(_rtc_diagnostic_liveness_event_counts.get(event_key, 0))
+		if liveness_count >= RTC_DIAGNOSTIC_LIVENESS_EVENTS_PER_PEER:
+			return
+		_rtc_diagnostic_liveness_event_counts[event_key] = liveness_count + 1
+	else:
+		if not _rtc_diagnostic_event_counts.has(event_key) and _rtc_diagnostic_event_counts.size() >= maxi(1, _session_max_players):
+			return
+		var event_count := int(_rtc_diagnostic_event_counts.get(event_key, 0))
+		if event_count >= 24:
+			return
+		_rtc_diagnostic_event_counts[event_key] = event_count + 1
 	var entry := {
 		"at_utc_ms": int(Time.get_unix_time_from_system() * 1000.0),
 		"tick_ms": Time.get_ticks_msec(),
@@ -766,7 +808,7 @@ func _rtc_diag_event(
 			"signal_type", "decision", "reason", "description_type", "result_code", "candidate_type",
 			"candidate_index", "candidate_count", "candidate_action", "websocket_send_ok", "websocket_outbound_before_bytes",
 			"websocket_outbound_after_bytes", "websocket_send_result", "send_error", "incoming_generation", "highest_generation",
-			"rtc_send_ok", "last_seen_age_ms", "probe_grace_ms", "close_reason",
+			"rtc_send_ok", "last_seen_age_ms", "last_ping_age_ms", "probe_grace_ms", "data_channel_buffered_bytes", "close_reason",
 		]:
 			entry[key] = extra[key]
 	_rtc_diagnostic_trace.append(entry)
@@ -777,6 +819,112 @@ func _rtc_diag_event(
 
 func rtc_diagnostic_trace() -> Array[Dictionary]:
 	return _rtc_diagnostic_trace.duplicate(true)
+
+
+func _rtc_diag_liveness_sample(
+	event: String,
+	remote_id: String,
+	connection_id: String,
+	offer_generation: int,
+	extra: Dictionary,
+	force: bool = false,
+) -> void:
+	if not rtc_diagnostics_enabled:
+		return
+	var sample_key := "%s:%s" % [remote_id, event]
+	var now_msec := Time.get_ticks_msec()
+	var previous_msec := int(_rtc_diagnostic_liveness_sample_msec.get(sample_key, 0))
+	if not force and previous_msec > 0 and now_msec - previous_msec < RTC_DIAGNOSTIC_LIVENESS_SAMPLE_INTERVAL_MSEC:
+		return
+	_rtc_diagnostic_liveness_sample_msec[sample_key] = now_msec
+	_rtc_diag_event(event, remote_id, connection_id, offer_generation, extra, true)
+
+
+func _rtc_diag_record_liveness(
+	event: String,
+	remote_id: String,
+	connection_id: String,
+	offer_generation: int,
+	send_ok: Variant = null,
+) -> void:
+	if not rtc_diagnostics_enabled or remote_id.is_empty():
+		return
+	var connection_key := connection_id.sha256_text().substr(0, 12) if not connection_id.is_empty() else ""
+	var existing: Variant = _rtc_diagnostic_liveness_counters.get(remote_id, {})
+	if existing is Dictionary:
+		var existing_connection_key := str((existing as Dictionary).get("connection_key", ""))
+		var existing_generation := int((existing as Dictionary).get("offer_generation", -1))
+		if (not connection_key.is_empty() and existing_connection_key not in ["", connection_key]) or existing_generation != offer_generation:
+			_rtc_diagnostic_liveness_counters.erase(remote_id)
+	if not _rtc_diagnostic_liveness_counters.has(remote_id):
+		if _rtc_diagnostic_liveness_counters.size() >= maxi(1, _session_max_players):
+			return
+		_rtc_diagnostic_liveness_counters[remote_id] = {
+			"peer_key": remote_id.sha256_text().substr(0, 12),
+			"connection_key": connection_key,
+			"offer_generation": offer_generation,
+			"role": str(role) if str(role) in ["host", "guest"] else "other",
+		}
+	var raw_entry: Variant = _rtc_diagnostic_liveness_counters.get(remote_id, {})
+	if not raw_entry is Dictionary:
+		return
+	var entry := raw_entry as Dictionary
+	entry["connection_key"] = connection_key
+	entry["offer_generation"] = offer_generation
+	var utc_msec := int(Time.get_unix_time_from_system() * 1000.0)
+	var tick_msec := Time.get_ticks_msec()
+	var prefix := ""
+	match event:
+		"ping_send":
+			prefix = "ping_send"
+		"ping_received":
+			prefix = "ping_received"
+		"pong_send":
+			prefix = "pong_send"
+		"pong_received":
+			prefix = "pong_received"
+		_:
+			return
+	if event == "ping_send" or event == "pong_send":
+		var attempts_key := "%s_attempts" % prefix
+		entry[attempts_key] = mini(1_000_000_000, int(entry.get(attempts_key, 0)) + 1)
+		entry["%s_last_attempt_utc_ms" % prefix] = utc_msec
+		entry["%s_last_attempt_tick_ms" % prefix] = tick_msec
+		if typeof(send_ok) == TYPE_BOOL:
+			if bool(send_ok):
+				var successes_key := "%s_successes" % prefix
+				entry[successes_key] = mini(1_000_000_000, int(entry.get(successes_key, 0)) + 1)
+				entry["%s_last_success_utc_ms" % prefix] = utc_msec
+				entry["%s_last_success_tick_ms" % prefix] = tick_msec
+			else:
+				var failures_key := "%s_failures" % prefix
+				entry[failures_key] = mini(1_000_000_000, int(entry.get(failures_key, 0)) + 1)
+	else:
+		var received_key := "%s_count" % prefix
+		entry[received_key] = mini(1_000_000_000, int(entry.get(received_key, 0)) + 1)
+		entry["%s_last_utc_ms" % prefix] = utc_msec
+		entry["%s_last_tick_ms" % prefix] = tick_msec
+
+
+func rtc_diagnostic_liveness() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	if not rtc_diagnostics_enabled:
+		return result
+	for raw_peer_id in _rtc_diagnostic_liveness_counters.keys():
+		var raw_entry: Variant = _rtc_diagnostic_liveness_counters.get(raw_peer_id, {})
+		if raw_entry is Dictionary:
+			result.append((raw_entry as Dictionary).duplicate(true))
+	result.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return str(a.get("peer_key", "")) < str(b.get("peer_key", "")))
+	return result
+
+
+func _rtc_diag_maybe_print_liveness_snapshot(now_msec: int) -> void:
+	if not rtc_diagnostics_enabled or _rtc_diagnostic_liveness_counters.is_empty():
+		return
+	if _rtc_diagnostic_liveness_snapshot_msec > 0 and now_msec - _rtc_diagnostic_liveness_snapshot_msec < RTC_DIAGNOSTIC_LIVENESS_SNAPSHOT_INTERVAL_MSEC:
+		return
+	_rtc_diagnostic_liveness_snapshot_msec = now_msec
+	print("Managed RTC liveness snapshot: " + JSON.stringify(rtc_diagnostic_liveness()))
 
 
 func _rtc_diag_record_peer_state(remote_id: String, peer: WebRTCPeerConnection) -> void:
@@ -1407,6 +1555,11 @@ func _handle_rtc_packet(remote_id: String, packet: PackedByteArray) -> void:
 	var message := parsed as Dictionary
 	var kind := str(message.get("kind", ""))
 	var type := str(message.get("type", ""))
+	var now_msec := Time.get_ticks_msec()
+	var last_seen_age_msec := clampi(now_msec - int(_rtc_last_seen_msec.get(remote_id, now_msec)), 0, 600000)
+	var connection_id := str(_rtc_connection_ids.get(remote_id, ""))
+	var offer_generation := int(_rtc_offer_generations.get(remote_id, -1))
+	var channel: WebRTCDataChannel = _rtc_channels.get(remote_id)
 	# A host must prove that its outbound path works. Guest commands and pings only
 	# prove the opposite direction, so only the pong to our own ping refreshes the
 	# host watchdog. A guest can use any valid inbound packet as proof that the
@@ -1416,9 +1569,25 @@ func _handle_rtc_packet(remote_id: String, packet: PackedByteArray) -> void:
 		_rtc_silence_probe_deadline_msec.erase(remote_id)
 		_rtc_silence_probe_diagnostics.erase(remote_id)
 	if kind == "control" and type == "p2p_ping":
-		_send_rtc(remote_id, {"kind": "control", "type": "p2p_pong", "payload": message.get("payload", {})})
+		_rtc_diag_record_liveness("ping_received", remote_id, connection_id, offer_generation)
+		_rtc_diag_liveness_sample("rtc_ping_received", remote_id, connection_id, offer_generation, {
+			"last_seen_age_ms": last_seen_age_msec,
+			"data_channel_buffered_bytes": channel.get_buffered_amount() if channel != null else -1,
+		})
+		var pong_sent := _send_rtc(remote_id, {"kind": "control", "type": "p2p_pong", "payload": message.get("payload", {})})
+		_rtc_diag_record_liveness("pong_send", remote_id, connection_id, offer_generation, pong_sent)
+		_rtc_diag_liveness_sample("rtc_pong_sent", remote_id, connection_id, offer_generation, {
+			"rtc_send_ok": pong_sent,
+			"last_seen_age_ms": last_seen_age_msec,
+			"data_channel_buffered_bytes": channel.get_buffered_amount() if channel != null else -1,
+		}, not pong_sent)
 		return
 	if kind == "control" and type == "p2p_pong":
+		_rtc_diag_record_liveness("pong_received", remote_id, connection_id, offer_generation)
+		_rtc_diag_liveness_sample("rtc_pong_received", remote_id, connection_id, offer_generation, {
+			"last_seen_age_ms": last_seen_age_msec,
+			"data_channel_buffered_bytes": channel.get_buffered_amount() if channel != null else -1,
+		})
 		return
 	message["sender_player_id"] = remote_id
 	message_received.emit(message)
@@ -1548,10 +1717,18 @@ func _set_transport_mode(mode: String) -> void:
 
 
 func _close_rtc_peer(remote_id: String, close_reason: String = "unspecified") -> void:
+	if rtc_diagnostics_enabled and _rtc_diagnostic_liveness_counters.has(remote_id):
+		var liveness_summary: Dictionary = (_rtc_diagnostic_liveness_counters[remote_id] as Dictionary).duplicate(true)
+		liveness_summary["close_reason"] = close_reason if close_reason in [
+			"player_left", "guest_reconnect", "silent_timeout", "offer_creation_failed", "newer_offer",
+			"session_disconnect", "websocket_closed", "p2p_failed", "session_closed", "host_data_channel_closed",
+		] else "other"
+		print("Managed RTC liveness final: " + JSON.stringify(liveness_summary))
+		_rtc_diagnostic_liveness_counters.erase(remote_id)
 	if _rtc_peers.has(remote_id):
 		_rtc_diag_event("peer_closed", remote_id, str(_rtc_connection_ids.get(remote_id, "")), int(_rtc_offer_generations.get(remote_id, -1)), {
 			"close_reason": close_reason,
-		})
+		}, true)
 	if _rtc_channels.has(remote_id):
 		var channel: WebRTCDataChannel = _rtc_channels[remote_id]
 		if channel != null:
@@ -1579,6 +1756,10 @@ func _close_rtc_peer(remote_id: String, close_reason: String = "unspecified") ->
 	_rtc_silence_probe_diagnostics.erase(remote_id)
 	_rtc_observed_state_signatures.erase(remote_id)
 	_rtc_diagnostic_event_counts.erase(remote_id)
+	_rtc_diagnostic_liveness_event_counts.erase(remote_id)
+	for raw_sample_key in _rtc_diagnostic_liveness_sample_msec.keys():
+		if str(raw_sample_key).begins_with("%s:" % remote_id):
+			_rtc_diagnostic_liveness_sample_msec.erase(raw_sample_key)
 	for direction in ["local", "remote", "remote_added"]:
 		_rtc_diagnostic_candidate_counts.erase("%s:%s" % [remote_id, direction])
 
@@ -1654,4 +1835,8 @@ func _close_rtc(close_reason: String = "session_closed") -> void:
 	_rtc_observed_state_signatures.clear()
 	_rtc_diagnostic_candidate_counts.clear()
 	_rtc_diagnostic_event_counts.clear()
+	_rtc_diagnostic_liveness_event_counts.clear()
+	_rtc_diagnostic_liveness_sample_msec.clear()
+	_rtc_diagnostic_liveness_counters.clear()
+	_rtc_diagnostic_liveness_snapshot_msec = 0
 	_rtc_offer_generation = 0
