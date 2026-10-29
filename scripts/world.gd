@@ -381,6 +381,10 @@ const CORE_BIOME_BASE_WEIGHTS := {
 	"crystal_grove": CORE_BIOME_CRYSTAL_GROVE_CHANCE,
 	"beach": CORE_BIOME_BEACH_CHANCE,
 }
+const STARTER_GREEN_BIOMES: Array[String] = ["plains", "forest"]
+const STARTER_PLAINS_NEIGHBORS: Array[String] = ["plains", "forest", "crystal_grove", "tundra", "ice"]
+const STARTER_TREE_SEARCH_COLUMNS: Array[int] = [-5, -4, -3, 3, 4, 5]
+const STARTER_BIOME_FALLBACK_SEED := 129
 const CORE_BIOME_TEMPERATURE_AFFINITY_FLOOR := 0.03
 const CORE_BIOME_TEMPERATURE_STRENGTH := 2.5
 const CORE_BIOME_REGION_WIDTH := 48
@@ -613,11 +617,13 @@ func create_island() -> void:
 	state_changed.emit()
 
 
-func create_procedural_world(seed: int = 0) -> void:
+func create_procedural_world(seed: int = 0, prefer_starter_biome: bool = false) -> void:
 	create_island()
 	_suspend_state_changed = true
 	world_mode = WORLD_MODE_PROCEDURAL
 	world_seed = seed if seed != 0 else maxi(1, randi())
+	if prefer_starter_biome:
+		world_seed = _starter_procedural_seed(world_seed)
 	catalog_revision = _latest_registered_catalog_revision()
 	generated_chunks.clear()
 	chunk_tiles.clear()
@@ -643,6 +649,33 @@ func create_procedural_world(seed: int = 0) -> void:
 	block_count = count_blocks()
 	block_count_changed.emit(block_count)
 	state_changed.emit()
+
+
+func _starter_procedural_seed(initial_seed: int) -> int:
+	var candidate := maxi(1, initial_seed)
+	for _attempt in range(4096):
+		world_seed = candidate
+		if _has_standard_green_spawn_and_nearby_tree():
+			return candidate
+		candidate = 1 if candidate >= 2_147_483_647 else candidate + 1
+	# This deterministic fallback is also checked by the focused generation test.
+	world_seed = STARTER_BIOME_FALLBACK_SEED
+	return world_seed
+
+
+func _has_standard_green_spawn_and_nearby_tree() -> bool:
+	var west_biome := _core_biome_for_region(-1)
+	var spawn_biome := _core_biome_for_region(0)
+	if spawn_biome != "plains" or west_biome not in STARTER_PLAINS_NEIGHBORS:
+		return false
+	for offset in STARTER_TREE_SEARCH_COLUMNS:
+		var x := offset
+		var biome := _terrain_biome_for_position(x, _terrain_surface_y(x), _core_biome_at(x))
+		if biome not in STARTER_GREEN_BIOMES:
+			continue
+		if _structure_random("tree:%d" % x) < float(BIOME_TREE_CHANCE.get(biome, 0.0)):
+			return true
+	return false
 
 
 func create_floating_islands_world(seed: int = 0) -> void:

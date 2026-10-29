@@ -71,6 +71,7 @@ const EMOJI_BUBBLE_SECONDS := 3.0
 const REMOTE_MINING_EXPIRES_MSEC := 1_000
 const REMOTE_CREATURE_INTERPOLATION_SPEED := 14.0
 const REMOTE_CREATURE_TELEPORT_DISTANCE := 8.0
+const TUTORIAL_GATHER_CACHE_MSEC := 250
 const TIDEGLASS_REVEAL_GLOW_MSEC := 520
 const BOW_FULL_DRAW_SECONDS := 1.0
 const BOW_MIN_DRAW_SECONDS := 0.12
@@ -91,6 +92,10 @@ var _animation_time := 0.0
 var _avatar_trail := AvatarTrailClass.new()
 var _avatar_trail_world_id := ""
 var _simulation_accumulator := 0.0
+var _tutorial_gather_cache_key := ""
+var _tutorial_gather_cache_expiry_msec := 0
+var _tutorial_gather_cache_target := NO_TILE
+var _tutorial_gather_cache_player_tile := NO_TILE
 
 var mining: Dictionary = {}
 var remote_mining: Dictionary = {}
@@ -241,6 +246,10 @@ func _create_render_layers() -> void:
 func _bind_sim_signals() -> void:
 	if not sim.inventory_changed.is_connected(_on_inventory_changed):
 		sim.inventory_changed.connect(_on_inventory_changed)
+	if not sim.tile_changed.is_connected(_on_tutorial_gather_tile_changed):
+		sim.tile_changed.connect(_on_tutorial_gather_tile_changed)
+	if not sim.plant_changed.is_connected(_on_tutorial_gather_plant_changed):
+		sim.plant_changed.connect(_on_tutorial_gather_plant_changed)
 	if not sim.block_count_changed.is_connected(_on_block_count_changed):
 		sim.block_count_changed.connect(_on_block_count_changed)
 	if not sim.lighting_changed.is_connected(_invalidate_lighting):
@@ -278,9 +287,9 @@ func _on_tideglass_bridge_cell_crystallized(position: Vector2i, step_index: int,
 		_reaction_layer.queue_redraw()
 
 
-func start_new_world(mode: String = WorldSim.WORLD_MODE_SKYBLOCK, access_mode: String = WorldSim.ACCESS_MODE_OFFLINE, keep_inventory_on_death: bool = false) -> bool:
+func start_new_world(mode: String = WorldSim.WORLD_MODE_SKYBLOCK, access_mode: String = WorldSim.ACCESS_MODE_OFFLINE, keep_inventory_on_death: bool = false, prefer_starter_biome: bool = false) -> bool:
 	if mode == WorldSim.WORLD_MODE_PROCEDURAL:
-		sim.create_procedural_world()
+		sim.create_procedural_world(0, prefer_starter_biome)
 	elif mode == WorldSim.WORLD_MODE_FLOATING_ISLANDS:
 		sim.create_floating_islands_world()
 	elif mode == WorldSim.WORLD_MODE_ONE_BLOCK:
@@ -1598,9 +1607,31 @@ func _emit_hud() -> void:
 
 
 func _on_inventory_changed() -> void:
+	_invalidate_tutorial_gather_candidate_cache()
 	if suppress_inventory_ui_updates:
 		return
 	craft_state_changed.emit(sim)
+
+
+func _invalidate_tutorial_gather_candidate_cache() -> void:
+	_tutorial_gather_cache_key = ""
+	_tutorial_gather_cache_expiry_msec = 0
+
+
+func _on_tutorial_gather_tile_changed(_x: int, _y: int, _block_id: int, _fluid_level: int, _falling: bool) -> void:
+	if _is_near_tutorial_gather_cache(_x, _y):
+		_invalidate_tutorial_gather_candidate_cache()
+
+
+func _on_tutorial_gather_plant_changed(_anchor_x: int, _anchor_y: int) -> void:
+	if _is_near_tutorial_gather_cache(_anchor_x, _anchor_y):
+		_invalidate_tutorial_gather_candidate_cache()
+
+
+func _is_near_tutorial_gather_cache(x: int, y: int) -> bool:
+	if _tutorial_gather_cache_key.is_empty() or _tutorial_gather_cache_player_tile == NO_TILE:
+		return false
+	return maxi(absi(x - _tutorial_gather_cache_player_tile.x), absi(y - _tutorial_gather_cache_player_tile.y)) <= 5
 
 
 func refresh_inventory_ui() -> void:
@@ -3410,6 +3441,93 @@ func tutorial_mine_candidate() -> Vector2i:
 				if score > best_score:
 					best_score = score
 					best = Vector2i(x, y)
+	return best
+
+
+func tutorial_gather_candidate() -> Vector2i:
+	var center := Vector2i(
+		floori((float(sim.player.get("x", 0.0)) + float(sim.player.get("w", 20.0)) * 0.5) / BlockDefs.TILE),
+		floori((float(sim.player.get("y", 0.0)) + float(sim.player.get("h", 30.0)) * 0.5) / BlockDefs.TILE)
+	)
+	var cache_key := "%s|%s|%d|%d|%d|%s|%d" % [
+		sim.world_id,
+		sim.world_mode,
+		center.x,
+		center.y,
+		sim.inventory.hash(),
+		sim.equipped_item_name("hand"),
+		sim.known_recipes.size(),
+	]
+	var now_msec := Time.get_ticks_msec()
+	if cache_key == _tutorial_gather_cache_key and now_msec < _tutorial_gather_cache_expiry_msec:
+		return _tutorial_gather_cache_target
+	_tutorial_gather_cache_key = cache_key
+	_tutorial_gather_cache_expiry_msec = now_msec + TUTORIAL_GATHER_CACHE_MSEC
+	_tutorial_gather_cache_player_tile = center
+	_tutorial_gather_cache_target = _compute_tutorial_gather_candidate(center)
+	return _tutorial_gather_cache_target
+
+
+func _compute_tutorial_gather_candidate(center: Vector2i) -> Vector2i:
+	var recipes := sim.get_contextual_recipes()
+	if recipes.is_empty():
+		return NO_TILE
+	var nearby_inputs: Dictionary = {}
+	for radius in range(0, 6):
+		for x in range(center.x - radius, center.x + radius + 1):
+			for y in range(center.y - radius, center.y + radius + 1):
+				if maxi(absi(x - center.x), absi(y - center.y)) != radius or not sim.in_bounds(x, y) or not sim.player_near(x, y):
+					continue
+				var block: Dictionary = sim.plant_block_at(x, y)
+				if block.is_empty():
+					block = sim.get_block(x, y)
+				if int(block.get("id", 0)) == 0 or bool(block.get("fluid", false)) or bool(block.get("container", false)) or not sim.can_harvest_block(block):
+					continue
+				var name := str(block.get("name", ""))
+				if name == "stone":
+					# Stone yields cobblestone when mined, but only if the player has
+					# the required tool tier (checked above).
+					name = "cobblestone"
+				var distance := Vector2(x - center.x, y - center.y).length()
+				var entry := {
+					"tile": Vector2i(x, y),
+					"hardness": float(sim.get_block_hardness(block)),
+					"distance": distance,
+				}
+				var candidates: Array = nearby_inputs.get(name, [])
+				candidates.append(entry)
+				nearby_inputs[name] = candidates
+	var best := NO_TILE
+	var best_score := -INF
+	for recipe: Dictionary in recipes:
+		if not sim.recipe_station_available(recipe):
+			continue
+		var inputs: Dictionary = recipe.get("in", {})
+		var required_total := 0
+		var missing_total := 0
+		var missing_inputs: Array[String] = []
+		var feasible := true
+		for block_name: String in inputs:
+			var required := int(inputs[block_name])
+			required_total += required
+			var deficit := maxi(0, required - int(sim.inventory.get(block_name, 0)))
+			if deficit <= 0:
+				continue
+			missing_total += deficit
+			missing_inputs.append(block_name)
+			if not nearby_inputs.has(block_name):
+				feasible = false
+		if not feasible or missing_inputs.is_empty() or required_total > sim.craft_slots.size():
+			continue
+		# Prefer recipes that are already close to craftable and have fewer
+		# missing ingredients, then choose the easiest nearby required block.
+		var recipe_score := float(required_total - missing_total) * 24.0 - float(missing_total) * 8.0 - float(missing_inputs.size()) * 28.0
+		for block_name: String in missing_inputs:
+			for candidate: Dictionary in nearby_inputs[block_name]:
+				var score := recipe_score - float(candidate["hardness"]) * 1.4 - float(candidate["distance"]) * 8.0
+				if score > best_score:
+					best_score = score
+					best = candidate["tile"]
 	return best
 
 
