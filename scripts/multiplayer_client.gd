@@ -15,8 +15,10 @@ const HEARTBEAT_SECONDS := 15.0
 const RTC_CONNECT_TIMEOUT_SECONDS := 4.0
 const RTC_PING_SECONDS := 2.0
 const RTC_SILENCE_TIMEOUT_SECONDS := 7.0
+const RTC_PING_RESPONSE_GRACE_SECONDS := 3.0
 const RTC_RECONNECT_TIMEOUT_SECONDS := 6.0
 const RTC_MAX_RECONNECT_ATTEMPTS := 3
+const RTC_MAX_OFFER_GENERATION := 2147483647
 const RTC_SILENCE_RECOVERY_WEBSOCKET := "websocket"
 const RTC_SILENCE_RECOVERY_RECONNECT := "reconnecting"
 const RTC_SILENCE_RECOVERY_DROP_PEER := "drop_peer"
@@ -58,12 +60,23 @@ var _rtc_remote_description_set: Dictionary = {}
 var _rtc_pending_candidates: Dictionary = {}
 var _rtc_ready_peers: Dictionary = {}
 var _rtc_connection_ids: Dictionary = {}
+var _rtc_offer_generations: Dictionary = {}
+var _rtc_highest_offer_generations: Dictionary = {}
+var _rtc_highest_offer_connection_ids: Dictionary = {}
 var _rtc_last_seen_msec: Dictionary = {}
+var _rtc_last_ping_sent_msec: Dictionary = {}
+var _rtc_silence_probe_deadline_msec: Dictionary = {}
+var _rtc_silence_probe_diagnostics: Dictionary = {}
 var _guest_host_id := ""
 var _guest_connected_message: Dictionary = {}
 var _guest_connect_time_left := 0.0
 var _connected_message_emitted := false
 var _rtc_ping_left := RTC_PING_SECONDS
+var _rtc_offer_generation := 0
+var _rtc_last_poll_msec := 0
+var _rtc_last_poll_gap_msec := 0
+var _rtc_last_ping_put_ok: Dictionary = {}
+var last_rtc_silence_diagnostics: Dictionary = {}
 var _rtc_reconnect_attempt := 0
 var _rtc_reconnect_left := -1.0
 var _rtc_reconnect_connect_left := 0.0
@@ -182,6 +195,13 @@ func connect_with_ticket(websocket_url: String, ticket: String, code: String = "
 	disconnect_from_session()
 	last_websocket_close_code = -1
 	last_websocket_close_was_clean = false
+	last_rtc_silence_diagnostics.clear()
+	_rtc_last_poll_msec = 0
+	_rtc_last_poll_gap_msec = 0
+	_rtc_last_ping_put_ok.clear()
+	_rtc_offer_generation = 0
+	_rtc_highest_offer_generations.clear()
+	_rtc_highest_offer_connection_ids.clear()
 	if websocket_url.is_empty() or ticket.is_empty():
 		return ERR_INVALID_PARAMETER
 	join_code = code
@@ -316,6 +336,8 @@ func _poll_websocket(delta: float) -> void:
 		disconnected.emit(reason if not reason.is_empty() else "connection_closed")
 func _poll_rtc(delta: float) -> void:
 	var now := Time.get_ticks_msec()
+	_rtc_last_poll_gap_msec = now - _rtc_last_poll_msec if _rtc_last_poll_msec > 0 else 0
+	_rtc_last_poll_msec = now
 	var open_game_peers: Array[String] = []
 	for raw_peer_id in _rtc_peers.keys():
 		var remote_id := str(raw_peer_id)
@@ -326,6 +348,8 @@ func _poll_rtc(delta: float) -> void:
 			if not _rtc_ready_peers.has(remote_id):
 				_rtc_ready_peers[remote_id] = true
 				_rtc_last_seen_msec[remote_id] = now
+				_rtc_silence_probe_deadline_msec.erase(remote_id)
+				_rtc_silence_probe_diagnostics.erase(remote_id)
 				print("Multiplayer P2P channel open: %s" % remote_id)
 				if is_guest() and remote_id == _guest_host_id:
 					_reset_rtc_reconnect_state()
@@ -360,11 +384,44 @@ func _poll_rtc(delta: float) -> void:
 		if _rtc_ping_left <= 0.0:
 			_rtc_ping_left = RTC_PING_SECONDS
 			for ping_peer_id in open_game_peers:
-				_send_rtc(ping_peer_id, {"kind": "control", "type": "p2p_ping", "payload": {"sent_msec": now}})
+				var ping_put_ok := _send_rtc(ping_peer_id, {"kind": "control", "type": "p2p_ping", "payload": {"sent_msec": now}})
+				_rtc_last_ping_put_ok[ping_peer_id] = ping_put_ok
+				if ping_put_ok:
+					_rtc_last_ping_sent_msec[ping_peer_id] = now
 		for silent_peer_id in open_game_peers:
 			var last_seen := int(_rtc_last_seen_msec.get(silent_peer_id, now))
-			if now - last_seen >= int(RTC_SILENCE_TIMEOUT_SECONDS * 1000.0):
-				_recover_silent_rtc_peer(silent_peer_id)
+			var probe_deadline := int(_rtc_silence_probe_deadline_msec.get(silent_peer_id, 0))
+			match rtc_silence_probe_action(
+				now,
+				last_seen,
+				probe_deadline,
+				int(RTC_SILENCE_TIMEOUT_SECONDS * 1000.0),
+			):
+				"probe":
+					var already_probed_this_frame: bool = (
+						bool(_rtc_last_ping_put_ok.get(silent_peer_id, false))
+						and int(_rtc_last_ping_sent_msec.get(silent_peer_id, 0)) == now
+					)
+					var probe_put_ok: bool = already_probed_this_frame
+					if not probe_put_ok:
+						probe_put_ok = _send_rtc(silent_peer_id, {"kind": "control", "type": "p2p_ping", "payload": {"sent_msec": now}})
+						_rtc_last_ping_put_ok[silent_peer_id] = probe_put_ok
+						if probe_put_ok:
+							_rtc_last_ping_sent_msec[silent_peer_id] = now
+					var probe_peer: WebRTCPeerConnection = _rtc_peers.get(silent_peer_id)
+					var probe_channel: WebRTCDataChannel = _rtc_channels.get(silent_peer_id)
+					_rtc_silence_probe_diagnostics[silent_peer_id] = {
+						"poll_gap_ms": clampi(_rtc_last_poll_gap_msec, 0, 600000),
+						"last_seen_age_ms": clampi(now - last_seen, 0, 600000),
+						"last_ping_put_ok": probe_put_ok,
+						"connection_state": probe_peer.get_connection_state() if probe_peer != null else -1,
+						"game_channel_state": probe_channel.get_ready_state() if probe_channel != null else -1,
+					}
+					_rtc_silence_probe_deadline_msec[silent_peer_id] = now + int(RTC_PING_RESPONSE_GRACE_SECONDS * 1000.0)
+				"recover":
+					_recover_silent_rtc_peer(silent_peer_id)
+				"wait":
+					pass
 	_tick_rtc_reconnect(delta)
 
 
@@ -386,6 +443,8 @@ func _handle_ws_packet(packet: PackedByteArray) -> void:
 		var left_id := str(message.get("player_id", ""))
 		_known_players.erase(left_id)
 		_close_rtc_peer(left_id)
+		_rtc_highest_offer_generations.erase(left_id)
+		_rtc_highest_offer_connection_ids.erase(left_id)
 	if type in ["rtc_offer", "rtc_answer", "rtc_candidate"]:
 		_handle_rtc_signal(message)
 		return
@@ -469,10 +528,78 @@ static func rtc_silence_recovery_mode(guest_connection: bool, fallback_enabled: 
 	return RTC_SILENCE_RECOVERY_RECONNECT
 
 
+static func rtc_silence_probe_action(now_msec: int, last_seen_msec: int, probe_deadline_msec: int, timeout_msec: int = 7000) -> String:
+	if maxi(0, now_msec - last_seen_msec) < maxi(0, timeout_msec):
+		return "none"
+	if probe_deadline_msec <= 0:
+		return "probe"
+	return "recover" if now_msec >= probe_deadline_msec else "wait"
+
+
+static func managed_rtc_offer_decision(
+	incoming_generation: Variant,
+	incoming_connection_id: String,
+	highest_generation: int,
+	highest_connection_id: String,
+	current_peer_exists: bool,
+) -> String:
+	var generation := _managed_rtc_offer_generation_value(incoming_generation)
+	if generation <= 0 or incoming_connection_id.is_empty():
+		return "invalid"
+	if generation > highest_generation:
+		return "accept"
+	if generation < highest_generation:
+		return "stale"
+	if incoming_connection_id != highest_connection_id:
+		return "stale"
+	return "duplicate" if current_peer_exists else "stale"
+
+
+static func managed_rtc_offer_generation_matches(protocol_version: int, incoming_generation: Variant, current_generation: int) -> bool:
+	if protocol_version != MANAGED_PROTOCOL_VERSION:
+		return true
+	return current_generation > 0 and _managed_rtc_offer_generation_value(incoming_generation) == current_generation
+
+
+static func _managed_rtc_offer_generation_value(value: Variant) -> int:
+	if typeof(value) == TYPE_INT:
+		var integer_value := int(value)
+		return integer_value if integer_value > 0 and integer_value <= RTC_MAX_OFFER_GENERATION else -1
+	if typeof(value) != TYPE_FLOAT:
+		return -1
+	var numeric := float(value)
+	if not is_finite(numeric) or floorf(numeric) != numeric or numeric <= 0.0 or numeric > float(RTC_MAX_OFFER_GENERATION):
+		return -1
+	return int(numeric)
+
+
 func _recover_silent_rtc_peer(remote_id: String) -> void:
 	var guest_connection := is_guest() and remote_id == _guest_host_id
 	var recovery_mode := rtc_silence_recovery_mode(guest_connection, websocket_fallback_enabled)
+	var now := Time.get_ticks_msec()
+	var last_seen := int(_rtc_last_seen_msec.get(remote_id, now))
+	var peer: WebRTCPeerConnection = _rtc_peers.get(remote_id)
+	var channel: WebRTCDataChannel = _rtc_channels.get(remote_id)
+	var probe_metrics: Dictionary = _rtc_silence_probe_diagnostics.get(remote_id, {})
+	last_rtc_silence_diagnostics = {
+		"poll_gap_ms": clampi(int(probe_metrics.get("poll_gap_ms", _rtc_last_poll_gap_msec)), 0, 600000),
+		"last_seen_age_ms": clampi(int(probe_metrics.get("last_seen_age_ms", now - last_seen)), 0, 600000),
+		"last_ping_age_ms": clampi(now - int(_rtc_last_ping_sent_msec.get(remote_id, now)), 0, 600000),
+		"probe_remaining_ms": maxi(0, int(_rtc_silence_probe_deadline_msec.get(remote_id, now)) - now),
+		"last_ping_put_ok": probe_metrics.get("last_ping_put_ok", _rtc_last_ping_put_ok.get(remote_id, false)) == true,
+		"connection_state": int(probe_metrics.get("connection_state", peer.get_connection_state() if peer != null else -1)),
+		"game_channel_state": int(probe_metrics.get("game_channel_state", channel.get_ready_state() if channel != null else -1)),
+	}
 	print("Multiplayer P2P channel silent: %s, recovery=%s" % [remote_id, recovery_mode])
+	print("Multiplayer P2P silence diagnostics: poll_gap_ms=%d last_seen_age_ms=%d last_ping_age_ms=%d probe_remaining_ms=%d last_ping_put_ok=%s connection_state=%d game_channel_state=%d" % [
+		last_rtc_silence_diagnostics["poll_gap_ms"],
+		last_rtc_silence_diagnostics["last_seen_age_ms"],
+		last_rtc_silence_diagnostics["last_ping_age_ms"],
+		last_rtc_silence_diagnostics["probe_remaining_ms"],
+		str(last_rtc_silence_diagnostics["last_ping_put_ok"]).to_lower(),
+		last_rtc_silence_diagnostics["connection_state"],
+		last_rtc_silence_diagnostics["game_channel_state"],
+	])
 	_close_rtc_peer(remote_id)
 	match recovery_mode:
 		RTC_SILENCE_RECOVERY_WEBSOCKET:
@@ -556,13 +683,23 @@ func _fail_p2p_connection() -> void:
 	disconnected.emit("p2p_unavailable")
 
 
-func _create_rtc_peer(remote_id: String, connection_id: String = "") -> bool:
+func _create_rtc_peer(remote_id: String, connection_id: String = "", offer_generation: int = -1) -> bool:
 	if remote_id.is_empty():
 		return false
 	if _rtc_peers.has(remote_id):
 		return true
 	if connection_id.is_empty():
 		connection_id = Crypto.new().generate_random_bytes(8).hex_encode()
+	if offer_generation < 0:
+		if role == "guest" and session_protocol_version == MANAGED_PROTOCOL_VERSION:
+			if _rtc_offer_generation >= RTC_MAX_OFFER_GENERATION:
+				return false
+			_rtc_offer_generation += 1
+			offer_generation = _rtc_offer_generation
+		else:
+			offer_generation = 0
+	if offer_generation < 0 or offer_generation > RTC_MAX_OFFER_GENERATION:
+		return false
 	var peer := WebRTCPeerConnection.new()
 	if peer.initialize(RTC_CONFIGURATION) != OK:
 		return false
@@ -580,35 +717,72 @@ func _create_rtc_peer(remote_id: String, connection_id: String = "") -> bool:
 		channel.close()
 		peer.close()
 		return false
-	peer.session_description_created.connect(_on_rtc_session_created.bind(remote_id))
-	peer.ice_candidate_created.connect(_on_rtc_ice_candidate.bind(remote_id))
+	peer.session_description_created.connect(_on_rtc_session_created.bind(remote_id, peer, connection_id, offer_generation))
+	peer.ice_candidate_created.connect(_on_rtc_ice_candidate.bind(remote_id, peer, connection_id, offer_generation))
 	_rtc_peers[remote_id] = peer
 	_rtc_channels[remote_id] = channel
 	_rtc_voice_channels[remote_id] = voice_channel
 	_rtc_remote_description_set[remote_id] = false
 	_rtc_pending_candidates[remote_id] = []
 	_rtc_connection_ids[remote_id] = connection_id
+	_rtc_offer_generations[remote_id] = offer_generation
 	return true
 
 
-func _on_rtc_session_created(type: String, sdp: String, remote_id: String) -> void:
-	var peer: WebRTCPeerConnection = _rtc_peers.get(remote_id)
-	if peer == null or peer.set_local_description(type, sdp) != OK:
+func _rtc_callback_is_current(remote_id: String, origin_peer: WebRTCPeerConnection, connection_id: String, offer_generation: int) -> bool:
+	return (
+		origin_peer != null
+		and _rtc_peers.get(remote_id) == origin_peer
+		and str(_rtc_connection_ids.get(remote_id, "")) == connection_id
+		and int(_rtc_offer_generations.get(remote_id, -1)) == offer_generation
+	)
+
+
+func _rtc_signal_payload(remote_id: String, fields: Dictionary) -> Dictionary:
+	var payload := fields.duplicate(true)
+	payload["connection_id"] = str(_rtc_connection_ids.get(remote_id, ""))
+	var offer_generation := int(_rtc_offer_generations.get(remote_id, 0))
+	if session_protocol_version == MANAGED_PROTOCOL_VERSION and offer_generation > 0:
+		payload["offer_generation"] = offer_generation
+	return payload
+
+
+func _on_rtc_session_created(
+	type: String,
+	sdp: String,
+	remote_id: String,
+	origin_peer: WebRTCPeerConnection,
+	connection_id: String,
+	offer_generation: int,
+) -> void:
+	if not _rtc_callback_is_current(remote_id, origin_peer, connection_id, offer_generation):
+		return
+	if origin_peer.set_local_description(type, sdp) != OK:
 		return
 	if role == "guest" and type == "offer":
-		_send_ws({"kind": "command", "type": "rtc_offer", "payload": {"sdp": sdp, "connection_id": str(_rtc_connection_ids.get(remote_id, ""))}, "seq": 0})
+		_send_ws({"kind": "command", "type": "rtc_offer", "payload": _rtc_signal_payload(remote_id, {"sdp": sdp}), "seq": 0})
 	elif role == "host" and type == "answer":
 		_send_ws({
 			"kind": "state",
 			"type": "rtc_answer",
-			"payload": {"sdp": sdp, "connection_id": str(_rtc_connection_ids.get(remote_id, ""))},
+			"payload": _rtc_signal_payload(remote_id, {"sdp": sdp}),
 			"target_player_id": remote_id,
 			"seq": 0,
 		})
 
 
-func _on_rtc_ice_candidate(media: String, index: int, name: String, remote_id: String) -> void:
-	var payload := {"media": media, "index": index, "name": name, "connection_id": str(_rtc_connection_ids.get(remote_id, ""))}
+func _on_rtc_ice_candidate(
+	media: String,
+	index: int,
+	name: String,
+	remote_id: String,
+	origin_peer: WebRTCPeerConnection,
+	connection_id: String,
+	offer_generation: int,
+) -> void:
+	if not _rtc_callback_is_current(remote_id, origin_peer, connection_id, offer_generation):
+		return
+	var payload := _rtc_signal_payload(remote_id, {"media": media, "index": index, "name": name})
 	if role == "guest":
 		_send_ws({"kind": "command", "type": "rtc_candidate", "payload": payload, "seq": 0})
 	elif role == "host":
@@ -633,16 +807,55 @@ func _handle_rtc_signal(message: Dictionary) -> void:
 	if type == "rtc_offer":
 		if role != "host" or connection_id.is_empty():
 			return
-		if _rtc_peers.has(remote_id) and str(_rtc_connection_ids.get(remote_id, "")) != connection_id:
+		var offer_generation := 0
+		if session_protocol_version == MANAGED_PROTOCOL_VERSION:
+			if not _rtc_highest_offer_generations.has(remote_id) and _rtc_highest_offer_generations.size() >= _session_max_players:
+				return
+			var offer_action := managed_rtc_offer_decision(
+				payload.get("offer_generation", null),
+				connection_id,
+				int(_rtc_highest_offer_generations.get(remote_id, 0)),
+				str(_rtc_highest_offer_connection_ids.get(remote_id, "")),
+				_rtc_peers.has(remote_id),
+			)
+			if offer_action != "accept":
+				return
+			offer_generation = _managed_rtc_offer_generation_value(payload.get("offer_generation", null))
+		if _rtc_peers.has(remote_id) and (
+			str(_rtc_connection_ids.get(remote_id, "")) != connection_id
+			or int(_rtc_offer_generations.get(remote_id, 0)) != offer_generation
+		):
 			_close_rtc_peer(remote_id)
-		if not _create_rtc_peer(remote_id, connection_id):
+		if not _create_rtc_peer(remote_id, connection_id, offer_generation):
 			return
+		if session_protocol_version == MANAGED_PROTOCOL_VERSION:
+			# Record the generation only after peer creation succeeds. If native
+			# initialization fails, the same offer can be retried; once accepted,
+			# the high-water mark survives later peer recovery.
+			_rtc_highest_offer_generations[remote_id] = offer_generation
+			_rtc_highest_offer_connection_ids[remote_id] = connection_id
 		_set_rtc_remote_description(remote_id, "offer", str(payload.get("sdp", "")))
 	elif type == "rtc_answer":
-		if role == "guest" and connection_id == str(_rtc_connection_ids.get(remote_id, "")):
+		if (
+			role == "guest"
+			and connection_id == str(_rtc_connection_ids.get(remote_id, ""))
+			and managed_rtc_offer_generation_matches(
+				session_protocol_version,
+				payload.get("offer_generation", null),
+				int(_rtc_offer_generations.get(remote_id, 0)),
+			)
+		):
 			_set_rtc_remote_description(remote_id, "answer", str(payload.get("sdp", "")))
 	elif type == "rtc_candidate":
-		if connection_id.is_empty() or connection_id != str(_rtc_connection_ids.get(remote_id, "")):
+		if (
+			connection_id.is_empty()
+			or connection_id != str(_rtc_connection_ids.get(remote_id, ""))
+			or not managed_rtc_offer_generation_matches(
+				session_protocol_version,
+				payload.get("offer_generation", null),
+				int(_rtc_offer_generations.get(remote_id, 0)),
+			)
+		):
 			return
 		var candidate := {
 			"media": str(payload.get("media", "")),
@@ -686,8 +899,10 @@ func _handle_rtc_packet(remote_id: String, packet: PackedByteArray) -> void:
 	# prove the opposite direction, so only the pong to our own ping refreshes the
 	# host watchdog. A guest can use any valid inbound packet as proof that the
 	# authoritative host-to-guest path is alive.
-	if rtc_packet_refreshes_watchdog(is_guest(), kind, type):
+	if rtc_packet_refreshes_watchdog(role == "guest", kind, type):
 		_rtc_last_seen_msec[remote_id] = Time.get_ticks_msec()
+		_rtc_silence_probe_deadline_msec.erase(remote_id)
+		_rtc_silence_probe_diagnostics.erase(remote_id)
 	if kind == "control" and type == "p2p_ping":
 		_send_rtc(remote_id, {"kind": "control", "type": "p2p_pong", "payload": message.get("payload", {})})
 		return
@@ -830,7 +1045,12 @@ func _close_rtc_peer(remote_id: String) -> void:
 	_rtc_pending_candidates.erase(remote_id)
 	_rtc_ready_peers.erase(remote_id)
 	_rtc_connection_ids.erase(remote_id)
+	_rtc_offer_generations.erase(remote_id)
 	_rtc_last_seen_msec.erase(remote_id)
+	_rtc_last_ping_put_ok.erase(remote_id)
+	_rtc_last_ping_sent_msec.erase(remote_id)
+	_rtc_silence_probe_deadline_msec.erase(remote_id)
+	_rtc_silence_probe_diagnostics.erase(remote_id)
 
 
 func _close_rtc() -> void:
@@ -843,4 +1063,12 @@ func _close_rtc() -> void:
 	_rtc_pending_candidates.clear()
 	_rtc_ready_peers.clear()
 	_rtc_connection_ids.clear()
+	_rtc_offer_generations.clear()
+	_rtc_highest_offer_generations.clear()
+	_rtc_highest_offer_connection_ids.clear()
 	_rtc_last_seen_msec.clear()
+	_rtc_last_ping_put_ok.clear()
+	_rtc_last_ping_sent_msec.clear()
+	_rtc_silence_probe_deadline_msec.clear()
+	_rtc_silence_probe_diagnostics.clear()
+	_rtc_offer_generation = 0
