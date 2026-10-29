@@ -149,6 +149,19 @@ func player_count() -> int:
 	return maxi(0, count)
 
 
+func active_guest_player_ids() -> Array[String]:
+	"""Return the current authenticated guest roster for a dedicated host."""
+	var guest_ids: Array[String] = []
+	if role != "host" or not _dedicated_server_session:
+		return guest_ids
+	for raw_id in _known_players:
+		var guest_id := str(raw_id)
+		if not guest_id.is_empty() and str(_known_players[raw_id]) == "guest":
+			guest_ids.append(guest_id)
+	guest_ids.sort()
+	return guest_ids
+
+
 func is_dedicated_server_session() -> bool:
 	return _dedicated_server_session
 
@@ -373,6 +386,8 @@ func _poll_rtc(delta: float) -> void:
 				_rtc_silence_probe_diagnostics.erase(remote_id)
 				print("Multiplayer P2P channel open: peer_key=%s" % remote_id.sha256_text().substr(0, 12))
 				_rtc_diag_event("game_channel_open", remote_id)
+				if is_host():
+					_activate_host_guest(remote_id, "game_channel_open")
 				if is_guest() and remote_id == _guest_host_id:
 					_reset_rtc_reconnect_state()
 					_set_transport_mode("p2p")
@@ -381,7 +396,10 @@ func _poll_rtc(delta: float) -> void:
 				_handle_rtc_packet(remote_id, channel.get_packet())
 			if _rtc_channel_open(remote_id):
 				open_game_peers.append(remote_id)
-		elif _rtc_ready_peers.has(remote_id):
+		elif _rtc_ready_peers.has(remote_id) or (
+			channel != null
+			and channel.get_ready_state() == WebRTCDataChannel.STATE_CLOSED
+		):
 			_rtc_ready_peers.erase(remote_id)
 			print("Multiplayer P2P channel closed: peer_key=%s" % remote_id.sha256_text().substr(0, 12))
 			if is_guest() and remote_id == _guest_host_id:
@@ -389,6 +407,9 @@ func _poll_rtc(delta: float) -> void:
 					_set_transport_mode("websocket")
 				else:
 					_schedule_rtc_reconnect("data_channel_closed")
+			elif role == "host" and not websocket_fallback_enabled:
+				_retire_host_guest(remote_id, "data_channel_closed")
+				_close_rtc_peer(remote_id, "host_data_channel_closed")
 		var voice_channel: WebRTCDataChannel = _rtc_voice_channels.get(remote_id)
 		if voice_channel != null and voice_channel.get_ready_state() == WebRTCDataChannel.STATE_OPEN:
 			while voice_channel.get_available_packet_count() > 0:
@@ -465,6 +486,14 @@ func _handle_ws_packet(packet: PackedByteArray) -> void:
 	if kind == "control" and type == "player_joined":
 		var joined_id := str(message.get("player_id", ""))
 		if not joined_id.is_empty():
+			if role == "host" and not _known_players.has(joined_id):
+				# A fresh authenticated WebSocket connection starts a new signaling
+				# lifecycle. Reclaim the old generation tombstone; messages from the
+				# previous connection cannot reach this WebSocket.
+				if session_protocol_version == MANAGED_PROTOCOL_VERSION:
+					_rtc_highest_offer_generations.erase(joined_id)
+					_rtc_highest_offer_connection_ids.erase(joined_id)
+					_prune_inactive_offer_tombstones(joined_id, true)
 			_known_players[joined_id] = "guest"
 	elif kind == "control" and type == "player_left":
 		var left_id := str(message.get("player_id", ""))
@@ -536,7 +565,7 @@ func _schedule_rtc_reconnect(reason: String = "retry_timeout") -> void:
 		return
 	if _rtc_reconnecting:
 		return
-	_close_rtc_peer(_guest_host_id, "guest_reconnect")
+	_close_rtc_peer(_guest_host_id, "guest_reconnect:%s" % reason)
 	_rtc_reconnect_attempt += 1
 	if _rtc_reconnect_attempt > RTC_MAX_RECONNECT_ATTEMPTS:
 		_fail_p2p_connection()
@@ -813,6 +842,8 @@ func _recover_silent_rtc_peer(remote_id: String) -> void:
 			last_rtc_silence_diagnostics["connection_state"],
 			last_rtc_silence_diagnostics["game_channel_state"],
 		])
+	if role == "host" and not websocket_fallback_enabled:
+		_retire_host_guest(remote_id, "rtc_silence_timeout")
 	_close_rtc_peer(remote_id, "silent_timeout")
 	match recovery_mode:
 		RTC_SILENCE_RECOVERY_WEBSOCKET:
@@ -1082,7 +1113,9 @@ func _handle_rtc_signal(message: Dictionary) -> void:
 			return
 		var offer_generation := 0
 		if session_protocol_version == MANAGED_PROTOCOL_VERSION:
-			if not _rtc_highest_offer_generations.has(remote_id) and _rtc_highest_offer_generations.size() >= _session_max_players:
+			if not _rtc_highest_offer_generations.has(remote_id):
+				_prune_inactive_offer_tombstones(remote_id, true)
+			if not _rtc_highest_offer_generations.has(remote_id) and _rtc_highest_offer_generations.size() >= _rtc_guest_capacity():
 				_rtc_diag_event("rtc_offer_rejected", remote_id, connection_id, incoming_generation, {"reason": "participant_capacity"})
 				return
 			var offer_action := managed_rtc_offer_decision(
@@ -1548,6 +1581,55 @@ func _close_rtc_peer(remote_id: String, close_reason: String = "unspecified") ->
 	_rtc_diagnostic_event_counts.erase(remote_id)
 	for direction in ["local", "remote", "remote_added"]:
 		_rtc_diagnostic_candidate_counts.erase("%s:%s" % [remote_id, direction])
+
+
+func _rtc_guest_capacity() -> int:
+	# Dedicated-host max_players counts playable guests and excludes the runtime
+	# host process. In a normal peer-to-peer world, the local host uses one slot.
+	return _session_max_players if _dedicated_server_session else maxi(0, _session_max_players - 1)
+
+
+func _prune_inactive_offer_tombstones(except_player_id: String = "", reserve_one_slot: bool = false) -> void:
+	var target_size := _rtc_guest_capacity() - (1 if reserve_one_slot else 0)
+	target_size = maxi(0, target_size)
+	while _rtc_highest_offer_generations.size() > target_size:
+		var removed_id := ""
+		for raw_id in _rtc_highest_offer_generations.keys():
+			var candidate_id := str(raw_id)
+			if candidate_id == except_player_id or _known_players.has(candidate_id):
+				continue
+			removed_id = candidate_id
+			break
+		if removed_id.is_empty():
+			return
+		_rtc_highest_offer_generations.erase(removed_id)
+		_rtc_highest_offer_connection_ids.erase(removed_id)
+		_rtc_future_candidate_buffers.erase(removed_id)
+
+
+func _retire_host_guest(remote_id: String, reason: String) -> bool:
+	if role != "host" or remote_id.is_empty() or str(_known_players.get(remote_id, "")) != "guest":
+		return false
+	_known_players.erase(remote_id)
+	_rtc_future_candidate_buffers.erase(remote_id)
+	_rtc_diag_event("guest_roster_retired", remote_id, str(_rtc_connection_ids.get(remote_id, "")), int(_rtc_offer_generations.get(remote_id, -1)), {
+		"reason": reason,
+	})
+	message_received.emit({"kind": "control", "type": "player_left", "player_id": remote_id})
+	return true
+
+
+func _activate_host_guest(remote_id: String, reason: String) -> bool:
+	if role != "host" or remote_id.is_empty() or remote_id == player_id:
+		return false
+	if str(_known_players.get(remote_id, "")) == "guest":
+		return false
+	_known_players[remote_id] = "guest"
+	_rtc_diag_event("guest_roster_activated", remote_id, str(_rtc_connection_ids.get(remote_id, "")), int(_rtc_offer_generations.get(remote_id, -1)), {
+		"reason": reason,
+	})
+	message_received.emit({"kind": "control", "type": "player_joined", "player_id": remote_id})
+	return true
 
 
 func _close_rtc(close_reason: String = "session_closed") -> void:
