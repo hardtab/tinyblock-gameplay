@@ -297,7 +297,7 @@ func _poll_websocket(delta: float) -> void:
 	elif state == WebSocketPeer.STATE_CLOSED:
 		var reason := socket.get_close_reason()
 		last_websocket_close_code = socket.get_close_code()
-		last_websocket_close_was_clean = socket.was_clean_close()
+		last_websocket_close_was_clean = last_websocket_close_code != -1
 		socket = null
 		_close_rtc()
 		role = ""
@@ -314,8 +314,6 @@ func _poll_websocket(delta: float) -> void:
 		_set_transport_mode("websocket")
 		_was_open = false
 		disconnected.emit(reason if not reason.is_empty() else "connection_closed")
-
-
 func _poll_rtc(delta: float) -> void:
 	var now := Time.get_ticks_msec()
 	var open_game_peers: Array[String] = []
