@@ -30,6 +30,8 @@ signal appearance_changed(skin: Dictionary)
 var profile_path := DEFAULT_PROFILE_PATH
 var profile_id := ""
 var skin: Dictionary = {}
+# Appearance intent only, never ownership. Runtime skin may be permission-clamped.
+var retained_appearance_values: Dictionary = {}
 
 
 func _init(custom_profile_path: String = "") -> void:
@@ -42,6 +44,7 @@ func _ready() -> void:
 
 
 func load_or_create() -> void:
+	retained_appearance_values.clear()
 	if _load_profile():
 		return
 	profile_id = Crypto.new().generate_random_bytes(16).hex_encode()
@@ -118,7 +121,9 @@ func _save_profile() -> bool:
 	var file := FileAccess.open(profile_path, FileAccess.WRITE)
 	if file == null:
 		return false
-	file.store_string(JSON.stringify({"version": PROFILE_VERSION, "profile_id": profile_id, "skin": skin}))
+	var intended_skin := skin.duplicate(true)
+	intended_skin.merge(retained_appearance_values, true)
+	file.store_string(JSON.stringify({"version": PROFILE_VERSION, "profile_id": profile_id, "skin": intended_skin}))
 	file.flush()
 	file.close()
 	return true
@@ -126,6 +131,8 @@ func _save_profile() -> bool:
 
 func set_appearance_value(key: String, value: Variant) -> bool:
 	var previous_value: Variant = skin.get(key, null)
+	var had_retained_value := retained_appearance_values.has(key)
+	var retained_value: Variant = retained_appearance_values.get(key)
 	if key in COLOR_KEYS:
 		var color_value := ""
 		if value is Color:
@@ -136,19 +143,22 @@ func set_appearance_value(key: String, value: Variant) -> bool:
 		if not Color.html_is_valid(color_value):
 			return false
 		color_value = Color.from_string(color_value, Color.WHITE).to_html(false)
-		if str(skin.get(key, "")) == color_value:
+		if str(skin.get(key, "")) == color_value and not had_retained_value:
 			return true
 		skin[key] = color_value
 	elif ENUM_OPTIONS.has(key):
 		var enum_value := str(value)
 		if enum_value not in ENUM_OPTIONS[key]:
 			return false
-		if str(skin.get(key, "")) == enum_value:
+		if str(skin.get(key, "")) == enum_value and not had_retained_value:
 			return true
 		skin[key] = enum_value
 	else:
 		return false
+	retained_appearance_values.erase(key)
 	if not _save_profile():
+		if had_retained_value:
+			retained_appearance_values[key] = retained_value
 		if previous_value == null:
 			skin.erase(key)
 		else:
