@@ -314,7 +314,21 @@ func get_store_status() -> Dictionary:
 	return await _request_json(HTTPClient.METHOD_GET, path, {}, true)
 
 
-func verify_store_purchase(platform: String, product_id: String, store_payload: String) -> Dictionary:
+func get_testflight_store_status(app_transaction_jws: String) -> Dictionary:
+	if app_transaction_jws.strip_edges().is_empty():
+		return {"ok": false, "error": "testflight_attestation_unavailable"}
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	return await _request_json(
+		HTTPClient.METHOD_POST,
+		"/v1/store/status/testflight",
+		{"app_transaction_jws": app_transaction_jws},
+		true
+	)
+
+
+func verify_store_purchase(platform: String, product_id: String, store_payload: String, app_transaction_jws: String = "") -> Dictionary:
 	var auth := await ensure_session()
 	if not auth.get("ok", false):
 		return auth
@@ -326,10 +340,12 @@ func verify_store_purchase(platform: String, product_id: String, store_payload: 
 		payload["purchase_token"] = store_payload
 	else:
 		return {"ok": false, "error": "unsupported_store_platform"}
+	if not app_transaction_jws.strip_edges().is_empty():
+		payload["app_transaction_jws"] = app_transaction_jws
 	return await _request_json(HTTPClient.METHOD_POST, "/v1/store/purchases/verify", payload, true)
 
 
-func reconcile_store_invalidation(platform: String, product_id: String, store_payload: String, kind: String) -> Dictionary:
+func reconcile_store_invalidation(platform: String, product_id: String, store_payload: String, kind: String, app_transaction_jws: String = "") -> Dictionary:
 	var normalized_platform := platform.strip_edges().to_lower()
 	if normalized_platform != "ios" or kind.strip_edges().to_lower() != "refund":
 		return {"ok": false, "error": "unsupported_store_invalidation"}
@@ -338,20 +354,23 @@ func reconcile_store_invalidation(platform: String, product_id: String, store_pa
 	var auth := await ensure_session()
 	if not auth.get("ok", false):
 		return auth
+	var payload := {
+		"platform": normalized_platform,
+		"product_id": product_id,
+		"signed_transaction_jws": store_payload,
+		"kind": "refund",
+	}
+	if not app_transaction_jws.strip_edges().is_empty():
+		payload["app_transaction_jws"] = app_transaction_jws
 	return await _request_json(
 		HTTPClient.METHOD_POST,
 		"/v1/store/purchases/reconcile",
-		{
-			"platform": normalized_platform,
-			"product_id": product_id,
-			"signed_transaction_jws": store_payload,
-			"kind": "refund",
-		},
+		payload,
 		true
 	)
 
 
-func restore_store_purchase(platform: String, product_id: String, store_payload: String) -> Dictionary:
+func restore_store_purchase(platform: String, product_id: String, store_payload: String, app_transaction_jws: String = "") -> Dictionary:
 	var normalized_platform := platform.strip_edges().to_lower()
 	var payload := {"platform": normalized_platform, "product_id": product_id}
 	if normalized_platform == "ios":
@@ -360,6 +379,8 @@ func restore_store_purchase(platform: String, product_id: String, store_payload:
 		payload["purchase_token"] = store_payload
 	else:
 		return {"ok": false, "error": "unsupported_store_platform"}
+	if not app_transaction_jws.strip_edges().is_empty():
+		payload["app_transaction_jws"] = app_transaction_jws
 	var response: Dictionary = await _request_json(
 		HTTPClient.METHOD_POST,
 		"/v1/auth/store-restore",
