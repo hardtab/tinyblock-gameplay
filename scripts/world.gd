@@ -12734,7 +12734,7 @@ func has_crafting_capability(capability: String) -> bool:
 	return normalized.is_empty() or bool(crafting_capabilities.get(normalized, false))
 
 
-func recipe_capability_available(recipe: Dictionary) -> bool:
+func recipe_required_capability(recipe: Dictionary) -> String:
 	var required_capability := str(recipe.get("required_capability", ""))
 	var outputs: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
 	for raw_output_name in outputs:
@@ -12743,7 +12743,11 @@ func recipe_capability_available(recipe: Dictionary) -> bool:
 		if output_name in [TNT_BLOCK_NAME, LIGHTER_ITEM_NAME] or resolved_output_name in [TNT_BLOCK_NAME, LIGHTER_ITEM_NAME]:
 			required_capability = "demolitionist"
 			break
-	return has_crafting_capability(required_capability)
+	return required_capability.strip_edges().to_lower()
+
+
+func recipe_capability_available(recipe: Dictionary) -> bool:
+	return has_crafting_capability(recipe_required_capability(recipe))
 
 
 func nearby_station(station: String) -> bool:
@@ -12766,14 +12770,14 @@ func recipe_station_available(recipe: Dictionary) -> bool:
 	return nearby_station(str(recipe.get("station", "")))
 
 
-func get_all_recipes() -> Array[Dictionary]:
+func get_all_recipes(include_locked_capabilities: bool = false) -> Array[Dictionary]:
 	var recipes: Array[Dictionary] = []
 	for recipe: Dictionary in BlockDefs.RECIPES:
-		if recipe_capability_available(recipe):
+		if include_locked_capabilities or recipe_capability_available(recipe):
 			recipes.append(recipe)
 	for content_recipe: Dictionary in BlockDefs.CONTENT_RECIPES:
 		var resolved := _resolve_content_recipe(content_recipe)
-		if not resolved.is_empty() and recipe_capability_available(resolved):
+		if not resolved.is_empty() and (include_locked_capabilities or recipe_capability_available(resolved)):
 			recipes.append(resolved)
 	# Creature collectibles keep their identity until the player deliberately
 	# chooses to prepare one. Creatures large enough to provide a real meal get
@@ -12788,7 +12792,7 @@ func get_all_recipes() -> Array[Dictionary]:
 				"system": true,
 			})
 	for recipe: Dictionary in known_recipes:
-		if recipe_capability_available(recipe):
+		if include_locked_capabilities or recipe_capability_available(recipe):
 			recipes.append(recipe)
 	return recipes
 
@@ -12804,11 +12808,11 @@ func creature_can_be_prepared_as_meal(block_name: String) -> bool:
 	return float(stats.get("size", 0.0)) >= MIN_PREPARED_MEAL_CREATURE_SIZE
 
 
-func get_contextual_recipes() -> Array[Dictionary]:
+func get_contextual_recipes(include_locked_capabilities: bool = false) -> Array[Dictionary]:
 	var table_counts := get_craft_counts()
 	var has_table_inputs := not table_counts.is_empty()
 	var relevant: Array[Dictionary] = []
-	for recipe: Dictionary in get_all_recipes():
+	for recipe: Dictionary in get_all_recipes(include_locked_capabilities):
 		var total_required := 0
 		var compatible := true
 		for block_name: String in recipe["in"]:
