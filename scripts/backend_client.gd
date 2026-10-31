@@ -423,7 +423,7 @@ func validate_store_capability_claim(session_id: String, player_id: String, capa
 	)
 
 
-func managed_create_server(world_name: String, access_mode: String) -> Dictionary:
+func managed_create_server(access_mode: String) -> Dictionary:
 	var auth := await ensure_session()
 	if not auth.get("ok", false):
 		return auth
@@ -431,7 +431,7 @@ func managed_create_server(world_name: String, access_mode: String) -> Dictionar
 	return await _request_json(
 		HTTPClient.METHOD_POST,
 		"/v1/managed-servers",
-		{"world_name": world_name.strip_edges(), "access_mode": access_mode if access_mode in ["public", "invite_code"] else "public"},
+		{"access_mode": access_mode if access_mode in ["public", "invite_code"] else "public"},
 		true,
 		["Idempotency-Key: %s" % command_id]
 	)
