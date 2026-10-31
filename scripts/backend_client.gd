@@ -525,6 +525,20 @@ func managed_reset(world_id: String, world_name: String) -> Dictionary:
 	)
 
 
+func managed_stop(world_id: String) -> Dictionary:
+	var auth := await ensure_session()
+	if not auth.get("ok", false):
+		return auth
+	var command_id := new_command_id()
+	return await _request_json(
+		HTTPClient.METHOD_POST,
+		"/v1/managed-servers/%s/stop" % world_id.uri_encode(),
+		{},
+		true,
+		["Idempotency-Key: %s" % command_id]
+	)
+
+
 func wait_for_discovery(job_id: String, poll_after_ms: int = 1500, max_wait_seconds: float = 125.0) -> Dictionary:
 	var deadline_ms := Time.get_ticks_msec() + int(max_wait_seconds * 1000.0)
 	while Time.get_ticks_msec() < deadline_ms:
