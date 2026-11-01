@@ -130,6 +130,7 @@ var _region_received_chunks: Dictionary = {}
 var _last_region_chunk_request_msec := -1
 var _world_snapshot: Dictionary = {}
 var _first_observation_probe_pending := true
+var _test_wait_only_without_observation := false
 var _roster: Dictionary = {}
 var _recent_events: Array[Dictionary] = []
 var _recent_emoji_events: Array[Dictionary] = []
@@ -357,6 +358,11 @@ func configure(backend_adapter: Object = null, multiplayer_adapter: Object = nul
 		_bind_ai_client(options.get("ai_client") as BotAiClient)
 	elif options.get("ai_options", {}) is Dictionary and not (options.get("ai_options", {}) as Dictionary).is_empty():
 		_ensure_ai_client(options.get("ai_options", {}) as Dictionary)
+	_test_wait_only_without_observation = (
+		bool(options.get("test_wait_only_without_observation", false))
+		and behavior.provider is BotDecisionProvider
+		and behavior.provider.is_observation_independent_wait_provider()
+	)
 	executor.configure(network_client, Callable(), _movement_step_callable, Callable(safety, "consume_retaliation"))
 	_connect_network_signals()
 
@@ -874,7 +880,11 @@ func _process(delta: float) -> void:
 		_send_player_snapshot_if_due(now_msec)
 		_check_empty_world_grace(now_msec)
 		return
-	var observation := _build_observation(now_msec)
+	var observation := (
+		_test_wait_only_observation(self_state, now_msec)
+		if _test_wait_only_without_observation
+		else _build_observation(now_msec)
+	)
 	_decision_probe_observation = observation
 	if _is_pvp_world() and not _duel_started and now_msec - _last_duel_ready_msec >= 1000:
 		_send_duel_ready(now_msec)
@@ -891,6 +901,21 @@ func _process(delta: float) -> void:
 	# bot until they receive the new protocol.
 	_send_player_snapshot_if_due(now_msec)
 	_check_empty_world_grace(now_msec)
+
+
+func _test_wait_only_observation(self_state: Dictionary, now_msec: int) -> Dictionary:
+	return {
+		"self": self_state,
+		"players": [],
+		"threats": [],
+		"legal_actions": PackedStringArray([Contract.ACTION_WAIT]),
+		"self_defense": safety.observation_state(now_msec),
+		"world_mode": _session_world_mode,
+		"pvp_world": _is_pvp_world(),
+		"duel_started": _duel_started,
+		"enemy_player_id": _enemy_player_id(),
+		"aggressive_player_id": _aggressive_player_id,
+	}
 
 
 func _check_join_timeout(now_msec: int) -> bool:

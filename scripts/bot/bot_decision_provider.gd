@@ -14,6 +14,13 @@ func provider_name() -> String:
 	return "base"
 
 
+## Providers may opt in only when they always return WAIT and never inspect the
+## observation. BotSession still requires an explicit test-runner flag before
+## omitting perception, so normal gameplay providers keep the full contract.
+func is_observation_independent_wait_provider() -> bool:
+	return false
+
+
 func decide(_observation: Dictionary) -> Dictionary:
 	return Contract.normalize_decision({
 		"goal": Contract.GOAL_IDLE,
