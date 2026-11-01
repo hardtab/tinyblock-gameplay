@@ -86,6 +86,10 @@ var _rtc_outgoing_candidate_batches: Dictionary = {}
 var _rtc_ready_peers: Dictionary = {}
 var _rtc_connection_ids: Dictionary = {}
 var _rtc_offer_generations: Dictionary = {}
+var _ws_connected_received := false
+# WebSocket messages can come from concurrent Lambda invocations, so a peer
+# join/leave may arrive before this socket's connected roster snapshot.
+var _pre_connected_roster_updates: Dictionary = {}
 var _rtc_highest_offer_generations: Dictionary = {}
 var _rtc_highest_offer_connection_ids: Dictionary = {}
 var _rtc_last_seen_msec: Dictionary = {}
@@ -311,6 +315,8 @@ func disconnect_from_session() -> void:
 	_was_open = false
 	_heartbeat_left = HEARTBEAT_SECONDS
 	_known_players.clear()
+	_ws_connected_received = false
+	_pre_connected_roster_updates.clear()
 	_dedicated_server_session = false
 	_session_classification = ""
 	_guest_host_id = ""
@@ -408,6 +414,8 @@ func _poll_websocket(delta: float) -> void:
 		session_id = ""
 		join_code = ""
 		_known_players.clear()
+		_ws_connected_received = false
+		_pre_connected_roster_updates.clear()
 		_managed_host_guest_join_deadline_msec.clear()
 		_guest_host_id = ""
 		_guest_connected_message.clear()
@@ -606,6 +614,8 @@ func _handle_ws_packet(packet: PackedByteArray) -> void:
 	if kind == "control" and type == "player_joined":
 		var joined_id := str(message.get("player_id", ""))
 		if not joined_id.is_empty():
+			if not _ws_connected_received:
+				_pre_connected_roster_updates[joined_id] = "joined"
 			var managed_guest_rejoining_during_grace := (
 				role == "host"
 				and session_protocol_version == MANAGED_PROTOCOL_VERSION
@@ -623,6 +633,8 @@ func _handle_ws_packet(packet: PackedByteArray) -> void:
 			_known_players[joined_id] = "guest"
 	elif kind == "control" and type == "player_left":
 		var left_id := str(message.get("player_id", ""))
+		if not left_id.is_empty() and not _ws_connected_received:
+			_pre_connected_roster_updates[left_id] = "left"
 		_known_players.erase(left_id)
 		_managed_host_guest_join_deadline_msec.erase(left_id)
 		_rtc_future_candidate_buffers.erase(left_id)
@@ -636,6 +648,9 @@ func _handle_ws_packet(packet: PackedByteArray) -> void:
 
 
 func _handle_connected(message: Dictionary) -> void:
+	_ws_connected_received = true
+	var pre_connected_updates := _pre_connected_roster_updates.duplicate()
+	_pre_connected_roster_updates.clear()
 	_rtc_candidate_batch_supported = rtc_candidate_batch_capability_available(
 		session_protocol_version,
 		message.get("server_capabilities", null),
@@ -660,6 +675,14 @@ func _handle_connected(message: Dictionary) -> void:
 		if raw_player is Dictionary:
 			var entry := raw_player as Dictionary
 			_known_players[str(entry.get("player_id", ""))] = str(entry.get("role", ""))
+	for raw_player_id in pre_connected_updates:
+		var pending_player_id := str(raw_player_id)
+		if pending_player_id.is_empty() or pending_player_id == player_id:
+			continue
+		if str(pre_connected_updates[raw_player_id]) == "left":
+			_known_players.erase(pending_player_id)
+		else:
+			_known_players[pending_player_id] = "guest"
 	connected.emit(role, player_id, session_id)
 	if role == "guest":
 		_guest_connected_message = message.duplicate(true)
@@ -1211,6 +1234,8 @@ func _fail_p2p_connection() -> void:
 	session_id = ""
 	join_code = ""
 	_known_players.clear()
+	_ws_connected_received = false
+	_pre_connected_roster_updates.clear()
 	_dedicated_server_session = false
 	_session_classification = ""
 	_guest_host_id = ""
