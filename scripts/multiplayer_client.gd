@@ -428,7 +428,19 @@ func _poll_rtc(delta: float) -> void:
 				else:
 					_schedule_rtc_reconnect("data_channel_closed")
 			elif role == "host" and not websocket_fallback_enabled:
-				_retire_host_guest(remote_id, "data_channel_closed")
+				var managed_host_guest := (
+					session_protocol_version == MANAGED_PROTOCOL_VERSION
+					and _dedicated_server_session
+					and str(_known_players.get(remote_id, "")) == "guest"
+				)
+				if managed_host_guest:
+					if not _managed_host_guest_join_deadline_msec.has(remote_id):
+						_managed_host_guest_join_deadline_msec[remote_id] = now + int(MANAGED_HOST_GUEST_JOIN_GRACE_SECONDS * 1000.0)
+					_rtc_diag_event("managed_guest_reconnect_grace_started", remote_id, str(_rtc_connection_ids.get(remote_id, "")), int(_rtc_offer_generations.get(remote_id, -1)), {
+						"grace_ms": int(MANAGED_HOST_GUEST_JOIN_GRACE_SECONDS * 1000.0),
+					})
+				else:
+					_retire_host_guest(remote_id, "data_channel_closed")
 				_close_rtc_peer(remote_id, "host_data_channel_closed")
 		var voice_channel: WebRTCDataChannel = _rtc_voice_channels.get(remote_id)
 		if voice_channel != null and voice_channel.get_ready_state() == WebRTCDataChannel.STATE_OPEN:
@@ -562,13 +574,19 @@ func _handle_ws_packet(packet: PackedByteArray) -> void:
 	if kind == "control" and type == "player_joined":
 		var joined_id := str(message.get("player_id", ""))
 		if not joined_id.is_empty():
-			if role == "host" and not _known_players.has(joined_id):
+			var managed_guest_rejoining_during_grace := (
+				role == "host"
+				and session_protocol_version == MANAGED_PROTOCOL_VERSION
+				and _managed_host_guest_join_deadline_msec.has(joined_id)
+			)
+			if role == "host" and (not _known_players.has(joined_id) or managed_guest_rejoining_during_grace):
 				# A fresh authenticated WebSocket connection starts a new signaling
-				# lifecycle. Reclaim the old generation tombstone; messages from the
-				# previous connection cannot reach this WebSocket.
+				# lifecycle. A managed guest stays in the roster during recovery, so
+				# its fixed join deadline also identifies that fresh lifecycle.
 				if session_protocol_version == MANAGED_PROTOCOL_VERSION:
 					_rtc_highest_offer_generations.erase(joined_id)
 					_rtc_highest_offer_connection_ids.erase(joined_id)
+					_rtc_future_candidate_buffers.erase(joined_id)
 					_prune_inactive_offer_tombstones(joined_id, true)
 			_known_players[joined_id] = "guest"
 	elif kind == "control" and type == "player_left":
