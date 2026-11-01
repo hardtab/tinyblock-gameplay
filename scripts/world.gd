@@ -428,6 +428,7 @@ const STRUCTURE_TREE_SCAN_HEIGHT := 12
 const CHEST_SLOT_COUNT := 12
 const CHEST_EMPTY_CHANCE := 0.25
 const CHEST_BLOCK_LOOT_CHANCE := 0.50
+const CHEST_RARE_ITEM_DROP_CHANCE := 0.05
 const UNDERGROUND_WATER_CHANCE := 0.07
 const UNDERGROUND_WATER_MAX_TILES := 3
 const RIFT_CAVE_CHANCE := 0.040
@@ -1688,6 +1689,11 @@ func _one_block_chest_contents(phase_index: int, gift: bool) -> Dictionary:
 		return contents
 	var loot: Array = phase_data.get("loot", []) if phase_data.get("loot", []) is Array else []
 	if loot.is_empty():
+		_add_rare_chest_bonus_contents(
+			contents,
+			_one_block_random("chest-rare-lighter"),
+			_one_block_random("chest-rare-tnt")
+		)
 		return contents
 	var rolls := 1 + int(_one_block_random("chest-rolls") * 3.0)
 	for roll_index in rolls:
@@ -1699,6 +1705,11 @@ func _one_block_chest_contents(phase_index: int, gift: bool) -> Dictionary:
 		if BlockDefs.BLOCKS[block_name].get("item", false) or BlockDefs.BLOCKS[block_name].get("plant", false) or BlockDefs.BLOCKS[block_name].get("fluid", false):
 			amount = 1
 		contents[block_name] = int(contents.get(block_name, 0)) + amount
+	_add_rare_chest_bonus_contents(
+		contents,
+		_one_block_random("chest-rare-lighter"),
+		_one_block_random("chest-rare-tnt")
+	)
 	return contents
 
 
@@ -12277,6 +12288,8 @@ func _common_chest_gear_pool() -> Array[String]:
 	}
 	for raw_name in BlockDefs.BLOCKS.keys():
 		var block_name := str(raw_name)
+		if block_name in ["tnt", "lighter"]:
+			continue
 		var entry: Dictionary = BlockDefs.BLOCKS[block_name]
 		var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
 		if not entry.get("item", false) or str(definition.get("kind", "")) != "item":
@@ -12302,6 +12315,21 @@ func _common_chest_gear_pool() -> Array[String]:
 		return BlockDefs.content_id_for_name(a) < BlockDefs.content_id_for_name(b)
 	)
 	return candidates
+
+
+func _rare_chest_bonus_contents(lighter_roll: float, tnt_roll: float) -> Dictionary:
+	var contents: Dictionary = {}
+	if lighter_roll < CHEST_RARE_ITEM_DROP_CHANCE:
+		contents["lighter"] = 1
+	if tnt_roll < CHEST_RARE_ITEM_DROP_CHANCE:
+		contents["tnt"] = 1
+	return contents
+
+
+func _add_rare_chest_bonus_contents(contents: Dictionary, lighter_roll: float, tnt_roll: float) -> void:
+	var bonus := _rare_chest_bonus_contents(lighter_roll, tnt_roll)
+	for item_name in bonus:
+		contents[item_name] = int(contents.get(item_name, 0)) + int(bonus[item_name])
 
 
 func _generate_chest_loot(pos: Vector2i) -> void:
@@ -12338,6 +12366,11 @@ func _generate_chest_loot(pos: Vector2i) -> void:
 		var bow_max := item_max_durability("bow")
 		var bow_remaining := 1 + int(_structure_random("chest-bow-durability:%s" % loot_key) * float(maxi(1, bow_max / 4)))
 		durability["bow"] = [clampi(bow_remaining, 1, bow_max)]
+	_add_rare_chest_bonus_contents(
+		contents,
+		_structure_random("chest-rare-lighter:%s" % loot_key),
+		_structure_random("chest-rare-tnt:%s" % loot_key)
+	)
 	data["contents"] = contents
 	data["durability"] = durability
 	data["loot_generated"] = true
