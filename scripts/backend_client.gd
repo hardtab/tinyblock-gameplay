@@ -12,6 +12,7 @@ const MANAGED_CONTROL_DIR_ENV := "TINYBLOCK_MANAGED_CONTROL_DIR"
 var api_url := ""
 var access_token := ""
 var installation_id := ""
+var principal_id := ""
 var _managed_runtime := false
 var _configuration_error := ""
 var _managed_auth_rejected := false
@@ -125,6 +126,7 @@ func _fail_managed_configuration(error_code: String) -> void:
 	api_url = ""
 	access_token = ""
 	installation_id = ""
+	principal_id = ""
 
 
 func _network_block_error() -> String:
@@ -160,9 +162,12 @@ func ensure_session() -> Dictionary:
 	)
 	if not response.get("ok", false):
 		return response
-	access_token = str(response.get("body", {}).get("access_token", ""))
+	var body: Dictionary = response.get("body", {}) if response.get("body", {}) is Dictionary else {}
+	access_token = str(body.get("access_token", ""))
 	if access_token.is_empty():
 		return {"ok": false, "error": "invalid_auth_response"}
+	var principal: Variant = body.get("principal", {})
+	principal_id = stable_principal_id(principal.get("id", "") if principal is Dictionary else "")
 	_save_session()
 	session_changed.emit(true)
 	return {"ok": true, "access_token": access_token}
@@ -394,6 +399,8 @@ func restore_store_purchase(platform: String, product_id: String, store_payload:
 	if restored_token.is_empty():
 		return {"ok": false, "error": "invalid_store_restore_response"}
 	access_token = restored_token
+	var principal: Variant = body.get("principal", {})
+	principal_id = stable_principal_id(principal.get("id", "") if principal is Dictionary else "")
 	_save_session()
 	session_changed.emit(true)
 	return response
@@ -614,6 +621,7 @@ func _request_json_once(method: HTTPClient.Method, path: String, body: Dictionar
 		parsed = {"raw": raw_body}
 	if status_code == 401 and authorized:
 		access_token = ""
+		principal_id = ""
 		if _managed_runtime:
 			_managed_auth_rejected = true
 		_save_session()
@@ -637,6 +645,7 @@ func _load_session() -> void:
 		return
 	installation_id = str(parsed.get("installation_id", ""))
 	access_token = str(parsed.get("access_token", ""))
+	principal_id = stable_principal_id(parsed.get("principal_id", ""))
 
 
 func _load_managed_session() -> void:
@@ -667,6 +676,7 @@ func _load_managed_session() -> void:
 		return
 	access_token = session_token
 	installation_id = session_installation_id
+	principal_id = stable_principal_id(parsed.get("principal_id", ""))
 
 
 func _is_safe_runtime_value(value: String, maximum_length: int) -> bool:
@@ -686,7 +696,19 @@ func _save_session() -> void:
 		"installation_id": installation_id,
 		"access_token": access_token,
 	}
+	if not principal_id.is_empty():
+		session["principal_id"] = principal_id
 	if _managed_runtime:
 		session["api_url"] = api_url
 	file.store_string(JSON.stringify(session))
 	file.close()
+
+
+static func stable_principal_id(raw_value: Variant) -> String:
+	var candidate := str(raw_value).strip_edges()
+	if not candidate.begins_with("principal_") or candidate.length() > 64:
+		return ""
+	for code in candidate.to_utf8_buffer():
+		if not (code >= 48 and code <= 57) and not (code >= 65 and code <= 90) and not (code >= 97 and code <= 122) and code not in [45, 95]:
+			return ""
+	return candidate
