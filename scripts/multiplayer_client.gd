@@ -1132,7 +1132,13 @@ func _reset_rtc_reconnect_state() -> void:
 
 
 static func rtc_reconnect_delay(attempt: int) -> float:
-	return minf(8.0, 0.5 * pow(2.0, maxi(0, attempt - 1)))
+	return _rtc_reconnect_delay_with_jitter(attempt, randf())
+
+
+static func _rtc_reconnect_delay_with_jitter(attempt: int, jitter_sample: float) -> float:
+	var exponential_delay := minf(8.0, 0.5 * pow(2.0, maxi(0, attempt - 1)))
+	var jitter_factor := lerpf(0.8, 1.2, clampf(jitter_sample, 0.0, 1.0))
+	return minf(8.0, exponential_delay * jitter_factor)
 
 
 func _fail_p2p_connection() -> void:
