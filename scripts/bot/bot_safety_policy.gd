@@ -164,6 +164,11 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 		Contract.ACTION_OPEN_CONTAINER:
 			if not _reachable_container_exists(observation.get("visible_containers", []), target_id):
 				return _rejected(decision, "container_target_not_reachable")
+		Contract.ACTION_IGNITE_TNT:
+			var ignite_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+			var ignite_reason := _duel_tnt_target_safety_reason(ignite_target, observation, true)
+			if not ignite_reason.is_empty():
+				return _rejected(decision, ignite_reason)
 		Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW, Contract.ACTION_LOOK_AT:
 			if not _target_exists(observation.get("players", []), target_id):
 				return _rejected(decision, "player_target_not_visible")
@@ -176,8 +181,14 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 			if target_id.is_empty():
 				return _rejected(decision, "item_target_missing")
 		Contract.ACTION_PLACE:
-			if str(decision.get("block", "")).is_empty() or not decision.has("target"):
+			var block_name := str(decision.get("block", ""))
+			if block_name.is_empty() or not decision.has("target"):
 				return _rejected(decision, "place_target_missing")
+			if block_name == "tnt":
+				var place_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
+				var place_reason := _duel_tnt_target_safety_reason(place_target, observation, false)
+				if not place_reason.is_empty():
+					return _rejected(decision, place_reason)
 		Contract.ACTION_MOVE_TO:
 			if bool(decision.get("descent_transition", false)) and not _valid_descent_transition(decision, observation):
 				return _rejected(decision, "descent_transition_unverified")
@@ -260,6 +271,67 @@ func _bow_is_ready(observation: Dictionary) -> bool:
 		return false
 	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
 	return int(inventory.get("arrow", 0)) > 0
+
+
+func _duel_tnt_target_safety_reason(target: Dictionary, observation: Dictionary, require_existing_tnt: bool) -> String:
+	if not bool(observation.get("pvp_world", false)) or not bool(observation.get("duel_started", false)):
+		return "tnt_duel_only"
+	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
+	if int(inventory.get("lighter", 0)) <= 0:
+		return "tnt_lighter_missing"
+	if not require_existing_tnt and int(inventory.get("tnt", 0)) <= 0:
+		return "tnt_inventory_missing"
+	if not target.has("x") or not target.has("y"):
+		return "tnt_target_missing"
+	var tx := int(target.get("x", 0))
+	var ty := int(target.get("y", 0))
+	var tile_key := "%d:%d" % [tx, ty]
+	var terrain_map := {}
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		terrain_map["%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]] = str(tile.get("block_name", "")).to_lower().trim_prefix("core.")
+	if require_existing_tnt:
+		if str(terrain_map.get(tile_key, "")) != "tnt":
+			return "tnt_not_visible"
+	else:
+		var known_cells: Dictionary = observation.get("terrain_known_cells", {}) if observation.get("terrain_known_cells", {}) is Dictionary else {}
+		if not known_cells.has(tile_key) or terrain_map.has(tile_key):
+			return "tnt_placement_cell_unverified"
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if self_state.is_empty():
+		return "tnt_self_position_missing"
+	var tile_size := 32.0
+	var target_center := Vector2((float(tx) + 0.5) * tile_size, (float(ty) + 0.5) * tile_size)
+	var self_position := Contract.target_position(self_state)
+	var self_width := float(self_state.get("w", 20.0))
+	var self_height := float(self_state.get("h", 28.0))
+	var self_center := self_position + Vector2(self_width * 0.5, self_height * 0.5)
+	if self_center.distance_to(target_center) >= tile_size * 4.5:
+		return "tnt_target_out_of_reach"
+	var self_support := Vector2(
+		floori((self_position.x + self_width * 0.5) / tile_size),
+		floori((self_position.y + self_height) / tile_size),
+	)
+	if self_support.distance_to(Vector2(tx, ty)) <= 3.0:
+		return "tnt_too_close_to_self"
+	var enemy_id := str(observation.get("enemy_player_id", ""))
+	if enemy_id.is_empty():
+		return "tnt_enemy_missing"
+	var enemy: Dictionary = _find_target(observation, enemy_id)
+	if enemy.is_empty() or not bool(enemy.get("alive", true)) or _target_snapshot_is_stale(observation.get("players", []), enemy_id):
+		return "tnt_enemy_not_fresh"
+	var enemy_position := Contract.target_position(enemy)
+	var enemy_width := float(enemy.get("w", 20.0))
+	var enemy_height := float(enemy.get("h", 28.0))
+	var enemy_support := Vector2(
+		floori((enemy_position.x + enemy_width * 0.5) / tile_size),
+		floori((enemy_position.y + enemy_height) / tile_size),
+	)
+	if target_center.distance_to((enemy_support + Vector2.ONE * 0.5) * tile_size) > tile_size * 2.0:
+		return "tnt_enemy_outside_blast_radius"
+	return ""
 
 
 func _reachable_resource_exists(raw_targets: Variant, target_id: String) -> bool:

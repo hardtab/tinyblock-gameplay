@@ -8,6 +8,9 @@ const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 const RecipePlanner = preload("res://gameplay/scripts/bot/bot_recipe_planner.gd")
 const AchievementRegistry = preload("res://gameplay/scripts/bot/bot_achievement_registry.gd")
 const ROUTE_TILE := 32.0
+const TNT_EXPLOSION_RADIUS_TILES := 2.0
+const TNT_SELF_CLEARANCE_TILES := 3.0
+const TNT_IGNITION_RETRY_MSEC := 8_000
 
 var _rng := RandomNumberGenerator.new()
 var _last_build_msec := -1
@@ -473,6 +476,10 @@ func decide(observation: Dictionary) -> Dictionary:
 		var equip_target := _equipable_tool(observation)
 		if not equip_target.is_empty() and Contract.ACTION_EQUIP in legal:
 			return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_EQUIP, {"id": equip_target}, 350, 0.96)
+
+	var duel_explosive_action := _duel_explosive_action(observation, legal)
+	if not duel_explosive_action.is_empty():
+		return duel_explosive_action
 
 	# A bow is a deliberate ranged activity.  In a PvP world the enemy is
 	# pinned for the lifetime of the session; outside PvP, only hostile creatures
@@ -4187,6 +4194,109 @@ func _pvp_target(observation: Dictionary) -> Dictionary:
 			if bool(player.get("alive", true)):
 				return player
 	return {}
+
+
+func _duel_explosive_action(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
+	if not bool(observation.get("pvp_world", false)) or not bool(observation.get("duel_started", false)):
+		return {}
+	var inventory := _inventory(observation)
+	if int(inventory.get("lighter", 0)) <= 0:
+		return {}
+	var enemy_id := str(observation.get("enemy_player_id", ""))
+	var enemy := _pvp_target(observation)
+	if enemy_id.is_empty() or enemy.is_empty() or bool(enemy.get("stale", enemy.get("last_known", false))):
+		return {}
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	if self_state.is_empty():
+		return {}
+	var terrain := _terrain_map(observation.get("terrain_tiles", []))
+	var enemy_position := Contract.target_position(enemy)
+	var enemy_width := float(enemy.get("w", 20.0))
+	var enemy_height := float(enemy.get("h", 28.0))
+	var enemy_support := Vector2(
+		floori((enemy_position.x + enemy_width * 0.5) / ROUTE_TILE),
+		floori((enemy_position.y + enemy_height) / ROUTE_TILE),
+	)
+	var self_position := Contract.target_position(self_state)
+	var self_width := float(self_state.get("w", 20.0))
+	var self_height := float(self_state.get("h", 28.0))
+	var self_center := self_position + Vector2(self_width * 0.5, self_height * 0.5)
+	var self_support := Vector2(
+		floori((self_position.x + self_width * 0.5) / ROUTE_TILE),
+		floori((self_position.y + self_height) / ROUTE_TILE),
+	)
+	var has_tnt := false
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		if str(tile.get("block_name", "")).to_lower().trim_prefix("core.") != "tnt":
+			continue
+		has_tnt = true
+		var tx := int(tile.get("x", 0))
+		var ty := int(tile.get("y", 0))
+		var blast_center := Vector2((float(tx) + 0.5) * ROUTE_TILE, (float(ty) + 0.5) * ROUTE_TILE)
+		var enemy_support_center := (enemy_support + Vector2.ONE * 0.5) * ROUTE_TILE
+		var safe_from_self := self_support.distance_to(Vector2(tx, ty)) > TNT_SELF_CLEARANCE_TILES
+		var in_enemy_blast_range := blast_center.distance_to(enemy_support_center) <= TNT_EXPLOSION_RADIUS_TILES * ROUTE_TILE
+		var in_ignite_reach := self_center.distance_to(blast_center) < 4.5 * ROUTE_TILE
+		if not safe_from_self or not in_enemy_blast_range or not in_ignite_reach:
+			continue
+		if Contract.ACTION_IGNITE_TNT not in legal or _duel_tnt_ignition_recent(observation):
+			return {}
+		var ignite_target := {
+			"id": "duel-tnt:%d:%d" % [tx, ty],
+			"x": tx,
+			"y": ty,
+			"block_name": "tnt",
+			"position": [blast_center.x, blast_center.y],
+		}
+		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_IGNITE_TNT, ignite_target, TNT_IGNITION_RETRY_MSEC, 0.97)
+	if has_tnt or int(inventory.get("tnt", 0)) <= 0 or bool(observation.get("placement_pending", false)) or Contract.ACTION_PLACE not in legal:
+		return {}
+	var body_tile := Vector2i(
+		floori((enemy_position.x + enemy_width * 0.5) / ROUTE_TILE),
+		floori((enemy_position.y + enemy_height * 0.5) / ROUTE_TILE),
+	)
+	var toward_self := -1 if self_center.x < enemy_position.x + enemy_width * 0.5 else 1
+	var tnt_x := body_tile.x + toward_self
+	var tnt_y := body_tile.y
+	var tnt_key := "%d:%d" % [tnt_x, tnt_y]
+	var known_cells: Dictionary = observation.get("terrain_known_cells", {}) if observation.get("terrain_known_cells", {}) is Dictionary else {}
+	var blocked_targets: Dictionary = observation.get("blocked_action_targets", {}) if observation.get("blocked_action_targets", {}) is Dictionary else {}
+	if not known_cells.has(tnt_key) or terrain.has(tnt_key):
+		return {}
+	if int(blocked_targets.get("tile:%s" % tnt_key, 0)) > int(observation.get("observed_at_msec", 0)):
+		return {}
+	var blast_center := Vector2((float(tnt_x) + 0.5) * ROUTE_TILE, (float(tnt_y) + 0.5) * ROUTE_TILE)
+	var enemy_support_center := (enemy_support + Vector2.ONE * 0.5) * ROUTE_TILE
+	if self_center.distance_to(blast_center) >= 4.5 * ROUTE_TILE:
+		return {}
+	if self_support.distance_to(Vector2(tnt_x, tnt_y)) <= TNT_SELF_CLEARANCE_TILES:
+		return {}
+	if blast_center.distance_to(enemy_support_center) > TNT_EXPLOSION_RADIUS_TILES * ROUTE_TILE:
+		return {}
+	var tnt_target := {
+		"id": "duel-tnt:%d:%d" % [tnt_x, tnt_y],
+		"x": tnt_x,
+		"y": tnt_y,
+		"position": [blast_center.x, blast_center.y],
+	}
+	return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_PLACE, tnt_target, 900, 0.94).merged({"block": "tnt"}, true)
+
+
+func _duel_tnt_ignition_recent(observation: Dictionary) -> bool:
+	var now_msec := int(observation.get("observed_at_msec", 0))
+	for raw_entry in _as_array(observation.get("action_history", [])):
+		if not raw_entry is Dictionary:
+			continue
+		var entry := raw_entry as Dictionary
+		if str(entry.get("action", "")) != Contract.ACTION_IGNITE_TNT or str(entry.get("phase", "")) != "started":
+			continue
+		var at_msec := int(entry.get("at_msec", -1))
+		if at_msec >= 0 and now_msec >= at_msec and now_msec - at_msec < TNT_IGNITION_RETRY_MSEC:
+			return true
+	return false
 
 
 func _aggressive_player_target(observation: Dictionary) -> Dictionary:

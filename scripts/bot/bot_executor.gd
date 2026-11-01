@@ -107,7 +107,7 @@ func start(raw_decision: Variant, observation: Dictionary, now_msec: int) -> boo
 		_send_mine_progress(now_msec, 0)
 		return true
 
-	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER, Contract.ACTION_CRAFT, Contract.ACTION_EAT, Contract.ACTION_OPEN_CONTAINER, Contract.ACTION_EQUIP]:
+	if action in [Contract.ACTION_SEND_EMOJI, Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_IGNITE_TNT, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER, Contract.ACTION_CRAFT, Contract.ACTION_EAT, Contract.ACTION_OPEN_CONTAINER, Contract.ACTION_EQUIP]:
 		if action in [Contract.ACTION_EAT, Contract.ACTION_CRAFT]:
 			# BotSession owns inventory actions: simple crafts/eating mutate the
 			# guest snapshot, while station recipes send exactly one authoritative
@@ -174,6 +174,9 @@ func _send_network_action(action: String, decision: Dictionary) -> bool:
 			payload = _tile_payload(decision)
 			payload["block"] = str(decision.get("block", ""))
 			payload["block_name"] = str(decision.get("block", ""))
+		Contract.ACTION_IGNITE_TNT:
+			command = "ignite_with_lighter"
+			payload = _tile_payload(decision)
 		Contract.ACTION_ATTACK_CREATURE:
 			command = "attack_creature"
 			payload = {"creature_id": str(decision.get("target_id", ""))}
@@ -299,7 +302,7 @@ func _tile_payload(decision: Dictionary) -> Dictionary:
 func _default_duration_msec(action: String) -> int:
 	if action in [Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_MOVE_TO, Contract.ACTION_FOLLOW, Contract.ACTION_FLEE_FROM, Contract.ACTION_LOOK_AT]:
 		return DEFAULT_MOVE_MSEC
-	if action in [Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER, Contract.ACTION_SEND_EMOJI, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER]:
+	if action in [Contract.ACTION_MINE, Contract.ACTION_PLACE, Contract.ACTION_IGNITE_TNT, Contract.ACTION_ATTACK_CREATURE, Contract.ACTION_FIRE_BOW, Contract.ACTION_RETALIATE_ONCE, Contract.ACTION_ATTACK_PLAYER, Contract.ACTION_SEND_EMOJI, Contract.ACTION_CRAFT, Contract.ACTION_OPEN_CONTAINER]:
 		return DEFAULT_COMMAND_MSEC
 	return DEFAULT_ACTION_MSEC
 
