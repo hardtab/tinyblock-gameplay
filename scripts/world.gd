@@ -727,7 +727,7 @@ func create_floating_islands_world(seed: int = 0) -> void:
 	state_changed.emit()
 
 
-func create_duel_world(seed: int = 0) -> void:
+func create_duel_world(seed: int = 0, include_explosives: bool = false) -> void:
 	create_island()
 	_suspend_state_changed = true
 	world_mode = WORLD_MODE_DUEL
@@ -771,7 +771,7 @@ func create_duel_world(seed: int = 0) -> void:
 		# Every Duel arena is still a complete skyblock start: each player gets
 		# a biome-appropriate tree plus renewable water and lava sources.
 		_decorate_floating_island(island, true)
-	var shared_contents := _duel_chest_contents(rng)
+	var shared_contents := _duel_chest_contents(rng, include_explosives)
 	for island_index in floating_island_layout.size():
 		var island: Dictionary = floating_island_layout[island_index]
 		var center: Vector2i = island["center"]
@@ -813,7 +813,7 @@ func duel_spawn_point(player_index: int) -> Vector2i:
 	return Vector2i(center.x + (4 if player_index == 0 else -4), center.y)
 
 
-func _duel_chest_contents(rng: RandomNumberGenerator) -> Dictionary:
+func _duel_chest_contents(rng: RandomNumberGenerator, include_explosives: bool = false) -> Dictionary:
 	var pickaxes: Array[String] = ["wooden_pickaxe", "stone_pickaxe", "copper_pickaxe"]
 	var weapons: Array[String] = ["stone_axe", "stone_sword"]
 	var footwear: Array[String] = ["trail_boots", "palm_sandals", "ice_boots"]
@@ -829,6 +829,13 @@ func _duel_chest_contents(rng: RandomNumberGenerator) -> Dictionary:
 		"cobblestone": rng.randi_range(32, 40),
 		"prepared_meal": rng.randi_range(1, 3),
 	}
+	# TNT and a reusable lighter are a supported-client Duel feature. Callers
+	# must opt in only after the joining peer advertises the capability; keeping
+	# the default off preserves compatibility with older clients that cannot
+	# interpret these item IDs.
+	if include_explosives:
+		contents["tnt"] = 1
+		contents["lighter"] = 1
 	return contents
 
 

@@ -291,7 +291,7 @@ func _on_tideglass_bridge_cell_crystallized(position: Vector2i, step_index: int,
 		_reaction_layer.queue_redraw()
 
 
-func start_new_world(mode: String = WorldSim.WORLD_MODE_SKYBLOCK, access_mode: String = WorldSim.ACCESS_MODE_OFFLINE, keep_inventory_on_death: bool = false, prefer_starter_biome: bool = false, world_seed: int = 0) -> bool:
+func start_new_world(mode: String = WorldSim.WORLD_MODE_SKYBLOCK, access_mode: String = WorldSim.ACCESS_MODE_OFFLINE, keep_inventory_on_death: bool = false, prefer_starter_biome: bool = false, world_seed: int = 0, duel_explosives_enabled: bool = false) -> bool:
 	if mode == WorldSim.WORLD_MODE_PROCEDURAL:
 		sim.create_procedural_world(world_seed, prefer_starter_biome)
 	elif mode == WorldSim.WORLD_MODE_FLOATING_ISLANDS:
@@ -301,7 +301,7 @@ func start_new_world(mode: String = WorldSim.WORLD_MODE_SKYBLOCK, access_mode: S
 	elif mode == WorldSim.WORLD_MODE_CHALLENGE:
 		sim.create_challenge_world()
 	elif mode == WorldSim.WORLD_MODE_DUEL:
-		sim.create_duel_world()
+		sim.create_duel_world(world_seed, duel_explosives_enabled)
 	else:
 		sim.create_island()
 	sim.access_mode = access_mode

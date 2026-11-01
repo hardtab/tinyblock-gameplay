@@ -123,6 +123,29 @@ func client_version() -> String:
 	return str(ProjectSettings.get_setting(CLIENT_VERSION_SETTING, "0.0.0"))
 
 
+static func duel_client_capabilities() -> Dictionary:
+	# Add new Duel-only items here when a client can safely display and use them.
+	# Older clients omit this capability and therefore keep the legacy loadout.
+	return {"duel_explosives": true}
+
+
+static func duel_snapshot_request_capability_payload() -> Dictionary:
+	return {"capabilities": duel_client_capabilities()}
+
+
+static func supports_duel_explosives(capabilities: Variant) -> bool:
+	if not capabilities is Dictionary:
+		return false
+	var supported: Variant = (capabilities as Dictionary).get("duel_explosives", false)
+	return typeof(supported) == TYPE_BOOL and bool(supported)
+
+
+static func duel_snapshot_request_supports_explosives(payload: Variant) -> bool:
+	if not payload is Dictionary:
+		return false
+	return supports_duel_explosives((payload as Dictionary).get("capabilities", {}))
+
+
 func _ready() -> void:
 	# The host must keep its signaling heartbeat alive while a fullscreen ad
 	# pauses gameplay; otherwise the public session expires after 45 seconds.
