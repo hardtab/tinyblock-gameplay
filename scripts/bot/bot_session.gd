@@ -2,6 +2,7 @@ class_name BotSession
 extends Node
 
 const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
+const MultiplayerClientClass = preload("res://gameplay/scripts/multiplayer_client.gd")
 const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 const BuildPlanner = preload("res://gameplay/scripts/bot/bot_build_planner.gd")
 const DigPlanner = preload("res://gameplay/scripts/bot/bot_dig_planner.gd")
@@ -5066,7 +5067,8 @@ func _send_snapshot_request() -> bool:
 	if network_client == null or not network_client.has_method("send_command"):
 		_log_join_phase("snapshot_request", false)
 		return false
-	var sent := bool(network_client.call("send_command", "snapshot_request", {}))
+	var payload := MultiplayerClientClass.duel_snapshot_request_capability_payload()
+	var sent := bool(network_client.call("send_command", "snapshot_request", payload))
 	_log_join_phase("snapshot_request", sent)
 	return sent
 
@@ -5107,10 +5109,12 @@ func _retry_snapshot_sync(now_msec: int) -> void:
 		_send_snapshot_request()
 		_record_event("snapshot_restart", {"missing": missing.size()})
 		return
-	network_client.call("send_command", "snapshot_retry", {
+	var retry_payload := {
 		"transfer_id": _snapshot_transfer_id,
 		"missing": missing,
-	})
+	}
+	retry_payload.merge(MultiplayerClientClass.duel_snapshot_request_capability_payload(), true)
+	network_client.call("send_command", "snapshot_retry", retry_payload)
 	_record_event("snapshot_missing_retry", {"missing": missing.size(), "attempt": _snapshot_retry_count})
 
 
