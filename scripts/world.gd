@@ -7289,7 +7289,7 @@ func _explode_tnt(center: Vector2i, profile: Dictionary = {}) -> Array[Vector2i]
 	var local_damage := 0
 	var local_defeated := false
 	if local_player_damage_enabled:
-		local_damage = _tnt_player_damage(blast_center, player)
+		local_damage = _tnt_player_damage(blast_center, player, resolved_profile)
 		if local_damage > 0:
 			player["health"] = maxi(0, int(player.get("health", MAX_PLAYER_HEALTH)) - local_damage)
 			Sfx.hurt()
@@ -7302,7 +7302,7 @@ func _explode_tnt(center: Vector2i, profile: Dictionary = {}) -> Array[Vector2i]
 		var target: Variant = multiplayer_player_targets[raw_player_id]
 		if player_id.is_empty() or not target is Dictionary:
 			continue
-		var damage := _tnt_player_damage(blast_center, target as Dictionary)
+		var damage := _tnt_player_damage(blast_center, target as Dictionary, resolved_profile)
 		if damage > 0:
 			remote_damage[player_id] = damage
 	if not remote_damage.is_empty():
@@ -7319,7 +7319,7 @@ func _explode_tnt(center: Vector2i, profile: Dictionary = {}) -> Array[Vector2i]
 	return affected
 
 
-func _tnt_player_damage(blast_center: Vector2, target: Dictionary) -> int:
+func _tnt_player_damage(blast_center: Vector2, target: Dictionary, profile: Dictionary = {}) -> int:
 	if int(target.get("health", MAX_PLAYER_HEALTH)) <= 0:
 		return 0
 	var target_position := Vector2(float(target.get("x", 0.0)), float(target.get("y", 0.0)))
@@ -7329,8 +7329,28 @@ func _tnt_player_damage(blast_center: Vector2, target: Dictionary) -> int:
 		clampf(blast_center.x, target_rect.position.x, target_rect.end.x),
 		clampf(blast_center.y, target_rect.position.y, target_rect.end.y),
 	)
-	var distance := closest.distance_to(blast_center)
-	var radius := float(TNT_EXPLOSION_RADIUS * BlockDefs.TILE)
+	var offset := (closest - blast_center).abs()
+	var blast_shape := str(profile.get("blast_shape", "circle"))
+	var radius_blocks := clampi(int(profile.get("blast_radius_blocks", TNT_EXPLOSION_RADIUS)), 1, 8)
+	var radius := float(radius_blocks * BlockDefs.TILE)
+	var distance := offset.length()
+	match blast_shape:
+		"diamond":
+			distance = offset.x + offset.y
+		"square":
+			distance = maxf(offset.x, offset.y)
+		"cross":
+			var half_tile := float(BlockDefs.TILE) * 0.5
+			var horizontal_arm := offset.x <= radius and offset.y <= half_tile
+			var vertical_arm := offset.y <= radius and offset.x <= half_tile
+			if not horizontal_arm and not vertical_arm:
+				return 0
+			if horizontal_arm and vertical_arm:
+				distance = minf(offset.x, offset.y)
+			elif horizontal_arm:
+				distance = offset.x
+			else:
+				distance = offset.y
 	if distance > radius:
 		return 0
 	var falloff := 1.0 - distance / radius

@@ -340,12 +340,12 @@ func _on_tnt_explosion_occurred(position: Vector2i, event_id: String) -> void:
 	show_tnt_explosion(position, event_id)
 
 
-func show_tnt_explosion(position: Vector2i, event_id: String, profile: Dictionary = {}) -> void:
+func show_tnt_explosion(position: Vector2i, event_id: String, profile: Dictionary = {}) -> bool:
 	var resolved_id := event_id.strip_edges()
 	if resolved_id.is_empty():
 		resolved_id = "%d:%d:%d" % [position.x, position.y, Time.get_ticks_msec()]
 	if _seen_tnt_explosion_ids.has(resolved_id):
-		return
+		return false
 	_seen_tnt_explosion_ids[resolved_id] = true
 	_seen_tnt_explosion_order.append(resolved_id)
 	while _seen_tnt_explosion_order.size() > 128:
@@ -358,6 +358,7 @@ func show_tnt_explosion(position: Vector2i, event_id: String, profile: Dictionar
 	})
 	while _tnt_explosion_effects.size() > 12:
 		_tnt_explosion_effects.pop_front()
+	return true
 	if is_instance_valid(_reaction_layer):
 		_reaction_layer.queue_redraw()
 
@@ -3055,8 +3056,8 @@ func _draw_tnt_explosion_effects(canvas: Node2D) -> void:
 		var profile: Dictionary = effect.get("profile", {}) if effect.get("profile", {}) is Dictionary else {}
 		var radius_blocks := clampi(int(profile.get("blast_radius_blocks", WorldSim.TNT_EXPLOSION_RADIUS)), 1, 8)
 		var size_name := str(profile.get("blast_size", "medium"))
-		var size_scale := {"small": 0.72, "medium": 1.0, "large": 1.42}.get(size_name, 1.0)
-		var blast_radius := float(radius_blocks) * tile * 0.82 * size_scale
+		var size_scale: float = {"small": 0.72, "medium": 1.0, "large": 1.42}.get(size_name, 1.0)
+		var blast_radius: float = float(radius_blocks) * tile * 0.82 * size_scale
 		var fire_color_name := str(profile.get("fire_color", "#ff6b24"))
 		var fire_color := Color(fire_color_name) if Color.html_is_valid(fire_color_name) else Color("#ff6b24")
 		var shape := str(profile.get("blast_shape", "circle"))
@@ -3067,8 +3068,10 @@ func _draw_tnt_explosion_effects(canvas: Node2D) -> void:
 		var fire_light := fire_color.lightened(0.28)
 		fire_dark.a = alpha * 0.4
 		fire_light.a = alpha * 0.64
-		canvas.draw_circle(center, radius * 0.62, fire_dark)
-		canvas.draw_circle(center, radius * 0.38, fire_light)
+		var outer_silhouette := _explosion_silhouette(center, radius * 0.62, shape)
+		var inner_silhouette := _explosion_silhouette(center, radius * 0.38, shape)
+		canvas.draw_colored_polygon(outer_silhouette, fire_dark)
+		canvas.draw_colored_polygon(inner_silhouette, fire_light)
 		for puff_index in 7:
 			var puff_variation := fposmod(seed_value * 997.0 + float(puff_index * 41), 100.0) / 100.0
 			var puff_angle := angle_offset + TAU * float((puff_index * 3) % 7) / 7.0 + (puff_variation - 0.5) * 0.28
@@ -3095,6 +3098,8 @@ func _draw_tnt_explosion_effects(canvas: Node2D) -> void:
 			elif shape == "diamond":
 				var diagonal_sign := -1.0 if posmod(flame_index, 2) == 0 else 1.0
 				direction = Vector2(signf(direction.x), signf(direction.y) * diagonal_sign).normalized()
+			elif shape == "square":
+				direction = [Vector2.RIGHT, Vector2.DOWN, Vector2.LEFT, Vector2.UP][flame_index % 4]
 			var perpendicular := Vector2(-direction.y, direction.x)
 			var flame_length := radius * (0.48 + flame_variation * 0.43)
 			var flame_width := radius * (0.045 + flame_variation * 0.05)
@@ -3142,6 +3147,40 @@ func _draw_tnt_explosion_effects(canvas: Node2D) -> void:
 			canvas.draw_colored_polygon(spark, spark_color)
 	for index in range(expired_indexes.size() - 1, -1, -1):
 		_tnt_explosion_effects.remove_at(expired_indexes[index])
+
+
+func _explosion_silhouette(center: Vector2, radius: float, shape: String) -> PackedVector2Array:
+	var points := PackedVector2Array()
+	match shape:
+		"diamond":
+			points = PackedVector2Array([
+				center + Vector2.UP * radius,
+				center + Vector2.RIGHT * radius,
+				center + Vector2.DOWN * radius,
+				center + Vector2.LEFT * radius,
+			])
+		"square":
+			points = PackedVector2Array([
+				center + Vector2(-radius, -radius),
+				center + Vector2(radius, -radius),
+				center + Vector2(radius, radius),
+				center + Vector2(-radius, radius),
+			])
+		"cross":
+			var arm := radius * 0.34
+			points = PackedVector2Array([
+				center + Vector2(-arm, -radius), center + Vector2(arm, -radius),
+				center + Vector2(arm, -arm), center + Vector2(radius, -arm),
+				center + Vector2(radius, arm), center + Vector2(arm, arm),
+				center + Vector2(arm, radius), center + Vector2(-arm, radius),
+				center + Vector2(-arm, arm), center + Vector2(-radius, arm),
+				center + Vector2(-radius, -arm), center + Vector2(-arm, -arm),
+			])
+		_:
+			for point_index in 24:
+				var angle := TAU * float(point_index) / 24.0
+				points.append(center + Vector2(cos(angle), sin(angle)) * radius)
+	return points
 
 
 func _draw_tideglass_reveal_glow(canvas: Node2D) -> void:
