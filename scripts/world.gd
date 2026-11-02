@@ -6945,6 +6945,7 @@ func explosive_effects_for_block(block: Dictionary) -> Dictionary:
 		if str(block.get("name", "")) == TNT_BLOCK_NAME:
 			return {
 				"blast_shape": "circle", "blast_radius_blocks": TNT_EXPLOSION_RADIUS,
+				"gravity_mode": "static",
 				"blast_size": "medium", "fuse_seconds": 0.8, "fuse_randomness": 0.0,
 				"blast_randomness": 0.0, "leaves_fire": false, "fire_chance": 0.0,
 				"fire_color": DEFAULT_FIRE_COLOR, "sound_variant": "classic",
@@ -6962,8 +6963,12 @@ func explosive_effects_for_block(block: Dictionary) -> Dictionary:
 	var fire_color := str(explosive.get("fire_color", DEFAULT_FIRE_COLOR))
 	if not Color.html_is_valid(fire_color):
 		fire_color = DEFAULT_FIRE_COLOR
+	var gravity_mode := str(explosive.get("gravity_mode", "static"))
+	if gravity_mode not in ["static", "on_ignite", "always"]:
+		gravity_mode = "static"
 	return {
 		"blast_shape": shape,
+		"gravity_mode": gravity_mode,
 		"blast_radius_blocks": clampi(int(explosive.get("blast_radius_blocks", TNT_EXPLOSION_RADIUS)), 1, 8),
 		"blast_size": size,
 		"fuse_seconds": clampf(float(explosive.get("fuse_seconds", 0.8)), 0.3, 8.0),
@@ -8347,13 +8352,26 @@ func _challenge_granular_trap_active(pos: Vector2i) -> bool:
 	return false
 
 
+func _block_falls_when_unsupported(pos: Vector2i, block: Dictionary) -> bool:
+	if bool(block.get("falls_when_unsupported", false)):
+		return true
+	var explosive_profile := explosive_effects_for_block(block)
+	if explosive_profile.is_empty():
+		return false
+	match str(explosive_profile.get("gravity_mode", "static")):
+		"always": return true
+		"on_ignite": return burning_tiles.has(pos)
+		_: return false
+
+
 func tick_granular() -> void:
 	granular_tick += 1
 	if granular_tick % GRANULAR_TICK_EVERY != 0:
 		return
 	var has_granular := false
 	for raw_id in block_id_counts.keys():
-		if BlockDefs.get_block_by_id(int(raw_id)).get("falls_when_unsupported", false):
+		var block := BlockDefs.get_block_by_id(int(raw_id))
+		if bool(block.get("falls_when_unsupported", false)) or str(explosive_effects_for_block(block).get("gravity_mode", "static")) in ["always", "on_ignite"]:
 			has_granular = true
 			break
 	if not has_granular:
@@ -8361,7 +8379,8 @@ func tick_granular() -> void:
 	var positions: Array[Vector2i] = []
 	for raw_id in block_id_counts.keys():
 		var id := int(raw_id)
-		if BlockDefs.get_block_by_id(id).get("falls_when_unsupported", false):
+		var block := BlockDefs.get_block_by_id(id)
+		if bool(block.get("falls_when_unsupported", false)) or str(explosive_effects_for_block(block).get("gravity_mode", "static")) in ["always", "on_ignite"]:
 			positions.append_array(_active_positions_for_block_id(id))
 	positions.sort_custom(func(a: Vector2i, b: Vector2i):
 		if a.y != b.y:
@@ -8374,7 +8393,7 @@ func tick_granular() -> void:
 		if id == 0:
 			continue
 		var block := BlockDefs.get_block_by_id(id)
-		if not block.get("falls_when_unsupported", false):
+		if not _block_falls_when_unsupported(pos, block):
 			continue
 		if not _challenge_granular_trap_active(pos):
 			continue
