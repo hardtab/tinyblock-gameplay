@@ -210,6 +210,10 @@ func active_guest_player_ids() -> Array[String]:
 	return guest_ids
 
 
+func guest_peer_ids() -> Array[String]:
+	return active_guest_player_ids()
+
+
 func is_dedicated_server_session() -> bool:
 	return _dedicated_server_session
 
