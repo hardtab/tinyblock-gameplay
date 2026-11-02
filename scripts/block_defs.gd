@@ -482,12 +482,39 @@ var BLOCKS := {
 		"id": 70, "content_id": "core.tnt", "solid": true, "generated": false, "hardness": 8,
 		"pattern": "banded", "visual_seed": 70070, "base": "#aa2925", "mid": "#e74435", "dark": "#70201f", "light": "#ffc45c",
 		"flammability": 0.0,
-		"definition": {"content_id": "core.tnt", "kind": "block", "schema_version": "1.0", "display": {"name": {"en": "TNT"}, "description": {"en": "An explosive block. Light it to blast nearby terrain."}}, "tags": ["explosive", "crafted"]},
+		"definition": {"content_id": "core.tnt", "kind": "block", "schema_version": "1.3", "display": {"name": {"en": "TNT"}, "description": {"en": "A familiar red charge with a round blast and orange flash."}}, "visual": {"pattern": "banded", "palette": ["#aa2925", "#e74435", "#70201f", "#ffc45c"]}, "effects": {"explosive": {"blast_shape": "circle", "blast_radius_blocks": 4, "blast_size": "medium", "fuse_seconds": 0.8, "fuse_randomness": 0.0, "blast_randomness": 0.0, "leaves_fire": false, "fire_chance": 0.0, "fire_color": "#ff762e", "sound_variant": "classic"}}, "tags": ["explosive", "crafted"]},
 	},
 	"lighter": {
 		"id": 71, "content_id": "core.item.lighter", "solid": false, "fluid": false, "item": true, "hardness": 1,
 		"base": "#444b52", "light": "#d7e3ec", "dark": "#22272b",
-		"definition": {"content_id": "core.item.lighter", "kind": "item", "schema_version": "1.0", "display": {"name": {"en": "Flint Lighter"}, "description": {"en": "A reusable tool for lighting TNT and flammable blocks."}}, "visual": {"shape": "lighter", "pattern": "metal", "palette": ["#454c54", "#bbc9d4", "#f7a63b"]}, "category": "fire_tool", "rarity": "common", "durability": {"max_uses": 128}, "tags": ["item", "tool", "fire", "crafted"], "mechanics": ["hotbar_active", "ignite"]},
+		"definition": {"content_id": "core.item.lighter", "kind": "item", "schema_version": "1.3", "display": {"name": {"en": "Flint Lighter"}, "description": {"en": "A reusable flint wheel lighter that lights one target with an orange spark."}}, "visual": {"shape": "lighter", "pattern": "metal", "palette": ["#454c54", "#bbc9d4", "#f7a63b"]}, "category": "incendiary", "rarity": "common", "effects": {"incendiary": {"ignition_radius_blocks": 0, "ignition_chance": 1.0, "fire_color": "#ff762e", "sound_variant": "spark"}}, "durability": {"max_uses": 128}, "tags": ["item", "tool", "fire", "crafted"], "mechanics": ["hotbar_active", "ignite"]},
+	},
+	"ember_charge": {
+		"id": 72, "content_id": "core.explosive.ember_charge", "solid": true, "generated": false, "hardness": 8,
+		"pattern": "cracks", "visual_seed": 72072, "base": "#66351f", "mid": "#bd5829", "dark": "#3b251f", "light": "#ffae45",
+		"flammability": 0.0,
+		"definition": {"content_id": "core.explosive.ember_charge", "kind": "block", "schema_version": "1.3", "display": {"name": {"en": "Ember Charge"}, "description": {"en": "A square blast with a longer fuse that can leave scattered orange fire."}}, "visual": {"pattern": "cracks", "palette": ["#66351f", "#bd5829", "#3b251f", "#ffae45"]}, "effects": {"explosive": {"blast_shape": "square", "blast_radius_blocks": 3, "blast_size": "large", "fuse_seconds": 2.4, "fuse_randomness": 0.25, "blast_randomness": 0.15, "leaves_fire": true, "fire_chance": 0.65, "fire_color": "#ff6b24", "sound_variant": "deep"}}, "tags": ["explosive", "crafted"]},
+	},
+	"shaped_charge": {
+		"id": 73, "content_id": "core.explosive.shaped_charge", "solid": true, "generated": false, "hardness": 8,
+		"pattern": "crystals", "visual_seed": 73073, "base": "#402b73", "mid": "#9b63d4", "dark": "#241744", "light": "#72f0d4",
+		"flammability": 0.0,
+		"definition": {"content_id": "core.explosive.shaped_charge", "kind": "block", "schema_version": "1.3", "display": {"name": {"en": "Shaped Charge"}, "description": {"en": "A narrow cross-shaped blast with a crackling violet afterglow."}}, "visual": {"pattern": "crystals", "palette": ["#402b73", "#9b63d4", "#241744", "#72f0d4"]}, "effects": {"explosive": {"blast_shape": "cross", "blast_radius_blocks": 4, "blast_size": "large", "fuse_seconds": 3.2, "fuse_randomness": 0.4, "blast_randomness": 0.3, "leaves_fire": true, "fire_chance": 0.8, "fire_color": "#ad67ff", "sound_variant": "crackle"}}, "tags": ["explosive", "crafted"]},
+	},
+	"blue_flame_starter": {
+		"id": 74, "content_id": "core.item.blue_flame_starter", "solid": false, "fluid": false, "item": true, "hardness": 1,
+		"base": "#163a62", "light": "#6fe6ff", "dark": "#0d203c",
+		"definition": {"content_id": "core.item.blue_flame_starter", "kind": "item", "schema_version": "1.3", "display": {"name": {"en": "Blue Flame Starter"}, "description": {"en": "A compact tool that can light nearby flammable blocks with cool blue fire."}}, "visual": {"shape": "lighter", "pattern": "crystals", "palette": ["#163a62", "#6fe6ff", "#0d203c", "#d8fbff"]}, "category": "incendiary", "rarity": "uncommon", "effects": {"incendiary": {"ignition_radius_blocks": 2, "ignition_chance": 0.78, "fire_color": "#55cfff", "sound_variant": "whoosh"}}, "durability": {"max_uses": 48}, "tags": ["item", "tool", "fire", "crafted"], "mechanics": ["hotbar_active", "ignite"]},
+	},
+	"ember_flask": {
+		"id": 75, "content_id": "core.item.ember_flask", "solid": false, "fluid": false, "item": true, "hardness": 1,
+		"base": "#58251b", "light": "#ff8a38", "dark": "#301a18",
+		"definition": {"content_id": "core.item.ember_flask", "kind": "item", "schema_version": "1.3", "display": {"name": {"en": "Ember Flask"}, "description": {"en": "A one-use incendiary flask that can scatter warm fire across a small area."}}, "visual": {"shape": "bottle", "pattern": "bubbles", "palette": ["#58251b", "#ff8a38", "#301a18", "#ffd17a"]}, "category": "incendiary", "rarity": "uncommon", "effects": {"incendiary": {"ignition_radius_blocks": 3, "ignition_chance": 0.58, "fire_color": "#ff542e", "sound_variant": "crackle"}}, "durability": {"max_uses": 1}, "tags": ["item", "tool", "fire", "crafted"], "mechanics": ["hotbar_active", "ignite"]},
+	},
+	"prism_lighter": {
+		"id": 76, "content_id": "core.item.prism_lighter", "solid": false, "fluid": false, "item": true, "hardness": 1,
+		"base": "#34244d", "light": "#da8fff", "dark": "#211735",
+		"definition": {"content_id": "core.item.prism_lighter", "kind": "item", "schema_version": "1.3", "display": {"name": {"en": "Prism Lighter"}, "description": {"en": "A reusable crystal striker that scatters a violet spark over one nearby target."}}, "visual": {"shape": "lighter", "pattern": "crystals", "palette": ["#34244d", "#da8fff", "#211735", "#fff0ff"]}, "category": "incendiary", "rarity": "uncommon", "effects": {"incendiary": {"ignition_radius_blocks": 1, "ignition_chance": 1.0, "fire_color": "#c77aff", "sound_variant": "crackle"}}, "durability": {"max_uses": 96}, "tags": ["item", "tool", "fire", "crafted"], "mechanics": ["hotbar_active", "ignite"]},
 	},
 }
 
@@ -568,6 +595,11 @@ const CONTENT_RECIPES: Array[Dictionary] = [
 	{"in": {"core.magnetic_stone": 2, "core.lumenroot": 1}, "out": {"core.resonance_bricks": 2}},
 	{"in": {"core.charcoal": 2, "core.sand": 2}, "out": {"core.tnt": 1}, "required_capability": "demolitionist"},
 	{"in": {"core.item.flint": 1, "core.item.copper_ingot": 1}, "out": {"core.item.lighter": 1}, "required_capability": "demolitionist", "station": "workbench"},
+	{"in": {"core.charcoal": 1, "core.glass": 1, "core.item.copper_ingot": 1}, "out": {"core.explosive.ember_charge": 1}, "required_capability": "demolitionist", "station": "workbench"},
+	{"in": {"core.charcoal": 1, "core.glass": 1, "core.amethyst_crystal": 1}, "out": {"core.explosive.shaped_charge": 1}, "required_capability": "demolitionist", "station": "workbench"},
+	{"in": {"core.item.flint": 1, "core.item.copper_ingot": 1, "core.amethyst_crystal": 1}, "out": {"core.item.blue_flame_starter": 1}, "required_capability": "demolitionist", "station": "workbench"},
+	{"in": {"core.charcoal": 1, "core.glass": 1, "core.item.stick": 1}, "out": {"core.item.ember_flask": 1}, "required_capability": "demolitionist", "station": "workbench"},
+	{"in": {"core.item.flint": 1, "core.item.copper_ingot": 1, "core.emerald_crystal": 1}, "out": {"core.item.prism_lighter": 1}, "required_capability": "demolitionist", "station": "workbench"},
 ]
 
 var block_by_id: Dictionary = {}

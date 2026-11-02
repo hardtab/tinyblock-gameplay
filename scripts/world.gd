@@ -5930,7 +5930,7 @@ func deserialize_state(state: Dictionary) -> bool:
 			loaded_equipment[slot_name] = equipment_name
 		var equipment_entry: Dictionary = BlockDefs.BLOCKS.get(equipment_name, {})
 		var equipment_definition: Dictionary = equipment_entry.get("definition", {}) if equipment_entry.get("definition", {}) is Dictionary else {}
-		if expected_slot.is_empty() and str(equipment_definition.get("category", "")) == "fire_tool" and not loaded_hotbar.has(equipment_name):
+		if expected_slot.is_empty() and str(equipment_definition.get("category", "")) in ["fire_tool", "incendiary"] and not loaded_hotbar.has(equipment_name):
 			# Items that used to occupy equipment but are now hotbar tools stay
 			# accessible after loading an older save.
 			for index in loaded_hotbar.size():
@@ -6940,15 +6940,15 @@ func _definition_effects(block_or_item: Dictionary) -> Dictionary:
 
 
 func explosive_effects_for_block(block: Dictionary) -> Dictionary:
-	if str(block.get("name", "")) == TNT_BLOCK_NAME:
-		return {
-			"blast_shape": "circle", "blast_radius_blocks": TNT_EXPLOSION_RADIUS,
-			"blast_size": "medium", "fuse_seconds": 0.8, "fuse_randomness": 0.0,
-			"blast_randomness": 0.0, "leaves_fire": false, "fire_chance": 0.0,
-			"fire_color": DEFAULT_FIRE_COLOR, "sound_variant": "classic",
-		}
 	var explosive: Dictionary = _definition_effects(block).get("explosive", {})
 	if explosive.is_empty():
+		if str(block.get("name", "")) == TNT_BLOCK_NAME:
+			return {
+				"blast_shape": "circle", "blast_radius_blocks": TNT_EXPLOSION_RADIUS,
+				"blast_size": "medium", "fuse_seconds": 0.8, "fuse_randomness": 0.0,
+				"blast_randomness": 0.0, "leaves_fire": false, "fire_chance": 0.0,
+				"fire_color": DEFAULT_FIRE_COLOR, "sound_variant": "classic",
+			}
 		return {}
 	var shape := str(explosive.get("blast_shape", "circle"))
 	if shape not in ["circle", "diamond", "cross", "square"]:
@@ -6977,13 +6977,18 @@ func explosive_effects_for_block(block: Dictionary) -> Dictionary:
 
 
 func incendiary_effects_for_item(item_name: String) -> Dictionary:
-	if item_name == LIGHTER_ITEM_NAME:
-		return {"ignition_radius_blocks": 0, "ignition_chance": 1.0, "fire_color": DEFAULT_FIRE_COLOR, "sound_variant": "spark"}
 	var item: Dictionary = BlockDefs.BLOCKS.get(item_name, {})
 	var definition: Dictionary = item.get("definition", {}) if item.get("definition", {}) is Dictionary else {}
-	if not item.get("item", false) or str(definition.get("category", "")) != "incendiary":
+	if not item.get("item", false):
 		return {}
 	var incendiary: Dictionary = _definition_effects(item).get("incendiary", {})
+	# Old world and generated-item records can still contain the legacy lighter
+	# definition without an effects profile. Keep its historical behavior while
+	# allowing the system lighter definition to carry its authored color/sound.
+	if item_name == LIGHTER_ITEM_NAME and incendiary.is_empty():
+		return {"ignition_radius_blocks": 0, "ignition_chance": 1.0, "fire_color": DEFAULT_FIRE_COLOR, "sound_variant": "spark"}
+	if str(definition.get("category", "")) != "incendiary":
+		return {}
 	if incendiary.is_empty():
 		return {}
 	var sound := str(incendiary.get("sound_variant", "spark"))
@@ -13047,13 +13052,49 @@ func has_crafting_capability(capability: String) -> bool:
 func recipe_required_capability(recipe: Dictionary) -> String:
 	var required_capability := str(recipe.get("required_capability", ""))
 	var outputs: Dictionary = recipe.get("out", {}) if recipe.get("out", {}) is Dictionary else {}
+	var inputs: Dictionary = recipe.get("in", {}) if recipe.get("in", {}) is Dictionary else {}
+	var hazardous_output := false
 	for raw_output_name in outputs:
-		var output_name := str(raw_output_name)
-		var resolved_output_name := _block_name_for_content_id(output_name)
-		if output_name in [TNT_BLOCK_NAME, LIGHTER_ITEM_NAME] or resolved_output_name in [TNT_BLOCK_NAME, LIGHTER_ITEM_NAME]:
-			required_capability = "demolitionist"
+		if _is_hazardous_content(str(raw_output_name)):
+			hazardous_output = true
 			break
+	if required_capability.is_empty() and hazardous_output and not _recipe_consumes_hazardous_input(inputs):
+		# A discovered hazard recipe is free only when it transforms an actual
+		# hazard. A normal material recipe cannot become a paid recipe by
+		# omitting its capability marker or changing content IDs.
+		required_capability = "demolitionist"
 	return required_capability.strip_edges().to_lower()
+
+
+func _is_hazardous_content(raw_name: String) -> bool:
+	var block_name := _block_name_for_content_id(raw_name)
+	if block_name.is_empty():
+		block_name = raw_name
+	if block_name in [TNT_BLOCK_NAME, LIGHTER_ITEM_NAME]:
+		return true
+	var entry: Dictionary = BlockDefs.BLOCKS.get(block_name, {})
+	if entry.is_empty():
+		return false
+	if not explosive_effects_for_block(entry).is_empty():
+		return true
+	return not incendiary_effects_for_item(block_name).is_empty()
+
+
+func _recipe_consumes_hazardous_input(inputs: Dictionary) -> bool:
+	for raw_name in inputs.keys():
+		if int(inputs.get(raw_name, 0)) > 0 and _is_hazardous_content(str(raw_name)):
+			return true
+	return false
+
+
+func discovered_definition_is_hazardous(definition: Dictionary) -> bool:
+	var kind := str(definition.get("kind", "block"))
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	if kind == "block":
+		return effects.get("explosive", {}) is Dictionary and not (effects.get("explosive", {}) as Dictionary).is_empty()
+	if kind == "item" and str(definition.get("category", "")) == "incendiary":
+		return effects.get("incendiary", {}) is Dictionary and not (effects.get("incendiary", {}) as Dictionary).is_empty()
+	return false
 
 
 func recipe_capability_available(recipe: Dictionary) -> bool:
@@ -13447,6 +13488,12 @@ func craft_generated_output(definition: Dictionary, discovery_job_id: String = "
 		return BlockDefs.name_for_content_id(str(applied_discovery_jobs[discovery_job_id]))
 	var input_counts := get_craft_counts()
 	if input_counts.is_empty():
+		return ""
+	if (
+		discovered_definition_is_hazardous(definition)
+		and not has_crafting_capability("demolitionist")
+		and not _recipe_consumes_hazardous_input(input_counts)
+	):
 		return ""
 	var block_name := BlockDefs.register_generated_block(definition)
 	if block_name == "":
