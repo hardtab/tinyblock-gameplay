@@ -2227,9 +2227,78 @@ func draw_block(
 		for stripe in 3:
 			var stripe_x := x + w * (0.28 + float(stripe) * 0.22)
 			canvas.draw_rect(Rect2(stripe_x, y + h * 0.39, maxf(1.0, w * 0.08), h * 0.24), _c(block, "dark") * modulate)
+	elif name == "ember_charge":
+		_draw_ember_charge(canvas, x, y, sx, sy, block, modulate)
+	elif name == "shaped_charge":
+		_draw_shaped_charge(canvas, x, y, sx, sy, block, modulate)
 	elif block.get("generated", false):
 		_draw_generated(canvas, tx, ty, x, y, w, h, sx, sy, block, modulate)
 	else:
 		canvas.draw_rect(Rect2(x, y, w, h), preview_color(block) * modulate)
 
 	_edge_bevel(canvas, x, y, w, h, sx, sy, modulate, bevel_mask)
+
+
+func _draw_ember_charge(canvas: CanvasItem, x: float, y: float, sx: float, sy: float, block: Dictionary, modulate: Color) -> void:
+	# A compact volcanic core held in a scorched iron casing. The nested warm
+	# diamonds read clearly at the 32 px world size and separate it from TNT.
+	var base := _c(block, "base") * modulate
+	var mid := _c(block, "mid") * modulate
+	var dark := _c(block, "dark") * modulate
+	var light := _c(block, "light") * modulate
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 2, 3, 28, 27), dark.darkened(0.15))
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 4, 2, 24, 27), mid.darkened(0.18))
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 6, 4, 20, 22), dark)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 7, 5, 18, 2), mid)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 7, 25, 18, 2), base.darkened(0.15))
+	# Copper clamps at the corners suggest a sealed, manufactured charge.
+	for point: Vector2i in [Vector2i(5, 6), Vector2i(24, 6), Vector2i(5, 23), Vector2i(24, 23)]:
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, point.x, point.y, 3, 3), mid.lightened(0.18))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, point.x + 1, point.y + 1, 1, 1), light.lightened(0.06))
+	# Cracks feed a bright, contained ember rather than covering the whole block
+	# in generic noise.
+	var fissure := mid.lightened(0.2)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 12, 8, 2, 4), fissure)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 9, 12, 4, 2), fissure)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 20, 13, 3, 2), fissure)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 11, 20, 2, 3), fissure)
+	var core := PackedVector2Array([
+		Vector2(x + 16.0 * sx, y + 7.0 * sy),
+		Vector2(x + 24.0 * sx, y + 15.0 * sy),
+		Vector2(x + 16.0 * sx, y + 24.0 * sy),
+		Vector2(x + 8.0 * sx, y + 15.0 * sy),
+	])
+	canvas.draw_colored_polygon(core, base.lightened(0.08))
+	var glow := PackedVector2Array([
+		Vector2(x + 16.0 * sx, y + 9.0 * sy),
+		Vector2(x + 21.0 * sx, y + 15.0 * sy),
+		Vector2(x + 16.0 * sx, y + 21.0 * sy),
+		Vector2(x + 11.0 * sx, y + 15.0 * sy),
+	])
+	canvas.draw_colored_polygon(glow, mid.lightened(0.38))
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 15, 12, 3, 6), light)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 15, 14, 2, 3), light.lightened(0.25))
+	# Tiny vent glints add life without relying on animation or extra assets.
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 13, 3, 2, 1), light)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 20, 10, 1, 2), light.darkened(0.08))
+
+
+func _draw_shaped_charge(canvas: CanvasItem, x: float, y: float, sx: float, sy: float, block: Dictionary, modulate: Color) -> void:
+	# Directional charge: a violet housing around a bright cyan cross mark.
+	var base := _c(block, "base") * modulate
+	var mid := _c(block, "mid") * modulate
+	var dark := _c(block, "dark") * modulate
+	var light := _c(block, "light") * modulate
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 3, 3, 26, 26), dark.darkened(0.1))
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 5, 4, 22, 22), base)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 7, 6, 18, 18), mid.darkened(0.12))
+	# Four violet corner facets frame a cross-shaped directional glyph.
+	for point: Vector2i in [Vector2i(7, 7), Vector2i(22, 7), Vector2i(7, 22), Vector2i(22, 22)]:
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, point.x, point.y, 3, 3), light.lightened(0.12))
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 14, 7, 4, 18), dark)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 7, 14, 18, 4), dark)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 15, 8, 2, 16), light)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 8, 15, 16, 2), light)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 14, 14, 4, 4), light.lightened(0.25))
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 12, 4, 8, 2), mid)
+	canvas.draw_rect(_tile_rect(x, y, sx, sy, 12, 26, 8, 2), dark)
