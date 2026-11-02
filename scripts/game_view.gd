@@ -1757,7 +1757,7 @@ func _sync_avatar_glow_lighting() -> void:
 	var source_area := _visible_tile_range().grow(_lighting_cache_margin())
 	if (
 		str(PlayerProfile.skin.get("glow", "none")) == "glow"
-		and Monetization.can_access_item("cosmetic.glow.glow")
+		and _can_access_monetization_item("cosmetic.glow.glow")
 	):
 		_append_avatar_glow_source(
 			next_sources,
@@ -1791,6 +1791,15 @@ func _sync_avatar_glow_lighting() -> void:
 	_avatar_glow_source_signature = signature
 	_avatar_glow_sources = next_sources
 	_invalidate_lighting()
+
+
+func _can_access_monetization_item(item_id: String) -> bool:
+	# Dedicated-server projects intentionally omit client store autoloads. Resolve
+	# the optional singleton dynamically so this shared script also parses there.
+	var monetization := get_node_or_null("/root/Monetization")
+	if monetization == null or not monetization.has_method("can_access_item"):
+		return false
+	return bool(monetization.call("can_access_item", item_id))
 
 
 func _append_avatar_glow_source(
