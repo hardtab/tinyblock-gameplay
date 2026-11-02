@@ -211,7 +211,16 @@ func active_guest_player_ids() -> Array[String]:
 
 
 func guest_peer_ids() -> Array[String]:
-	return active_guest_player_ids()
+	"""Return known guests for any host session, for queue liveness checks."""
+	var guest_ids: Array[String] = []
+	if role != "host":
+		return guest_ids
+	for raw_id in _known_players:
+		var guest_id := str(raw_id)
+		if not guest_id.is_empty() and str(_known_players[raw_id]) == "guest":
+			guest_ids.append(guest_id)
+	guest_ids.sort()
+	return guest_ids
 
 
 func is_dedicated_server_session() -> bool:
