@@ -181,8 +181,8 @@ const WEATHER_SKY_SCAN_HEIGHT := 128
 const GRANULAR_TICK_EVERY := 4
 const FIRE_TICK_EVERY := 12
 const FIRE_BURN_STEPS := 24
-const TNT_FUSE_STEPS := 4
-const TNT_CHAIN_FUSE_STEPS := 2
+const TNT_FUSE_STEPS := 17
+const TNT_CHAIN_FUSE_STEPS := 3
 const TNT_EXPLOSION_RADIUS := 4
 const TNT_EXPLOSION_MAX_PLAYER_DAMAGE := 3
 const DEFAULT_FIRE_COLOR := "#ff6b24"
@@ -6968,7 +6968,7 @@ func explosive_effects_for_block(block: Dictionary) -> Dictionary:
 			return {
 				"blast_shape": "circle", "blast_radius_blocks": TNT_EXPLOSION_RADIUS,
 				"gravity_mode": "static",
-				"blast_size": "medium", "fuse_seconds": 0.8, "fuse_randomness": 0.0,
+				"blast_size": "medium", "fuse_seconds": 3.4, "fuse_randomness": 0.0,
 				"blast_randomness": 0.0, "leaves_fire": false, "fire_chance": 0.0,
 				"fire_color": DEFAULT_FIRE_COLOR, "sound_variant": "classic",
 			}
@@ -6993,7 +6993,7 @@ func explosive_effects_for_block(block: Dictionary) -> Dictionary:
 		"gravity_mode": gravity_mode,
 		"blast_radius_blocks": clampi(int(explosive.get("blast_radius_blocks", TNT_EXPLOSION_RADIUS)), 1, 8),
 		"blast_size": size,
-		"fuse_seconds": clampf(float(explosive.get("fuse_seconds", 0.8)), 0.3, 8.0),
+		"fuse_seconds": clampf(float(explosive.get("fuse_seconds", 3.4)), 0.1, 8.0),
 		"fuse_randomness": clampf(float(explosive.get("fuse_randomness", 0.0)), 0.0, 1.0),
 		"blast_randomness": clampf(float(explosive.get("blast_randomness", 0.0)), 0.0, 1.0),
 		"leaves_fire": bool(explosive.get("leaves_fire", false)),
@@ -7112,7 +7112,7 @@ func _start_tnt_fuse(pos: Vector2i, fuse_steps: int = TNT_FUSE_STEPS) -> bool:
 		return false
 	var steps := fuse_steps
 	if fuse_steps == TNT_FUSE_STEPS:
-		var seconds := float(profile.get("fuse_seconds", 0.8))
+		var seconds := float(profile.get("fuse_seconds", 3.4))
 		var random_scale := float(profile.get("fuse_randomness", 0.0))
 		seconds *= randf_range(1.0 - random_scale, 1.0 + random_scale)
 		steps = maxi(1, ceili(seconds / (float(FIRE_TICK_EVERY) / 60.0)))
