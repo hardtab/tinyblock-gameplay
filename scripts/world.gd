@@ -7312,6 +7312,7 @@ func _explode_tnt(center: Vector2i, profile: Dictionary = {}) -> Array[Vector2i]
 			remote_damage[player_id] = damage
 	if not remote_damage.is_empty():
 		remote_players_damaged_by_explosion.emit(remote_damage)
+	_damage_creatures_from_explosion(blast_center, resolved_profile)
 	# Let the host apply all remote health changes before local defeat handling.
 	# This keeps a single blast atomic when it downs both duel players.
 	if local_defeated:
@@ -7360,6 +7361,37 @@ func _tnt_player_damage(blast_center: Vector2, target: Dictionary, profile: Dict
 		return 0
 	var falloff := 1.0 - distance / radius
 	return clampi(ceili(float(TNT_EXPLOSION_MAX_PLAYER_DAMAGE) * falloff), 1, TNT_EXPLOSION_MAX_PLAYER_DAMAGE)
+
+
+func _damage_creatures_from_explosion(blast_center: Vector2, profile: Dictionary = {}) -> Array[String]:
+	var damaged_ids: Array[String] = []
+	var creature_ids: Array = creatures.keys()
+	for raw_id in creature_ids:
+		var creature_id := str(raw_id)
+		if not creatures.has(creature_id):
+			continue
+		var creature: Dictionary = creatures[creature_id]
+		if bool(creature.get("dead", false)) or int(creature.get("health", 0)) <= 0:
+			continue
+		var definition := _creature_definition(str(creature.get("block_name", "")))
+		if definition.is_empty():
+			continue
+		var stats: Dictionary = definition.get("stats", {}) if definition.get("stats", {}) is Dictionary else {}
+		var size := clampf(float(stats.get("size", 0.8)), 0.45, 1.4)
+		var half_width := size * float(BlockDefs.TILE) * 0.42
+		var half_height := size * float(BlockDefs.TILE) * 0.28
+		var creature_center := Vector2(float(creature.get("x", 0.0)), float(creature.get("y", 0.0))) * float(BlockDefs.TILE)
+		var target := {
+			"x": creature_center.x - half_width,
+			"y": creature_center.y - half_height,
+			"w": half_width * 2.0,
+			"h": half_height * 2.0,
+			"health": int(creature.get("health", 1)),
+		}
+		var damage := _tnt_player_damage(blast_center, target, profile)
+		if damage > 0 and hit_creature(creature_id, damage):
+			damaged_ids.append(creature_id)
+	return damaged_ids
 
 
 func _blast_offset_inside(x: int, y: int, radius: int, shape: String) -> bool:
