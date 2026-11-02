@@ -426,6 +426,7 @@ const CRYSTAL_GROVE_OUTCROP_CHANCE := 0.62
 const BUILTIN_STRUCTURE_CHANCE := 0.40
 const RAVINE_STRUCTURE_CHANCE := 0.18
 const CAVE_STRUCTURE_CHANCE := 0.52
+const MINESHAFT_TNT_CHANCE := 0.24
 const CAVE_STRUCTURE_CANDIDATES: Array[String] = [
 	"mineshaft", "lava_grotto", "amethyst_geode", "rose_crystal_grotto", "emerald_vault",
 	"crystal_bridge", "lantern_ruins", "miner_camp", "underground_shrine", "ore_gallery",
@@ -3656,6 +3657,7 @@ func _decorate_cave_structure(kind: String, site: Dictionary, chunk_x: int) -> v
 				for x in range(support_x - 1, support_x + 2):
 					_set_generated_block(x, top + 1, "planks")
 			_set_generated_block(center - 1, top + 2, "lantern")
+			_place_mineshaft_tnt(site, chunk_x)
 		"lava_grotto":
 			for x in range(center - 2, center + 3):
 				_set_generated_block(x, floor_y + 1, "obsidian")
@@ -3707,6 +3709,23 @@ func _decorate_cave_structure(kind: String, site: Dictionary, chunk_x: int) -> v
 			for pos in [Vector2i(center - 1, floor_y - 1), Vector2i(center, floor_y - 1), Vector2i(center + 1, floor_y - 1)]:
 				_set_generated_block(pos.x, pos.y, "moonstone_ore")
 			_set_generated_block(center, top + 1, "lantern")
+
+
+func _place_mineshaft_tnt(site: Dictionary, chunk_x: int) -> bool:
+	if _structure_random("mineshaft-tnt:%d" % chunk_x) >= MINESHAFT_TNT_CHANCE:
+		return false
+	var left := int(site.get("left", 0))
+	var floor_y := int(site.get("floor_y", 0))
+	# Keep the charge on the solid floor beside a timber support, away from the
+	# chamber lantern. The empty-cell guard prevents replacing structure details,
+	# chests, or any pre-existing world content.
+	var pos := Vector2i(left + 4, floor_y - 1)
+	if not in_bounds(pos.x, pos.y) or block_id(pos.x, pos.y) != 0:
+		return false
+	if not get_block(pos.x, pos.y + 1).get("solid", false):
+		return false
+	_set_generated_block(pos.x, pos.y, "tnt")
+	return block_id(pos.x, pos.y) == int(BlockDefs.BLOCKS.tnt.id)
 
 
 func _generate_cave_structure(chunk_x: int, force: bool = false) -> String:
