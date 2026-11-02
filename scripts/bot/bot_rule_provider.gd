@@ -12,7 +12,6 @@ const ROUTE_TILE := 32.0
 const TNT_EXPLOSION_RADIUS_TILES := 2.0
 const TNT_SELF_CLEARANCE_TILES := 3.0
 const TNT_IGNITION_RETRY_MSEC := 8_000
-const DUEL_SYSTEM_EXPLOSIVE_NAMES: Array[String] = ["tnt", "ember_charge", "shaped_charge"]
 
 var _rng := RandomNumberGenerator.new()
 var _duel_block_defs: Node
@@ -4303,28 +4302,54 @@ func _duel_explosive_action(observation: Dictionary, legal: PackedStringArray) -
 
 
 func _duel_explosive_inventory_item(inventory: Dictionary) -> String:
-	for name in DUEL_SYSTEM_EXPLOSIVE_NAMES:
-		if int(inventory.get(name, 0)) > 0:
-			return name
+	var definitions := _duel_block_definitions()
+	for raw_name in inventory.keys():
+		if int(inventory.get(raw_name, 0)) <= 0:
+			continue
+		var name := _duel_normalize_block_name(str(raw_name))
+		var entry: Dictionary = definitions.get(name, {})
+		if bool(entry.get("item", false)) or _duel_explosive_profile(name).is_empty():
+			continue
+		return name
 	return ""
 
 
 func _duel_incendiary_inventory_item(inventory: Dictionary) -> String:
 	for raw_name in inventory.keys():
-		var name := str(raw_name).to_lower().trim_prefix("core.")
+		var name := _duel_normalize_block_name(str(raw_name))
 		if int(inventory.get(raw_name, 0)) <= 0:
 			continue
 		var item: Dictionary = _duel_block_definitions().get(name, {})
 		var definition: Dictionary = item.get("definition", {}) if item.get("definition", {}) is Dictionary else {}
-		if bool(item.get("item", false)) and str(definition.get("category", "")) == "incendiary":
+		var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+		var incendiary: Dictionary = effects.get("incendiary", {}) if effects.get("incendiary", {}) is Dictionary else {}
+		if bool(item.get("item", false)) and str(definition.get("category", "")) == "incendiary" and not incendiary.is_empty():
 			return name
 	return ""
 
 
 func _duel_normalize_block_name(block_name: String) -> String:
-	var normalized := block_name.to_lower().trim_prefix("core.")
+	var raw_name := block_name.to_lower().strip_edges()
+	var definitions := _duel_block_definitions()
+	if definitions.has(raw_name):
+		return raw_name
+	var block_defs := _duel_block_defs
+	var main_loop := Engine.get_main_loop()
+	if main_loop is SceneTree:
+		var root_defs: Node = (main_loop as SceneTree).root.get_node_or_null("BlockDefs")
+		if root_defs != null and root_defs.has_method("name_for_content_id"):
+			var resolved := str(root_defs.call("name_for_content_id", raw_name))
+			if not resolved.is_empty() and definitions.has(resolved):
+				return resolved
+	if block_defs != null and block_defs.has_method("name_for_content_id"):
+		var fallback_resolved := str(block_defs.call("name_for_content_id", raw_name))
+		if not fallback_resolved.is_empty() and definitions.has(fallback_resolved):
+			return fallback_resolved
+	var normalized := raw_name.trim_prefix("core.")
 	if normalized.begins_with("explosive."):
 		normalized = normalized.trim_prefix("explosive.")
+	elif normalized.begins_with("item."):
+		normalized = normalized.trim_prefix("item.")
 	return normalized
 
 
@@ -4337,6 +4362,15 @@ func _duel_block_definitions() -> Dictionary:
 	if _duel_block_defs == null:
 		_duel_block_defs = BlockDefsClass.new()
 	return _duel_block_defs.BLOCKS
+
+
+func _duel_explosive_profile(block_name: String) -> Dictionary:
+	var normalized := _duel_normalize_block_name(block_name)
+	var block: Dictionary = _duel_block_definitions().get(normalized, {})
+	var definition: Dictionary = block.get("definition", {}) if block.get("definition", {}) is Dictionary else {}
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	var profile: Dictionary = effects.get("explosive", {}) if effects.get("explosive", {}) is Dictionary else {}
+	return profile
 
 
 func _duel_explosion_contains_tile(origin_x: int, origin_y: int, target_x: int, target_y: int, shape: String, radius: int) -> bool:

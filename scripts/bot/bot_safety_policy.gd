@@ -282,13 +282,16 @@ func _duel_tnt_target_safety_reason(target: Dictionary, observation: Dictionary,
 		return "tnt_duel_only"
 	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
 	if require_existing_tnt:
-		var incendiary_name := ignition_item.to_lower().trim_prefix("core.") if not ignition_item.is_empty() else LIGHTER_ITEM_NAME
+		var incendiary_name := _duel_normalize_block_name(ignition_item) if not ignition_item.is_empty() else LIGHTER_ITEM_NAME
 		var incendiary: Dictionary = _duel_block_definitions().get(incendiary_name, {})
 		var incendiary_definition: Dictionary = incendiary.get("definition", {}) if incendiary.get("definition", {}) is Dictionary else {}
-		if int(inventory.get(incendiary_name, 0)) <= 0 or (incendiary_name != LIGHTER_ITEM_NAME and str(incendiary_definition.get("category", "")) != "incendiary"):
+		var incendiary_effects: Dictionary = incendiary_definition.get("effects", {}) if incendiary_definition.get("effects", {}) is Dictionary else {}
+		var incendiary_profile: Dictionary = incendiary_effects.get("incendiary", {}) if incendiary_effects.get("incendiary", {}) is Dictionary else {}
+		if _duel_inventory_count(inventory, incendiary_name) <= 0 or not bool(incendiary.get("item", false)) or str(incendiary_definition.get("category", "")) != "incendiary" or incendiary_profile.is_empty():
 			return "tnt_lighter_missing"
 	else:
-		if int(inventory.get(explosive_name, 0)) <= 0:
+		explosive_name = _duel_normalize_block_name(explosive_name)
+		if _duel_inventory_count(inventory, explosive_name) <= 0:
 			return "tnt_inventory_missing"
 		if _duel_explosive_profile(explosive_name).is_empty():
 			return "tnt_explosive_unknown"
@@ -355,10 +358,36 @@ func _duel_explosive_profile(block_name: String) -> Dictionary:
 	return profile
 
 
+func _duel_inventory_count(inventory: Dictionary, block_name: String) -> int:
+	var normalized := _duel_normalize_block_name(block_name)
+	var total := 0
+	for raw_name in inventory.keys():
+		if _duel_normalize_block_name(str(raw_name)) == normalized:
+			total += maxi(0, int(inventory.get(raw_name, 0)))
+	return total
+
+
 func _duel_normalize_block_name(block_name: String) -> String:
-	var normalized := block_name.to_lower().trim_prefix("core.")
+	var raw_name := block_name.to_lower().strip_edges()
+	var definitions := _duel_block_definitions()
+	if definitions.has(raw_name):
+		return raw_name
+	var main_loop := Engine.get_main_loop()
+	if main_loop is SceneTree:
+		var root_defs: Node = (main_loop as SceneTree).root.get_node_or_null("BlockDefs")
+		if root_defs != null and root_defs.has_method("name_for_content_id"):
+			var resolved := str(root_defs.call("name_for_content_id", raw_name))
+			if not resolved.is_empty() and definitions.has(resolved):
+				return resolved
+	if _duel_block_defs != null and _duel_block_defs.has_method("name_for_content_id"):
+		var fallback_resolved := str(_duel_block_defs.call("name_for_content_id", raw_name))
+		if not fallback_resolved.is_empty() and definitions.has(fallback_resolved):
+			return fallback_resolved
+	var normalized := raw_name.trim_prefix("core.")
 	if normalized.begins_with("explosive."):
 		normalized = normalized.trim_prefix("explosive.")
+	elif normalized.begins_with("item."):
+		normalized = normalized.trim_prefix("item.")
 	return normalized
 
 
