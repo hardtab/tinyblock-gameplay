@@ -509,7 +509,7 @@ var BLOCKS := {
 	"ember_flask": {
 		"id": 75, "content_id": "core.item.ember_flask", "solid": false, "fluid": false, "item": true, "hardness": 1,
 		"base": "#58251b", "light": "#ff8a38", "dark": "#301a18",
-		"definition": {"content_id": "core.item.ember_flask", "kind": "item", "schema_version": "1.3", "display": {"name": {"en": "Ember Flask"}, "description": {"en": "A one-use incendiary flask that can scatter warm fire across a small area."}}, "visual": {"shape": "bottle", "pattern": "bubbles", "palette": ["#58251b", "#ff8a38", "#301a18", "#ffd17a"]}, "category": "incendiary", "rarity": "uncommon", "effects": {"incendiary": {"ignition_radius_blocks": 3, "ignition_chance": 0.58, "fire_color": "#ff542e", "sound_variant": "crackle"}}, "durability": {"max_uses": 1}, "tags": ["item", "tool", "fire", "crafted"], "mechanics": ["hotbar_active", "ignite"]},
+		"definition": {"content_id": "core.item.ember_flask", "kind": "item", "schema_version": "1.3", "display": {"name": {"en": "Ember Flask"}, "description": {"en": "A one-use incendiary flask that can scatter warm fire across a small area."}}, "visual": {"shape": "flask", "pattern": "bubbles", "palette": ["#58251b", "#ff8a38", "#301a18", "#ffd17a"]}, "category": "incendiary", "rarity": "uncommon", "effects": {"incendiary": {"ignition_radius_blocks": 3, "ignition_chance": 0.58, "fire_color": "#ff542e", "sound_variant": "crackle"}}, "durability": {"max_uses": 1}, "tags": ["item", "tool", "fire", "crafted"], "mechanics": ["hotbar_active", "ignite"]},
 	},
 	"prism_lighter": {
 		"id": 76, "content_id": "core.item.prism_lighter", "solid": false, "fluid": false, "item": true, "hardness": 1,
@@ -1349,6 +1349,82 @@ func _draw_generated(canvas: CanvasItem, tx: int, ty: int, x: float, y: float, w
 				var grain_y := 3.0 + floorf(hash2(seed + tx + 7, ty + i * 13) * 24.0)
 				var grain_color := light if i % 4 == 0 else (dark if i % 3 == 0 else mid)
 				_draw_safe(canvas, x, y, sx, sy, grain_x, grain_y, 3.0 + float(i % 2), 2.0, grain_color, 1.0)
+	var definition: Dictionary = block.get("definition", {}) if block.get("definition", {}) is Dictionary else {}
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	var visual: Dictionary = definition.get("visual", {}) if definition.get("visual", {}) is Dictionary else {}
+	if effects.has("explosive"):
+		_draw_explosive_style(canvas, x, y, sx, sy, visual, block, modulate)
+
+
+func _draw_explosive_style(canvas: CanvasItem, x: float, y: float, sx: float, sy: float, visual: Dictionary, block: Dictionary, modulate: Color) -> void:
+	# Existing generated blocks without this opt-in field deliberately keep their
+	# old artwork. New Discover results carry an explicit style from the backend.
+	var style := str(visual.get("explosive_style", ""))
+	if style not in ["charge", "ember_core", "shaped_core"]:
+		return
+	var mid := _c(block, "mid") * modulate
+	var dark := _c(block, "dark") * modulate
+	var light := _c(block, "light") * modulate
+	var base := _c(block, "base") * modulate
+	var seed := int(block.get("visual_seed", 1))
+	if style == "charge":
+		# Wrapped casing, metal clips and a fuse make the default charge read as
+		# a crafted explosive even when its underlying material is unusual.
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 3, 4, 26, 24), Color(dark, 0.76 * modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 5, 3, 22, 25), Color(base, 0.9 * modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 7, 3, 3, 26), Color(dark, 0.66 * modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 22, 3, 3, 26), Color(dark, 0.66 * modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 8, 5, 1, 21), Color(light, 0.52 * modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 23, 5, 1, 21), Color(light, 0.52 * modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 12, 0, 8, 5), mid)
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 14, 1, 4, 3), light)
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 11, 11, 10, 10), dark)
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 12, 12, 8, 8), mid)
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 14, 13, 4, 2), light)
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 13, 15, 6, 2), base)
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 14, 17, 4, 2), light)
+		for clip: Vector2i in [Vector2i(4, 5), Vector2i(24, 5), Vector2i(4, 23), Vector2i(24, 23)]:
+			canvas.draw_rect(_tile_rect(x, y, sx, sy, clip.x, clip.y, 3, 3), mid)
+			canvas.draw_rect(_tile_rect(x, y, sx, sy, clip.x + 1, clip.y + 1, 1, 1), light)
+	elif style == "ember_core":
+		# Nested, angular magma facets resemble a bright core sealed in stone.
+		var core := PackedVector2Array([
+			Vector2(x + 16.0 * sx, y + 5.0 * sy), Vector2(x + 27.0 * sx, y + 16.0 * sy),
+			Vector2(x + 16.0 * sx, y + 27.0 * sy), Vector2(x + 5.0 * sx, y + 16.0 * sy),
+		])
+		canvas.draw_colored_polygon(core, Color(dark, 0.94 * modulate.a))
+		var outer := PackedVector2Array([
+			Vector2(x + 16.0 * sx, y + 7.0 * sy), Vector2(x + 25.0 * sx, y + 16.0 * sy),
+			Vector2(x + 16.0 * sx, y + 25.0 * sy), Vector2(x + 7.0 * sx, y + 16.0 * sy),
+		])
+		canvas.draw_colored_polygon(outer, Color(mid, 0.96 * modulate.a))
+		var inner := PackedVector2Array([
+			Vector2(x + 16.0 * sx, y + 9.0 * sy), Vector2(x + 22.0 * sx, y + 16.0 * sy),
+			Vector2(x + 16.0 * sx, y + 23.0 * sy), Vector2(x + 10.0 * sx, y + 16.0 * sy),
+		])
+		canvas.draw_colored_polygon(inner, Color(light, 0.96 * modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 14, 12, 4, 8), Color(base.lightened(0.16), modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 15, 14, 2, 4), Color(light.lightened(0.3), modulate.a))
+		for i in 4:
+			var spark_x := 4.0 + floorf(hash2(seed + i * 29, seed + 17) * 24.0)
+			var spark_y := 4.0 + floorf(hash2(seed + 31, seed + i * 37) * 24.0)
+			canvas.draw_rect(_tile_rect(x, y, sx, sy, spark_x, spark_y, 2, 2), Color(light, 0.82 * modulate.a))
+	else:
+		# The shaped core has four corner facets and a clean directional cross.
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 4, 4, 24, 24), Color(dark, 0.84 * modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 6, 6, 20, 20), Color(mid, 0.92 * modulate.a))
+		for point: Vector2i in [Vector2i(7, 7), Vector2i(22, 7), Vector2i(7, 22), Vector2i(22, 22)]:
+			var facet := PackedVector2Array([
+				Vector2(x + float(point.x) * sx, y + float(point.y) * sy),
+				Vector2(x + float(point.x + 4) * sx, y + float(point.y) * sy),
+				Vector2(x + float(point.x) * sx, y + float(point.y + 4) * sy),
+			])
+			canvas.draw_colored_polygon(facet, Color(light, 0.88 * modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 13, 7, 6, 18), Color(dark, modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 7, 13, 18, 6), Color(dark, modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 14, 8, 4, 16), Color(light, modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 8, 14, 16, 4), Color(light, modulate.a))
+		canvas.draw_rect(_tile_rect(x, y, sx, sy, 14, 14, 4, 4), Color(light.lightened(0.3), modulate.a))
 
 
 func _draw_fluid(
@@ -2049,6 +2125,116 @@ func draw_creature(canvas: CanvasItem, dest: Rect2, definition: Dictionary, faci
 		canvas.draw_rect(Rect2(eye - Vector2.ONE * maxf(1.0, dest.size.x * 0.035), Vector2.ONE * maxf(2.0, dest.size.x * 0.07)), eye_color)
 
 
+func _item_rect(canvas: CanvasItem, center: Vector2, scale: float, x: float, y: float, width: float, height: float, color: Color) -> void:
+	var origin := center + Vector2(roundf(x * scale), roundf(y * scale))
+	var size := Vector2(maxf(1.0, roundf(width * scale)), maxf(1.0, roundf(height * scale)))
+	canvas.draw_rect(Rect2(origin, size), color)
+
+
+func _item_polygon(canvas: CanvasItem, center: Vector2, scale: float, points: Array[Vector2], color: Color) -> void:
+	var scaled_points := PackedVector2Array()
+	for point in points:
+		scaled_points.append(center + point * scale)
+	canvas.draw_colored_polygon(scaled_points, color)
+
+
+func _draw_incendiary_item(canvas: CanvasItem, dest: Rect2, definition: Dictionary, visual: Dictionary, shape: String, palette: Array, scale: float) -> void:
+	var center := dest.get_center()
+	var body := Color(str(palette[0])) if palette.size() > 0 and Color.html_is_valid(str(palette[0])) else Color("#5b4630")
+	var accent := Color(str(palette[1])) if palette.size() > 1 and Color.html_is_valid(str(palette[1])) else Color("#d7b45a")
+	var detail := Color(str(palette[2])) if palette.size() > 2 and Color.html_is_valid(str(palette[2])) else accent.lightened(0.22)
+	var glint := Color(str(palette[3])) if palette.size() > 3 and Color.html_is_valid(str(palette[3])) else accent.lightened(0.46)
+	var outline := body.darkened(0.55)
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	var incendiary: Dictionary = effects.get("incendiary", {}) if effects.get("incendiary", {}) is Dictionary else {}
+	var flame := Color(str(incendiary.get("fire_color", ""))) if Color.html_is_valid(str(incendiary.get("fire_color", ""))) else detail
+	var pattern := str(visual.get("pattern", "plain"))
+	var seed := int(str(definition.get("content_id", "incendiary")).hash())
+
+	match shape:
+		"flask":
+			# A corked, shouldered bottle with a contained luminous liquid core.
+			_item_rect(canvas, center, scale, -4, -14, 8, 4, outline)
+			_item_rect(canvas, center, scale, -3, -13, 6, 3, detail)
+			_item_rect(canvas, center, scale, -3, -10, 6, 5, outline)
+			_item_rect(canvas, center, scale, -5, -7, 10, 3, outline)
+			_item_rect(canvas, center, scale, -8, -4, 16, 13, outline)
+			_item_rect(canvas, center, scale, -7, -4, 14, 12, body)
+			_item_rect(canvas, center, scale, -6, -2, 12, 8, accent.darkened(0.12))
+			_item_rect(canvas, center, scale, -6, 3, 12, 4, flame.darkened(0.08))
+			_item_rect(canvas, center, scale, -5, 3, 4, 3, flame.lightened(0.18))
+			_item_rect(canvas, center, scale, -6, 8, 12, 2, detail)
+			_item_rect(canvas, center, scale, -5, -3, 2, 8, glint)
+			_item_rect(canvas, center, scale, 3, -2, 2, 7, body.darkened(0.12))
+			_item_rect(canvas, center, scale, -4, -6, 8, 2, accent)
+		"torch":
+			# A stepped flame sits above a banded wooden shaft.
+			_item_rect(canvas, center, scale, -3, -1, 6, 14, outline)
+			_item_rect(canvas, center, scale, -2, 0, 4, 12, body)
+			_item_rect(canvas, center, scale, -2, 3, 2, 7, accent.darkened(0.08))
+			_item_rect(canvas, center, scale, -4, 7, 8, 2, detail)
+			_item_rect(canvas, center, scale, -4, 0, 8, 2, detail)
+			_item_polygon(canvas, center, scale, [Vector2(0, -14), Vector2(5, -7), Vector2(4, -2), Vector2(-4, -2), Vector2(-5, -7)], outline)
+			_item_polygon(canvas, center, scale, [Vector2(0, -12), Vector2(3, -7), Vector2(2, -3), Vector2(-2, -3), Vector2(-3, -7)], flame)
+			_item_rect(canvas, center, scale, -1, -9, 2, 4, glint)
+			_item_rect(canvas, center, scale, 1, -5, 2, 2, accent)
+		"lighter", _:
+			# Flint lighter: steel hood, dark enamel body and a small colored spark.
+			_item_rect(canvas, center, scale, -8, -5, 16, 15, outline)
+			_item_rect(canvas, center, scale, -7, -4, 14, 13, body)
+			_item_rect(canvas, center, scale, -5, -3, 2, 10, accent.lightened(0.12))
+			_item_rect(canvas, center, scale, 5, -2, 2, 10, body.darkened(0.18))
+			_item_rect(canvas, center, scale, -8, -10, 16, 6, outline)
+			_item_rect(canvas, center, scale, -7, -9, 14, 4, accent)
+			_item_rect(canvas, center, scale, -6, -10, 8, 1, glint)
+			_item_rect(canvas, center, scale, -8, -4, 16, 1, outline)
+			_item_rect(canvas, center, scale, -8, 8, 16, 3, body.darkened(0.22))
+			_item_rect(canvas, center, scale, -3, -12, 5, 3, detail)
+			_item_rect(canvas, center, scale, 1, -13, 3, 2, flame)
+			_item_rect(canvas, center, scale, 4, -15, 2, 2, glint)
+			_item_rect(canvas, center, scale, 5, -12, 2, 2, flame.lightened(0.18))
+
+	# Apply one cohesive, deterministic surface treatment to every incendiary
+	# silhouette. Coordinates stay on the item's face so the pattern never
+	# changes the pickup's bounds or clips into neighboring inventory cells.
+	match pattern:
+		"banded":
+			for band_y in [-1.0, 3.0]:
+				_item_rect(canvas, center, scale, -5, band_y, 10, 1.5, glint)
+		"inlaid":
+			var inset_center := Vector2(1, 1) if shape == "flask" else Vector2(0, 1)
+			_item_polygon(canvas, center + inset_center * scale, scale, [Vector2(0, -4), Vector2(4, 0), Vector2(0, 4), Vector2(-4, 0)], glint)
+			_item_rect(canvas, center, scale, -1, -1, 2, 3, flame)
+		"speckled":
+			for speck in 6:
+				var px := -5.0 + floorf(hash2(seed + speck * 17, seed + 11) * 11.0)
+				var py := -3.0 + floorf(hash2(seed + 7, seed + speck * 23) * 10.0)
+				_item_rect(canvas, center, scale, px, py, 1.5, 1.5, glint if speck % 2 == 0 else detail)
+		"glowing":
+			for offset: Vector2 in [Vector2(-9, -8), Vector2(9, -5), Vector2(8, 7)]:
+				var sparkle := center + offset * scale
+				_item_rect(canvas, sparkle, scale, -1, -3, 2, 6, Color(glint, 0.9))
+				_item_rect(canvas, sparkle, scale, -3, -1, 6, 2, Color(glint, 0.9))
+		"metal":
+			_item_rect(canvas, center, scale, -7, 5, 14, 1, Color(outline, 0.8))
+			for rivet: Vector2 in [Vector2(-5, -1), Vector2(5, 4)]:
+				_item_rect(canvas, center, scale, rivet.x, rivet.y, 2, 2, glint)
+				_item_rect(canvas, center, scale, rivet.x, rivet.y + 1, 1, 1, accent.darkened(0.2))
+		"crystals":
+			var facet_x := 4.0 if int(seed % 2) == 0 else -4.0
+			_item_polygon(canvas, center, scale, [Vector2(facet_x, -4), Vector2(facet_x + 3, -1), Vector2(facet_x, 3), Vector2(facet_x - 2, 0)], glint)
+			_item_polygon(canvas, center, scale, [Vector2(facet_x, -4), Vector2(facet_x + 3, -1), Vector2(facet_x, 0)], accent.lightened(0.2))
+			_item_rect(canvas, center, scale, facet_x - 1, -1, 1, 3, flame)
+		"bubbles":
+			for bubble in 3:
+				var bx := -3.0 + floorf(hash2(seed + bubble * 31, seed + 5) * 7.0)
+				var by := -1.0 + float(bubble) * 3.0
+				var bubble_radius := maxf(1.1, (1.5 + float(bubble % 2) * 0.45) * scale)
+				var bubble_center := center + Vector2(bx, by) * scale
+				canvas.draw_circle(bubble_center, bubble_radius, Color(glint, 0.54))
+				canvas.draw_arc(bubble_center, bubble_radius, PI * 1.05, PI * 1.85, 8, Color(Color.WHITE, 0.86), maxf(1.0, scale))
+
+
 func draw_item(canvas: CanvasItem, dest: Rect2, definition: Dictionary) -> void:
 	var visual: Dictionary = definition.get("visual", {}) if definition.get("visual", {}) is Dictionary else {}
 	var palette: Array = visual.get("palette", []) if visual.get("palette", []) is Array else []
@@ -2058,6 +2244,23 @@ func draw_item(canvas: CanvasItem, dest: Rect2, definition: Dictionary) -> void:
 	var shape := str(visual.get("shape", "pickaxe"))
 	var center := dest.get_center()
 	var scale := minf(dest.size.x, dest.size.y) / 32.0
+	if str(definition.get("category", "")) == "incendiary" and shape in ["lighter", "flask", "bottle", "torch"]:
+		_draw_incendiary_item(canvas, dest, definition, visual, "flask" if shape == "bottle" else shape, palette, scale)
+		var rarity := str(definition.get("rarity", "common"))
+		if rarity == "legendary":
+			var gold := Color("#ffd65c")
+			var badge_center := dest.position + dest.size * Vector2(0.78, 0.22)
+			var badge_radius := maxf(2.5, 3.2 * scale)
+			canvas.draw_colored_polygon(PackedVector2Array([
+				badge_center + Vector2(0, -badge_radius),
+				badge_center + Vector2(badge_radius * 0.72, 0),
+				badge_center + Vector2(0, badge_radius),
+				badge_center + Vector2(-badge_radius * 0.72, 0),
+			]), Color(gold, 0.95))
+			var ray := badge_radius * 1.55
+			canvas.draw_line(badge_center - Vector2(ray, 0), badge_center + Vector2(ray, 0), Color(gold.lightened(0.2), 0.68), maxf(1.0, 0.7 * scale))
+			canvas.draw_line(badge_center - Vector2(0, ray), badge_center + Vector2(0, ray), Color(gold.lightened(0.2), 0.68), maxf(1.0, 0.7 * scale))
+		return
 	if shape == "boots":
 		for side in [-1.0, 1.0]:
 			canvas.draw_rect(Rect2(center + Vector2(side * 2.0 - 6.0, -10.0) * scale, Vector2(7.0, 14.0) * scale), handle)
