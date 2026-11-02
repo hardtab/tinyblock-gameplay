@@ -843,12 +843,15 @@ func _duel_chest_contents(rng: RandomNumberGenerator, include_explosives: bool =
 		"cobblestone": rng.randi_range(32, 40),
 		"prepared_meal": rng.randi_range(1, 3),
 	}
-	# TNT and a reusable lighter are a supported-client Duel feature. Callers
-	# must opt in only after the joining peer advertises the capability; keeping
-	# the default off preserves compatibility with older clients that cannot
-	# interpret these item IDs.
+	# System explosives and a reusable lighter are a supported-client Duel
+	# feature. Callers must opt in only after the joining peer advertises the
+	# capability; the default-off path preserves the legacy chest loadout.
 	if include_explosives:
-		contents["tnt"] = 1
+		var explosive_names: Array[String] = ["tnt", "ember_charge", "shaped_charge"]
+		_shuffle_with_rng(explosive_names, rng)
+		var explosive_type_count := rng.randi_range(1, explosive_names.size())
+		for index in explosive_type_count:
+			contents[explosive_names[index]] = 1
 		contents["lighter"] = 1
 	return contents
 

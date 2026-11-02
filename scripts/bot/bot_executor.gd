@@ -177,6 +177,9 @@ func _send_network_action(action: String, decision: Dictionary) -> bool:
 		Contract.ACTION_IGNITE_TNT:
 			command = "ignite_with_lighter"
 			payload = _tile_payload(decision)
+			var ignition_item := str(decision.get("item_name", ""))
+			if not ignition_item.is_empty():
+				payload["item_name"] = ignition_item
 		Contract.ACTION_ATTACK_CREATURE:
 			command = "attack_creature"
 			payload = {"creature_id": str(decision.get("target_id", ""))}

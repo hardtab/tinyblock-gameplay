@@ -5,6 +5,8 @@ const Contract = preload("res://gameplay/scripts/bot/bot_contract.gd")
 const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 const BuildPlanner = preload("res://gameplay/scripts/bot/bot_build_planner.gd")
 const EmojiReactions = preload("res://gameplay/scripts/emoji_reactions.gd")
+const BlockDefsClass = preload("res://gameplay/scripts/block_defs.gd")
+const LIGHTER_ITEM_NAME := "lighter"
 
 const DEFAULT_RETALIATION_WINDOW_MSEC := 10_000
 const DEFAULT_MAX_RETALIATIONS := 1
@@ -13,6 +15,7 @@ const LOW_HEALTH_RATIO := 0.6
 var retaliation_window_msec := DEFAULT_RETALIATION_WINDOW_MSEC
 var max_retaliations := DEFAULT_MAX_RETALIATIONS
 var response_enabled := true
+var _duel_block_defs: Node
 var _attacker_player_id := ""
 var _attacker_seen_msec := -1
 var _retaliations_used := 0
@@ -166,7 +169,8 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 				return _rejected(decision, "container_target_not_reachable")
 		Contract.ACTION_IGNITE_TNT:
 			var ignite_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
-			var ignite_reason := _duel_tnt_target_safety_reason(ignite_target, observation, true)
+			var ignition_item := str(decision.get("item_name", ignite_target.get("item_name", "lighter")))
+			var ignite_reason := _duel_tnt_target_safety_reason(ignite_target, observation, true, str(ignite_target.get("block_name", "tnt")), ignition_item)
 			if not ignite_reason.is_empty():
 				return _rejected(decision, ignite_reason)
 		Contract.ACTION_MOVE_NEAR_PLAYER, Contract.ACTION_FOLLOW, Contract.ACTION_LOOK_AT:
@@ -184,9 +188,9 @@ func approve_decision(raw_decision: Variant, observation: Dictionary, now_msec: 
 			var block_name := str(decision.get("block", ""))
 			if block_name.is_empty() or not decision.has("target"):
 				return _rejected(decision, "place_target_missing")
-			if block_name == "tnt":
+			if not _duel_explosive_profile(block_name).is_empty():
 				var place_target: Dictionary = decision.get("target", {}) if decision.get("target", {}) is Dictionary else {}
-				var place_reason := _duel_tnt_target_safety_reason(place_target, observation, false)
+				var place_reason := _duel_tnt_target_safety_reason(place_target, observation, false, block_name)
 				if not place_reason.is_empty():
 					return _rejected(decision, place_reason)
 		Contract.ACTION_MOVE_TO:
@@ -273,14 +277,21 @@ func _bow_is_ready(observation: Dictionary) -> bool:
 	return int(inventory.get("arrow", 0)) > 0
 
 
-func _duel_tnt_target_safety_reason(target: Dictionary, observation: Dictionary, require_existing_tnt: bool) -> String:
+func _duel_tnt_target_safety_reason(target: Dictionary, observation: Dictionary, require_existing_tnt: bool, explosive_name: String = "tnt", ignition_item: String = "") -> String:
 	if not bool(observation.get("pvp_world", false)) or not bool(observation.get("duel_started", false)):
 		return "tnt_duel_only"
 	var inventory: Dictionary = observation.get("inventory_summary", {}) if observation.get("inventory_summary", {}) is Dictionary else {}
-	if int(inventory.get("lighter", 0)) <= 0:
-		return "tnt_lighter_missing"
-	if not require_existing_tnt and int(inventory.get("tnt", 0)) <= 0:
-		return "tnt_inventory_missing"
+	if require_existing_tnt:
+		var incendiary_name := ignition_item.to_lower().trim_prefix("core.") if not ignition_item.is_empty() else LIGHTER_ITEM_NAME
+		var incendiary: Dictionary = _duel_block_definitions().get(incendiary_name, {})
+		var incendiary_definition: Dictionary = incendiary.get("definition", {}) if incendiary.get("definition", {}) is Dictionary else {}
+		if int(inventory.get(incendiary_name, 0)) <= 0 or (incendiary_name != LIGHTER_ITEM_NAME and str(incendiary_definition.get("category", "")) != "incendiary"):
+			return "tnt_lighter_missing"
+	else:
+		if int(inventory.get(explosive_name, 0)) <= 0:
+			return "tnt_inventory_missing"
+		if _duel_explosive_profile(explosive_name).is_empty():
+			return "tnt_explosive_unknown"
 	if not target.has("x") or not target.has("y"):
 		return "tnt_target_missing"
 	var tx := int(target.get("x", 0))
@@ -291,9 +302,9 @@ func _duel_tnt_target_safety_reason(target: Dictionary, observation: Dictionary,
 		if not raw_tile is Dictionary:
 			continue
 		var tile := raw_tile as Dictionary
-		terrain_map["%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]] = str(tile.get("block_name", "")).to_lower().trim_prefix("core.")
+		terrain_map["%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]] = _duel_normalize_block_name(str(tile.get("block_name", "")))
 	if require_existing_tnt:
-		if str(terrain_map.get(tile_key, "")) != "tnt":
+		if str(terrain_map.get(tile_key, "")) != _duel_normalize_block_name(explosive_name) or _duel_explosive_profile(explosive_name).is_empty():
 			return "tnt_not_visible"
 	else:
 		var known_cells: Dictionary = observation.get("terrain_known_cells", {}) if observation.get("terrain_known_cells", {}) is Dictionary else {}
@@ -329,9 +340,47 @@ func _duel_tnt_target_safety_reason(target: Dictionary, observation: Dictionary,
 		floori((enemy_position.x + enemy_width * 0.5) / tile_size),
 		floori((enemy_position.y + enemy_height) / tile_size),
 	)
-	if target_center.distance_to((enemy_support + Vector2.ONE * 0.5) * tile_size) > tile_size * 2.0:
+	var explosive_profile := _duel_explosive_profile(explosive_name)
+	if not _duel_explosion_contains_tile(tx, ty, int(enemy_support.x), int(enemy_support.y), str(explosive_profile.get("blast_shape", "circle")), int(explosive_profile.get("blast_radius_blocks", 2))):
 		return "tnt_enemy_outside_blast_radius"
 	return ""
+
+
+func _duel_explosive_profile(block_name: String) -> Dictionary:
+	var normalized := _duel_normalize_block_name(block_name)
+	var block: Dictionary = _duel_block_definitions().get(normalized, {})
+	var definition: Dictionary = block.get("definition", {}) if block.get("definition", {}) is Dictionary else {}
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	var profile: Dictionary = effects.get("explosive", {}) if effects.get("explosive", {}) is Dictionary else {}
+	return profile
+
+
+func _duel_normalize_block_name(block_name: String) -> String:
+	var normalized := block_name.to_lower().trim_prefix("core.")
+	if normalized.begins_with("explosive."):
+		normalized = normalized.trim_prefix("explosive.")
+	return normalized
+
+
+func _duel_block_definitions() -> Dictionary:
+	var main_loop := Engine.get_main_loop()
+	if main_loop is SceneTree:
+		var block_defs: Node = (main_loop as SceneTree).root.get_node_or_null("BlockDefs")
+		if block_defs != null:
+			return block_defs.BLOCKS
+	if _duel_block_defs == null:
+		_duel_block_defs = BlockDefsClass.new()
+	return _duel_block_defs.BLOCKS
+
+
+func _duel_explosion_contains_tile(origin_x: int, origin_y: int, target_x: int, target_y: int, shape: String, radius: int) -> bool:
+	var dx := absi(target_x - origin_x)
+	var dy := absi(target_y - origin_y)
+	match shape:
+		"square": return dx <= radius and dy <= radius
+		"cross": return (dx == 0 or dy == 0) and maxi(dx, dy) <= radius
+		"diamond": return dx + dy <= radius
+		_: return Vector2(float(dx), float(dy)).length() <= float(radius)
 
 
 func _reachable_resource_exists(raw_targets: Variant, target_id: String) -> bool:

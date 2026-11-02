@@ -7,12 +7,15 @@ const BuildPlanner = preload("res://gameplay/scripts/bot/bot_build_planner.gd")
 const Perception = preload("res://gameplay/scripts/bot/bot_perception.gd")
 const RecipePlanner = preload("res://gameplay/scripts/bot/bot_recipe_planner.gd")
 const AchievementRegistry = preload("res://gameplay/scripts/bot/bot_achievement_registry.gd")
+const BlockDefsClass = preload("res://gameplay/scripts/block_defs.gd")
 const ROUTE_TILE := 32.0
 const TNT_EXPLOSION_RADIUS_TILES := 2.0
 const TNT_SELF_CLEARANCE_TILES := 3.0
 const TNT_IGNITION_RETRY_MSEC := 8_000
+const DUEL_SYSTEM_EXPLOSIVE_NAMES: Array[String] = ["tnt", "ember_charge", "shaped_charge"]
 
 var _rng := RandomNumberGenerator.new()
+var _duel_block_defs: Node
 var _last_build_msec := -1
 var _plant_step := 0
 var _last_plant_msec := -1
@@ -4200,7 +4203,8 @@ func _duel_explosive_action(observation: Dictionary, legal: PackedStringArray) -
 	if not bool(observation.get("pvp_world", false)) or not bool(observation.get("duel_started", false)):
 		return {}
 	var inventory := _inventory(observation)
-	if int(inventory.get("lighter", 0)) <= 0:
+	var ignition_item := _duel_incendiary_inventory_item(inventory)
+	if ignition_item.is_empty():
 		return {}
 	var enemy_id := str(observation.get("enemy_player_id", ""))
 	var enemy := _pvp_target(observation)
@@ -4213,7 +4217,7 @@ func _duel_explosive_action(observation: Dictionary, legal: PackedStringArray) -
 	var enemy_position := Contract.target_position(enemy)
 	var enemy_width := float(enemy.get("w", 20.0))
 	var enemy_height := float(enemy.get("h", 28.0))
-	var enemy_support := Vector2(
+	var enemy_support := Vector2i(
 		floori((enemy_position.x + enemy_width * 0.5) / ROUTE_TILE),
 		floori((enemy_position.y + enemy_height) / ROUTE_TILE),
 	)
@@ -4225,34 +4229,43 @@ func _duel_explosive_action(observation: Dictionary, legal: PackedStringArray) -
 		floori((self_position.x + self_width * 0.5) / ROUTE_TILE),
 		floori((self_position.y + self_height) / ROUTE_TILE),
 	)
-	var has_tnt := false
+	var has_explosive := false
 	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
 		if not raw_tile is Dictionary:
 			continue
 		var tile := raw_tile as Dictionary
-		if str(tile.get("block_name", "")).to_lower().trim_prefix("core.") != "tnt":
+		var block_name := _duel_normalize_block_name(str(tile.get("block_name", "")))
+		var block: Dictionary = _duel_block_definitions().get(block_name, {})
+		var definition: Dictionary = block.get("definition", {}) if block.get("definition", {}) is Dictionary else {}
+		var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+		var explosive: Dictionary = effects.get("explosive", {}) if effects.get("explosive", {}) is Dictionary else {}
+		if explosive.is_empty():
 			continue
-		has_tnt = true
+		has_explosive = true
 		var tx := int(tile.get("x", 0))
 		var ty := int(tile.get("y", 0))
 		var blast_center := Vector2((float(tx) + 0.5) * ROUTE_TILE, (float(ty) + 0.5) * ROUTE_TILE)
-		var enemy_support_center := (enemy_support + Vector2.ONE * 0.5) * ROUTE_TILE
+		var blast_radius := clampf(float(explosive.get("blast_radius_blocks", TNT_EXPLOSION_RADIUS_TILES)), 1.0, 8.0)
+		var enemy_tile := enemy_support
 		var safe_from_self := self_support.distance_to(Vector2(tx, ty)) > TNT_SELF_CLEARANCE_TILES
-		var in_enemy_blast_range := blast_center.distance_to(enemy_support_center) <= TNT_EXPLOSION_RADIUS_TILES * ROUTE_TILE
+		var in_enemy_blast_range := _duel_explosion_contains_tile(tx, ty, enemy_tile.x, enemy_tile.y, str(explosive.get("blast_shape", "circle")), int(blast_radius))
 		var in_ignite_reach := self_center.distance_to(blast_center) < 4.5 * ROUTE_TILE
 		if not safe_from_self or not in_enemy_blast_range or not in_ignite_reach:
 			continue
 		if Contract.ACTION_IGNITE_TNT not in legal or _duel_tnt_ignition_recent(observation):
 			return {}
 		var ignite_target := {
-			"id": "duel-tnt:%d:%d" % [tx, ty],
+			"id": "duel-explosive:%s:%d:%d" % [block_name, tx, ty],
 			"x": tx,
 			"y": ty,
-			"block_name": "tnt",
+			"block_name": block_name,
 			"position": [blast_center.x, blast_center.y],
 		}
-		return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_IGNITE_TNT, ignite_target, TNT_IGNITION_RETRY_MSEC, 0.97)
-	if has_tnt or int(inventory.get("tnt", 0)) <= 0 or bool(observation.get("placement_pending", false)) or Contract.ACTION_PLACE not in legal:
+		var ignition := _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_IGNITE_TNT, ignite_target, TNT_IGNITION_RETRY_MSEC, 0.97)
+		ignition["item_name"] = ignition_item
+		return ignition
+	var explosive_item := _duel_explosive_inventory_item(inventory)
+	if has_explosive or explosive_item.is_empty() or bool(observation.get("placement_pending", false)) or Contract.ACTION_PLACE not in legal:
 		return {}
 	var body_tile := Vector2i(
 		floori((enemy_position.x + enemy_width * 0.5) / ROUTE_TILE),
@@ -4269,20 +4282,71 @@ func _duel_explosive_action(observation: Dictionary, legal: PackedStringArray) -
 	if int(blocked_targets.get("tile:%s" % tnt_key, 0)) > int(observation.get("observed_at_msec", 0)):
 		return {}
 	var blast_center := Vector2((float(tnt_x) + 0.5) * ROUTE_TILE, (float(tnt_y) + 0.5) * ROUTE_TILE)
-	var enemy_support_center := (enemy_support + Vector2.ONE * 0.5) * ROUTE_TILE
 	if self_center.distance_to(blast_center) >= 4.5 * ROUTE_TILE:
 		return {}
 	if self_support.distance_to(Vector2(tnt_x, tnt_y)) <= TNT_SELF_CLEARANCE_TILES:
 		return {}
-	if blast_center.distance_to(enemy_support_center) > TNT_EXPLOSION_RADIUS_TILES * ROUTE_TILE:
+	var block: Dictionary = _duel_block_definitions().get(explosive_item, {})
+	var definition: Dictionary = block.get("definition", {}) if block.get("definition", {}) is Dictionary else {}
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	var explosive: Dictionary = effects.get("explosive", {}) if effects.get("explosive", {}) is Dictionary else {}
+	if not _duel_explosion_contains_tile(tnt_x, tnt_y, enemy_support.x, enemy_support.y, str(explosive.get("blast_shape", "circle")), int(explosive.get("blast_radius_blocks", TNT_EXPLOSION_RADIUS_TILES))):
 		return {}
 	var tnt_target := {
-		"id": "duel-tnt:%d:%d" % [tnt_x, tnt_y],
+		"id": "duel-explosive:%s:%d:%d" % [explosive_item, tnt_x, tnt_y],
 		"x": tnt_x,
 		"y": tnt_y,
 		"position": [blast_center.x, blast_center.y],
+		"block": explosive_item,
 	}
-	return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_PLACE, tnt_target, 900, 0.94).merged({"block": "tnt"}, true)
+	return _decision(Contract.GOAL_SELF_DEFENSE, Contract.ACTION_PLACE, tnt_target, 900, 0.94)
+
+
+func _duel_explosive_inventory_item(inventory: Dictionary) -> String:
+	for name in DUEL_SYSTEM_EXPLOSIVE_NAMES:
+		if int(inventory.get(name, 0)) > 0:
+			return name
+	return ""
+
+
+func _duel_incendiary_inventory_item(inventory: Dictionary) -> String:
+	for raw_name in inventory.keys():
+		var name := str(raw_name).to_lower().trim_prefix("core.")
+		if int(inventory.get(raw_name, 0)) <= 0:
+			continue
+		var item: Dictionary = _duel_block_definitions().get(name, {})
+		var definition: Dictionary = item.get("definition", {}) if item.get("definition", {}) is Dictionary else {}
+		if bool(item.get("item", false)) and str(definition.get("category", "")) == "incendiary":
+			return name
+	return ""
+
+
+func _duel_normalize_block_name(block_name: String) -> String:
+	var normalized := block_name.to_lower().trim_prefix("core.")
+	if normalized.begins_with("explosive."):
+		normalized = normalized.trim_prefix("explosive.")
+	return normalized
+
+
+func _duel_block_definitions() -> Dictionary:
+	var main_loop := Engine.get_main_loop()
+	if main_loop is SceneTree:
+		var block_defs: Node = (main_loop as SceneTree).root.get_node_or_null("BlockDefs")
+		if block_defs != null:
+			return block_defs.BLOCKS
+	if _duel_block_defs == null:
+		_duel_block_defs = BlockDefsClass.new()
+	return _duel_block_defs.BLOCKS
+
+
+func _duel_explosion_contains_tile(origin_x: int, origin_y: int, target_x: int, target_y: int, shape: String, radius: int) -> bool:
+	var dx := absi(target_x - origin_x)
+	var dy := absi(target_y - origin_y)
+	match shape:
+		"square": return dx <= radius and dy <= radius
+		"cross": return (dx == 0 or dy == 0) and maxi(dx, dy) <= radius
+		"diamond": return dx + dy <= radius
+		_: return Vector2(float(dx), float(dy)).length() <= float(radius)
 
 
 func _duel_tnt_ignition_recent(observation: Dictionary) -> bool:
