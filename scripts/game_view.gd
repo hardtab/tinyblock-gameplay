@@ -21,7 +21,7 @@ signal remote_player_hit_by_arrow(player_id: String, damage: int)
 # remote_player_hit_by_arrow signal above for older scene/test handlers, while
 # this signal carries the shooter identity needed by the host protocol.
 signal authoritative_player_hit_by_arrow(target_player_id: String, attacker_player_id: String, damage: int)
-signal tnt_explosion_visual_requested(position: Vector2i, event_id: String)
+signal tnt_explosion_visual_requested(position: Vector2i, event_id: String, profile: Dictionary)
 signal block_mined(block_name: String)
 signal block_placed(block_name: String)
 signal harvest_blocked(block_name: String, required_tier: int, active_tier: int)
@@ -276,10 +276,8 @@ func _bind_sim_signals() -> void:
 		sim.challenge_milestone_reached.connect(_on_challenge_milestone_reached)
 	if not sim.tideglass_bridge_cell_crystallized.is_connected(_on_tideglass_bridge_cell_crystallized):
 		sim.tideglass_bridge_cell_crystallized.connect(_on_tideglass_bridge_cell_crystallized)
-	if not sim.tnt_exploded.is_connected(_on_tnt_exploded):
-		sim.tnt_exploded.connect(_on_tnt_exploded)
-	if not sim.tnt_explosion_occurred.is_connected(_on_tnt_explosion_occurred):
-		sim.tnt_explosion_occurred.connect(_on_tnt_explosion_occurred)
+	if not sim.explosion_occurred.is_connected(_on_explosion_occurred):
+		sim.explosion_occurred.connect(_on_explosion_occurred)
 
 
 func _on_player_defeated() -> void:
@@ -301,37 +299,48 @@ func _on_tideglass_bridge_cell_crystallized(position: Vector2i, step_index: int,
 		_reaction_layer.queue_redraw()
 
 
-func _on_tnt_exploded(position: Vector2i) -> void:
-	Sfx.tnt_explosion()
-	_emit_world_sound_event("tnt_explosion", position)
+func _on_explosion_occurred(position: Vector2i, profile: Dictionary) -> void:
+	var resolved_profile := profile.duplicate(true)
+	if not resolved_profile.has("event_seed"):
+		resolved_profile["event_seed"] = randi()
+	Sfx.tnt_explosion(str(resolved_profile.get("sound_variant", "classic")))
+	var event_id := str(resolved_profile.get("event_id", "%d:%d:%d" % [position.x, position.y, Time.get_ticks_msec()]))
+	show_tnt_explosion(position, event_id, resolved_profile)
+	tnt_explosion_visual_requested.emit(position, event_id, resolved_profile)
 
 
-func _emit_world_sound_event(event_name: String, position: Vector2i) -> void:
+func _emit_world_sound_event(event_name: String, position: Vector2i, extra: Dictionary = {}) -> void:
 	if not MultiplayerClient.is_host():
 		return
-	multiplayer_action_requested.emit("world_action_event", {
+	var event := {
 		"sound": event_name,
 		"x": position.x,
 		"y": position.y,
-	})
+	}
+	event.merge(extra, true)
+	multiplayer_action_requested.emit("world_action_event", event)
 
 
 func _try_ignite_with_lighter(position: Vector2i) -> void:
+	var item_name := str(sim.selected)
+	var incendiary_profile: Dictionary = sim.incendiary_effects_for_item(item_name)
+	if incendiary_profile.is_empty():
+		return
 	if multiplayer_guest:
-		multiplayer_action_requested.emit("ignite_with_lighter", {"x": position.x, "y": position.y})
+		multiplayer_action_requested.emit("ignite_with_lighter", {"x": position.x, "y": position.y, "item_name": item_name})
 		return
-	if not sim.ignite_with_lighter(position.x, position.y):
+	if not sim.ignite_with_selected_incendiary(position.x, position.y):
 		return
-	Sfx.lighter_ignite()
-	_emit_world_sound_event("lighter_ignite", position)
+	var variant := str(incendiary_profile.get("sound_variant", "spark"))
+	Sfx.lighter_ignite(variant)
+	_emit_world_sound_event("lighter_ignite", position, {"sound_variant": variant})
 
 
 func _on_tnt_explosion_occurred(position: Vector2i, event_id: String) -> void:
 	show_tnt_explosion(position, event_id)
-	tnt_explosion_visual_requested.emit(position, event_id)
 
 
-func show_tnt_explosion(position: Vector2i, event_id: String) -> void:
+func show_tnt_explosion(position: Vector2i, event_id: String, profile: Dictionary = {}) -> void:
 	var resolved_id := event_id.strip_edges()
 	if resolved_id.is_empty():
 		resolved_id = "%d:%d:%d" % [position.x, position.y, Time.get_ticks_msec()]
@@ -344,6 +353,7 @@ func show_tnt_explosion(position: Vector2i, event_id: String) -> void:
 	_tnt_explosion_effects.append({
 		"position": position,
 		"event_id": resolved_id,
+		"profile": profile.duplicate(true),
 		"started_msec": Time.get_ticks_msec(),
 	})
 	while _tnt_explosion_effects.size() > 12:
@@ -802,7 +812,7 @@ func keyboard_mine_candidate() -> Vector2i:
 func keyboard_place_candidate() -> Vector2i:
 	if keyboard_mine_direction == Vector2i.ZERO:
 		return NO_TILE
-	if str(sim.selected) == "lighter":
+	if sim.is_incendiary_item(str(sim.selected)):
 		var player_center := Vector2(
 			float(sim.player["x"]) + float(sim.player["w"]) * 0.5,
 			float(sim.player["y"]) + float(sim.player["h"]) * 0.5,
@@ -839,7 +849,7 @@ func try_keyboard_place() -> void:
 		return
 	_last_place_msec = now
 	var placed_name := str(sim.selected)
-	if placed_name == "lighter":
+	if sim.is_incendiary_item(placed_name):
 		_try_ignite_with_lighter(tile)
 		return
 	if multiplayer_guest:
@@ -895,7 +905,7 @@ func try_place_at_screen(screen_pos: Vector2) -> void:
 	if sim.try_open_station_inventory(tile.x, tile.y):
 		return
 	var placed_name := str(sim.selected)
-	if placed_name == "lighter":
+	if sim.is_incendiary_item(placed_name):
 		_try_ignite_with_lighter(tile)
 		return
 	if multiplayer_guest:
@@ -2855,6 +2865,10 @@ func _draw_fire() -> void:
 		var origin := Vector2(float(pos.x * BlockDefs.TILE), float(pos.y * BlockDefs.TILE))
 		var sway := sin(float(anim_frame) * 0.22 + float(pos.x * 3 + pos.y)) * 2.0
 		var flame_base := origin + Vector2(16.0, 29.0)
+		var flame_color := sim.fire_color_for_tile(pos)
+		flame_color.a = 0.9
+		var flame_core := flame_color.lightened(0.55)
+		flame_core.a = 0.96
 		draw_colored_polygon(PackedVector2Array([
 			flame_base + Vector2(-11.0, 0.0),
 			flame_base + Vector2(-7.0 + sway, -18.0),
@@ -2862,13 +2876,15 @@ func _draw_fire() -> void:
 			flame_base + Vector2(3.0 + sway, -29.0),
 			flame_base + Vector2(9.0, -12.0),
 			flame_base + Vector2(11.0, 0.0),
-		]), Color(1.0, 0.24, 0.02, 0.88))
+		]), flame_color)
 		draw_colored_polygon(PackedVector2Array([
 			flame_base + Vector2(-6.0, 0.0),
 			flame_base + Vector2(-2.0 + sway * 0.5, -14.0),
 			flame_base + Vector2(2.0, -7.0),
 			flame_base + Vector2(6.0, 0.0),
-		]), Color(1.0, 0.82, 0.12, 0.95))
+		]), flame_core)
+
+
 func _draw_player() -> void:
 	var px: float = sim.player["x"]
 	var py: float = sim.player["y"]
@@ -3034,18 +3050,31 @@ func _draw_tnt_explosion_effects(canvas: Node2D) -> void:
 		)
 		var alpha := pow(1.0 - fade_progress, 0.9)
 		var tile := float(BlockDefs.TILE)
-		var blast_radius := float(WorldSim.TNT_EXPLOSION_RADIUS) * tile * 0.82
 		var pos := effect.get("position", Vector2i.ZERO) as Vector2i
 		var center := Vector2((float(pos.x) + 0.5) * tile, (float(pos.y) + 0.5) * tile)
+		var profile: Dictionary = effect.get("profile", {}) if effect.get("profile", {}) is Dictionary else {}
+		var radius_blocks := clampi(int(profile.get("blast_radius_blocks", WorldSim.TNT_EXPLOSION_RADIUS)), 1, 8)
+		var size_name := str(profile.get("blast_size", "medium"))
+		var size_scale := {"small": 0.72, "medium": 1.0, "large": 1.42}.get(size_name, 1.0)
+		var blast_radius := float(radius_blocks) * tile * 0.82 * size_scale
+		var fire_color_name := str(profile.get("fire_color", "#ff6b24"))
+		var fire_color := Color(fire_color_name) if Color.html_is_valid(fire_color_name) else Color("#ff6b24")
+		var shape := str(profile.get("blast_shape", "circle"))
 		var radius := lerpf(tile * 0.22, blast_radius, eased_expansion)
-		var seed_value := fposmod(float(str(effect.get("event_id", "")).hash()), 10000.0) / 10000.0
+		var seed_value := fposmod(float(profile.get("event_seed", str(effect.get("event_id", "")).hash())), 10000.0) / 10000.0
 		var angle_offset := seed_value * TAU
-		canvas.draw_circle(center, radius * 0.62, Color(1.0, 0.16, 0.015, alpha * 0.34))
-		canvas.draw_circle(center, radius * 0.38, Color(1.0, 0.52, 0.055, alpha * 0.56))
+		var fire_dark := fire_color.darkened(0.16)
+		var fire_light := fire_color.lightened(0.28)
+		fire_dark.a = alpha * 0.4
+		fire_light.a = alpha * 0.64
+		canvas.draw_circle(center, radius * 0.62, fire_dark)
+		canvas.draw_circle(center, radius * 0.38, fire_light)
 		for puff_index in 7:
 			var puff_variation := fposmod(seed_value * 997.0 + float(puff_index * 41), 100.0) / 100.0
 			var puff_angle := angle_offset + TAU * float((puff_index * 3) % 7) / 7.0 + (puff_variation - 0.5) * 0.28
 			var puff_direction := Vector2(cos(puff_angle), sin(puff_angle))
+			if shape == "cross":
+				puff_direction = [Vector2.RIGHT, Vector2.DOWN, Vector2.LEFT, Vector2.UP][puff_index % 4]
 			var puff_center := center + puff_direction * radius * (0.56 + puff_variation * 0.23)
 			var puff_size := tile * (0.23 + puff_variation * 0.16)
 			for block_index in 3:
@@ -3061,6 +3090,11 @@ func _draw_tnt_explosion_effects(canvas: Node2D) -> void:
 			var flame_variation := fposmod(seed_value * 997.0 + float(flame_index * 31), 100.0) / 100.0
 			var angle := angle_offset + TAU * float(flame_index) / 9.0 + (flame_variation - 0.5) * 0.34
 			var direction := Vector2(cos(angle), sin(angle))
+			if shape == "cross":
+				direction = [Vector2.RIGHT, Vector2.DOWN, Vector2.LEFT, Vector2.UP][flame_index % 4]
+			elif shape == "diamond":
+				var diagonal_sign := -1.0 if posmod(flame_index, 2) == 0 else 1.0
+				direction = Vector2(signf(direction.x), signf(direction.y) * diagonal_sign).normalized()
 			var perpendicular := Vector2(-direction.y, direction.x)
 			var flame_length := radius * (0.48 + flame_variation * 0.43)
 			var flame_width := radius * (0.045 + flame_variation * 0.05)
@@ -3070,21 +3104,28 @@ func _draw_tnt_explosion_effects(canvas: Node2D) -> void:
 				center + direction * radius * 0.12,
 				center + direction * radius * (0.2 + flame_variation * 0.08) - perpendicular * flame_width,
 			])
-			var flame_color := Color(1.0, 0.2 + flame_variation * 0.16, 0.015, alpha * 0.56)
-			canvas.draw_colored_polygon(flame, flame_color)
+			var tongue_color := fire_color.lightened(flame_variation * 0.24)
+			tongue_color.a = alpha * 0.68
+			canvas.draw_colored_polygon(flame, tongue_color)
 		for arc_index in 4:
 			var arc_variation := fposmod(seed_value * 997.0 + float(arc_index * 23), 100.0) / 100.0
 			var arc_start := angle_offset + TAU * float(arc_index) / 4.0 + (arc_variation - 0.5) * 0.7
 			var arc_end := arc_start + lerpf(0.22 * PI, 0.48 * PI, arc_variation)
 			var arc_radius := radius * (0.8 + arc_variation * 0.18)
 			var arc_width := tile * (0.12 + arc_variation * 0.1)
-			canvas.draw_arc(center, arc_radius, arc_start, arc_end, 24, Color(1.0, 0.7 + arc_variation * 0.22, 0.18, alpha * 0.84), arc_width)
-		canvas.draw_circle(center, radius * 0.28, Color(1.0, 0.76, 0.16, alpha * 0.72))
-		canvas.draw_circle(center, radius * 0.12, Color(1.0, 0.97, 0.68, alpha * 0.84))
+			var arc_color := fire_color.lightened(0.38 + arc_variation * 0.2)
+			arc_color.a = alpha * 0.84
+			canvas.draw_arc(center, arc_radius, arc_start, arc_end, 24, arc_color, arc_width)
+		var core_color := fire_color.lightened(0.48)
+		core_color.a = alpha * 0.82
+		canvas.draw_circle(center, radius * 0.28, core_color)
+		canvas.draw_circle(center, radius * 0.12, Color(1.0, 0.97, 0.82, alpha * 0.84))
 		for spark_index in 22:
 			var spark_variation := fposmod(seed_value * 991.0 + float(spark_index * 17), 100.0) / 100.0
 			var angle := angle_offset + TAU * float(spark_index) / 22.0 + (spark_variation - 0.5) * 0.22
 			var direction := Vector2(cos(angle), sin(angle))
+			if shape == "cross":
+				direction = [Vector2.RIGHT, Vector2.DOWN, Vector2.LEFT, Vector2.UP][spark_index % 4]
 			var perpendicular := Vector2(-direction.y, direction.x)
 			var distance := lerpf(radius * 0.35, radius * (0.94 + spark_variation * 0.38), eased_expansion)
 			var spark_center := center + direction * distance
@@ -3096,7 +3137,8 @@ func _draw_tnt_explosion_effects(canvas: Node2D) -> void:
 				spark_center - direction * spark_length * 0.46,
 				spark_center - perpendicular * spark_width,
 			])
-			var spark_color := Color(1.0, 0.38 + spark_variation * 0.44, 0.035, alpha * 0.94)
+			var spark_color := fire_color.lightened(0.32 + spark_variation * 0.36)
+			spark_color.a = alpha * 0.94
 			canvas.draw_colored_polygon(spark, spark_color)
 	for index in range(expired_indexes.size() - 1, -1, -1):
 		_tnt_explosion_effects.remove_at(expired_indexes[index])

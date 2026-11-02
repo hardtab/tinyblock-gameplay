@@ -18,6 +18,7 @@ signal one_block_phase_changed(phase_number: int)
 signal challenge_milestone_reached(distance: int)
 signal tile_changed(x: int, y: int, block_id: int, fluid_level: int, falling: bool)
 signal tnt_exploded(position: Vector2i)
+signal explosion_occurred(position: Vector2i, profile: Dictionary)
 signal plant_changed(anchor_x: int, anchor_y: int)
 signal remote_player_attacked_by_creature(player_id: String, damage: int, knockback_x: float, knockback_y: float)
 signal remote_players_damaged_by_explosion(damage_by_player: Dictionary)
@@ -67,6 +68,7 @@ var creatures: Dictionary = {}
 var resonant_deep_respawn_until_tick: Dictionary = {}
 var creature_tick: int = 0
 var burning_tiles: Dictionary = {}
+var burning_tile_colors: Dictionary = {}
 var containers: Dictionary = {}
 var inventory: Dictionary = {}
 var inv_order: Array[String] = []
@@ -183,6 +185,7 @@ const TNT_FUSE_STEPS := 4
 const TNT_CHAIN_FUSE_STEPS := 2
 const TNT_EXPLOSION_RADIUS := 4
 const TNT_EXPLOSION_MAX_PLAYER_DAMAGE := 3
+const DEFAULT_FIRE_COLOR := "#ff6b24"
 const LIGHTER_ITEM_NAME := "lighter"
 const TNT_BLOCK_NAME := "tnt"
 const FIRE_SOURCE_IGNITION_CHANCE := 0.22
@@ -570,6 +573,7 @@ func create_island() -> void:
 	_ensure_core_plants()
 	_ensure_core_creatures()
 	burning_tiles.clear()
+	burning_tile_colors.clear()
 	tree_tick = 0
 	weather_tick = 0
 	granular_tick = 0
@@ -709,6 +713,7 @@ func create_floating_islands_world(seed: int = 0) -> void:
 	creatures.clear()
 	containers.clear()
 	burning_tiles.clear()
+	burning_tile_colors.clear()
 	generated_chunks.clear()
 	chunk_tiles.clear()
 	chunk_tiles_by_id.clear()
@@ -749,6 +754,7 @@ func create_duel_world(seed: int = 0, include_explosives: bool = false) -> void:
 	creatures.clear()
 	containers.clear()
 	burning_tiles.clear()
+	burning_tile_colors.clear()
 	generated_chunks.clear()
 	chunk_tiles.clear()
 	chunk_tiles_by_id.clear()
@@ -1031,6 +1037,7 @@ func create_one_block_world(seed: int = 0) -> void:
 	creatures.clear()
 	containers.clear()
 	burning_tiles.clear()
+	burning_tile_colors.clear()
 	generated_chunks.clear()
 	chunk_tiles.clear()
 	chunk_tiles_by_id.clear()
@@ -1061,6 +1068,7 @@ func create_challenge_world(seed: int = 0) -> void:
 	creatures.clear()
 	containers.clear()
 	burning_tiles.clear()
+	burning_tile_colors.clear()
 	generated_chunks.clear()
 	chunk_tiles.clear()
 	chunk_tiles_by_id.clear()
@@ -5205,7 +5213,10 @@ func serialize_state(stable_order: bool = true) -> Dictionary:
 	if stable_order:
 		burning_positions.sort_custom(func(a: Vector2i, b: Vector2i): return a.y < b.y or (a.y == b.y and a.x < b.x))
 	for pos: Vector2i in burning_positions:
-		burning_entries.append({"x": pos.x, "y": pos.y, "steps": int(burning_tiles[pos])})
+		burning_entries.append({
+			"x": pos.x, "y": pos.y, "steps": int(burning_tiles[pos]),
+			"fire_color": str(burning_tile_colors.get(pos, DEFAULT_FIRE_COLOR)),
+		})
 	var container_entries: Array[Dictionary] = []
 	var container_positions: Array = containers.keys()
 	if stable_order:
@@ -5774,6 +5785,7 @@ func deserialize_state(state: Dictionary) -> bool:
 	)
 	var saved_is_one_block := str(saved_generation_data.get("mode", WORLD_MODE_SKYBLOCK)) == WORLD_MODE_ONE_BLOCK
 	var loaded_burning: Dictionary = {}
+	var loaded_burning_colors: Dictionary = {}
 	var raw_burning = state.get("burning_tiles", [])
 	if not raw_burning is Array:
 		return false
@@ -5786,9 +5798,13 @@ func deserialize_state(state: Dictionary) -> bool:
 		if not in_bounds(pos.x, pos.y) or not loaded_tiles.has(pos) or steps <= 0:
 			continue
 		var block := BlockDefs.get_block_by_id(int(loaded_tiles[pos]))
-		var is_tnt := str(block.get("name", "")) == TNT_BLOCK_NAME
-		if (float(block.get("flammability", 0.0)) > 0.0 or is_tnt) and not (is_tnt and saved_is_one_block and pos == saved_one_block_position):
-			loaded_burning[pos] = mini(steps, TNT_FUSE_STEPS if is_tnt else FIRE_BURN_STEPS * 2)
+		var is_explosive := not explosive_effects_for_block(block).is_empty()
+		if (float(block.get("flammability", 0.0)) > 0.0 or is_explosive) and not (str(block.get("name", "")) == TNT_BLOCK_NAME and saved_is_one_block and pos == saved_one_block_position):
+			var max_fire_steps := TNT_FUSE_STEPS if str(block.get("name", "")) == TNT_BLOCK_NAME else (80 if is_explosive else FIRE_BURN_STEPS * 2)
+			loaded_burning[pos] = mini(steps, max_fire_steps)
+			var saved_fire_color := str(entry.get("fire_color", ""))
+			if Color.html_is_valid(saved_fire_color):
+				loaded_burning_colors[pos] = saved_fire_color
 
 	var loaded_containers: Dictionary = {}
 	var raw_containers = state.get("containers", [])
@@ -6160,6 +6176,7 @@ func deserialize_state(state: Dictionary) -> bool:
 			if bool(legacy_creature.get("natural", false)) and (legacy_creature.get("parents", []) as Array).is_empty():
 				creatures.erase(creature_id)
 	burning_tiles = loaded_burning
+	burning_tile_colors = loaded_burning_colors
 	inventory = loaded_inventory
 	item_durability = loaded_item_durability
 	footwear_wear_distance = maxf(0.0, float(state.get("footwear_wear_distance", 0.0)))
@@ -6916,7 +6933,83 @@ func is_flammable(block: Dictionary) -> bool:
 	return float(block.get("flammability", 0.0)) > 0.0
 
 
-func ignite_tile(pos: Vector2i) -> bool:
+func _definition_effects(block_or_item: Dictionary) -> Dictionary:
+	var definition: Dictionary = block_or_item.get("definition", {}) if block_or_item.get("definition", {}) is Dictionary else {}
+	var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+	return effects
+
+
+func explosive_effects_for_block(block: Dictionary) -> Dictionary:
+	if str(block.get("name", "")) == TNT_BLOCK_NAME:
+		return {
+			"blast_shape": "circle", "blast_radius_blocks": TNT_EXPLOSION_RADIUS,
+			"blast_size": "medium", "fuse_seconds": 0.8, "fuse_randomness": 0.0,
+			"blast_randomness": 0.0, "leaves_fire": false, "fire_chance": 0.0,
+			"fire_color": DEFAULT_FIRE_COLOR, "sound_variant": "classic",
+		}
+	var explosive: Dictionary = _definition_effects(block).get("explosive", {})
+	if explosive.is_empty():
+		return {}
+	var shape := str(explosive.get("blast_shape", "circle"))
+	if shape not in ["circle", "diamond", "cross", "square"]:
+		shape = "circle"
+	var size := str(explosive.get("blast_size", "medium"))
+	if size not in ["small", "medium", "large"]:
+		size = "medium"
+	var sound := str(explosive.get("sound_variant", "classic"))
+	if sound not in ["classic", "deep", "crackle"]:
+		sound = "classic"
+	var fire_color := str(explosive.get("fire_color", DEFAULT_FIRE_COLOR))
+	if not Color.html_is_valid(fire_color):
+		fire_color = DEFAULT_FIRE_COLOR
+	return {
+		"blast_shape": shape,
+		"blast_radius_blocks": clampi(int(explosive.get("blast_radius_blocks", TNT_EXPLOSION_RADIUS)), 1, 8),
+		"blast_size": size,
+		"fuse_seconds": clampf(float(explosive.get("fuse_seconds", 0.8)), 0.3, 8.0),
+		"fuse_randomness": clampf(float(explosive.get("fuse_randomness", 0.0)), 0.0, 1.0),
+		"blast_randomness": clampf(float(explosive.get("blast_randomness", 0.0)), 0.0, 1.0),
+		"leaves_fire": bool(explosive.get("leaves_fire", false)),
+		"fire_chance": clampf(float(explosive.get("fire_chance", 0.0)), 0.0, 1.0),
+		"fire_color": fire_color,
+		"sound_variant": sound,
+	}
+
+
+func incendiary_effects_for_item(item_name: String) -> Dictionary:
+	if item_name == LIGHTER_ITEM_NAME:
+		return {"ignition_radius_blocks": 0, "ignition_chance": 1.0, "fire_color": DEFAULT_FIRE_COLOR, "sound_variant": "spark"}
+	var item: Dictionary = BlockDefs.BLOCKS.get(item_name, {})
+	var definition: Dictionary = item.get("definition", {}) if item.get("definition", {}) is Dictionary else {}
+	if not item.get("item", false) or str(definition.get("category", "")) != "incendiary":
+		return {}
+	var incendiary: Dictionary = _definition_effects(item).get("incendiary", {})
+	if incendiary.is_empty():
+		return {}
+	var sound := str(incendiary.get("sound_variant", "spark"))
+	if sound not in ["spark", "whoosh", "crackle"]:
+		sound = "spark"
+	var fire_color := str(incendiary.get("fire_color", DEFAULT_FIRE_COLOR))
+	if not Color.html_is_valid(fire_color):
+		fire_color = DEFAULT_FIRE_COLOR
+	return {
+		"ignition_radius_blocks": clampi(int(incendiary.get("ignition_radius_blocks", 1)), 1, 6),
+		"ignition_chance": clampf(float(incendiary.get("ignition_chance", 1.0)), 0.0, 1.0),
+		"fire_color": fire_color,
+		"sound_variant": sound,
+	}
+
+
+func is_incendiary_item(item_name: String) -> bool:
+	return not incendiary_effects_for_item(item_name).is_empty()
+
+
+func fire_color_for_tile(pos: Vector2i) -> Color:
+	var raw_color := str(burning_tile_colors.get(pos, DEFAULT_FIRE_COLOR))
+	return Color(raw_color) if Color.html_is_valid(raw_color) else Color(DEFAULT_FIRE_COLOR)
+
+
+func ignite_tile(pos: Vector2i, fire_color: String = DEFAULT_FIRE_COLOR) -> bool:
 	if is_one_use_cache_at(pos.x, pos.y):
 		return false
 	var block := get_block(pos.x, pos.y)
@@ -6927,78 +7020,118 @@ func ignite_tile(pos: Vector2i) -> bool:
 		return true
 	var lifetime := roundi(lerpf(float(FIRE_BURN_STEPS) * 1.25, float(FIRE_BURN_STEPS) * 0.75, flammability))
 	burning_tiles[pos] = maxi(6, lifetime)
+	if Color.html_is_valid(fire_color):
+		burning_tile_colors[pos] = fire_color
 	return true
 
 
 func ignite_with_lighter(tx: int, ty: int) -> bool:
 	if not in_bounds(tx, ty) or not player_near(tx, ty):
 		return false
-	if selected != LIGHTER_ITEM_NAME or int(inventory.get(LIGHTER_ITEM_NAME, 0)) <= 0:
+	return ignite_with_selected_incendiary(tx, ty)
+
+
+func ignite_with_selected_incendiary(tx: int, ty: int) -> bool:
+	var item_name := selected
+	var incendiary := incendiary_effects_for_item(item_name)
+	if not in_bounds(tx, ty) or not player_near(tx, ty):
+		return false
+	if incendiary.is_empty() or int(inventory.get(item_name, 0)) <= 0:
 		return false
 	var pos := Vector2i(tx, ty)
-	if burning_tiles.has(pos) or _touches_water(pos) or is_one_use_cache_at(tx, ty) or mine_preserves_support(tx, ty):
-		return false
-	var block := get_block(tx, ty)
 	var ignited := false
-	if str(block.get("name", "")) == TNT_BLOCK_NAME:
-		ignited = _start_tnt_fuse(pos)
-	elif is_flammable(block):
-		ignited = ignite_tile(pos)
-	if not ignited or not _consume_inventory_item_use(LIGHTER_ITEM_NAME):
+	var radius := int(incendiary.get("ignition_radius_blocks", 0))
+	var chance := float(incendiary.get("ignition_chance", 1.0))
+	var fire_color := str(incendiary.get("fire_color", DEFAULT_FIRE_COLOR))
+	for oy in range(-radius, radius + 1):
+		for ox in range(-radius, radius + 1):
+			if ox * ox + oy * oy > radius * radius:
+				continue
+			var target := pos + Vector2i(ox, oy)
+			if not in_bounds(target.x, target.y) or burning_tiles.has(target) or _touches_water(target) or is_one_use_cache_at(target.x, target.y) or mine_preserves_support(target.x, target.y):
+				continue
+			var block := get_block(target.x, target.y)
+			var target_ignited := false
+			if not explosive_effects_for_block(block).is_empty():
+				target_ignited = _start_tnt_fuse(target)
+			elif is_flammable(block) and randf() < chance:
+				target_ignited = ignite_tile(target, fire_color)
+			if target_ignited:
+				ignited = true
+				tile_changed.emit(
+					target.x, target.y, block_id(target.x, target.y),
+					get_fluid_level(target.x, target.y), is_fluid_falling_at(target.x, target.y),
+				)
+	if not ignited or not _consume_inventory_item_use(item_name):
 		return false
 	if not _suspend_state_changed:
 		lighting_changed.emit()
 		state_changed.emit()
-		tile_changed.emit(tx, ty, block_id(tx, ty), get_fluid_level(tx, ty), is_fluid_falling_at(tx, ty))
 	return true
 
 
 func _start_tnt_fuse(pos: Vector2i, fuse_steps: int = TNT_FUSE_STEPS) -> bool:
-	if not in_bounds(pos.x, pos.y) or str(get_block(pos.x, pos.y).get("name", "")) != TNT_BLOCK_NAME:
+	if not in_bounds(pos.x, pos.y):
+		return false
+	var profile := explosive_effects_for_block(get_block(pos.x, pos.y))
+	if profile.is_empty():
 		return false
 	if _touches_water(pos) or is_one_use_cache_at(pos.x, pos.y) or mine_preserves_support(pos.x, pos.y) or burning_tiles.has(pos):
 		return false
-	burning_tiles[pos] = clampi(fuse_steps, 1, TNT_FUSE_STEPS)
+	var steps := fuse_steps
+	if fuse_steps == TNT_FUSE_STEPS:
+		var seconds := float(profile.get("fuse_seconds", 0.8))
+		var random_scale := float(profile.get("fuse_randomness", 0.0))
+		seconds *= randf_range(1.0 - random_scale, 1.0 + random_scale)
+		steps = maxi(1, ceili(seconds / (float(FIRE_TICK_EVERY) / 60.0)))
+	burning_tiles[pos] = clampi(steps, 1, 80)
+	burning_tile_colors[pos] = str(profile.get("fire_color", DEFAULT_FIRE_COLOR))
 	return true
 
 
-func apply_authoritative_fire_state(x: int, y: int, steps: int) -> void:
+func apply_authoritative_fire_state(x: int, y: int, steps: int, fire_color: String = "") -> void:
 	if not in_bounds(x, y):
 		return
 	var pos := Vector2i(x, y)
 	var normalized_steps := maxi(0, steps)
 	var block := get_block(x, y)
-	var is_fire_target := is_flammable(block) or str(block.get("name", "")) == TNT_BLOCK_NAME
+	var is_explosive := not explosive_effects_for_block(block).is_empty()
+	var is_fire_target := is_flammable(block) or is_explosive
 	if normalized_steps > 0 and (block_id(x, y) == 0 or not is_fire_target or is_one_use_cache_at(x, y) or mine_preserves_support(x, y)):
 		normalized_steps = 0
 	elif normalized_steps > 0:
-		normalized_steps = mini(normalized_steps, TNT_FUSE_STEPS if str(block.get("name", "")) == TNT_BLOCK_NAME else FIRE_BURN_STEPS * 2)
+		var max_fire_steps := TNT_FUSE_STEPS if str(block.get("name", "")) == TNT_BLOCK_NAME else (80 if is_explosive else FIRE_BURN_STEPS * 2)
+		normalized_steps = mini(normalized_steps, max_fire_steps)
 	var previous_steps := int(burning_tiles.get(pos, 0))
-	if previous_steps == normalized_steps:
+	var previous_color := str(burning_tile_colors.get(pos, ""))
+	if previous_steps == normalized_steps and (normalized_steps <= 0 or fire_color.is_empty() or previous_color == fire_color):
 		return
 	if normalized_steps > 0:
 		burning_tiles[pos] = normalized_steps
+		if Color.html_is_valid(fire_color):
+			burning_tile_colors[pos] = fire_color
 	else:
 		burning_tiles.erase(pos)
+		burning_tile_colors.erase(pos)
 	lighting_changed.emit()
 	state_changed.emit()
 
 
-func _try_ignite_tile(pos: Vector2i, roll: float, chance_scale: float) -> bool:
+func _try_ignite_tile(pos: Vector2i, roll: float, chance_scale: float, fire_color: String = DEFAULT_FIRE_COLOR) -> bool:
 	# A block extinguished earlier in the same fire tick can still be visited by a
 	# later burning neighbor. Reject ignition at the source so iteration order and
 	# random spread cannot immediately relight a water-cooled block.
 	if _touches_water(pos) or is_one_use_cache_at(pos.x, pos.y):
 		return false
 	var block := get_block(pos.x, pos.y)
-	if str(block.get("name", "")) == TNT_BLOCK_NAME:
+	if not explosive_effects_for_block(block).is_empty():
 		if burning_tiles.has(pos) or roll >= chance_scale:
 			return false
 		return _start_tnt_fuse(pos, TNT_CHAIN_FUSE_STEPS)
 	var flammability := clampf(float(block.get("flammability", 0.0)), 0.0, 1.0)
 	if flammability <= 0.0 or roll >= flammability * chance_scale:
 		return false
-	return ignite_tile(pos)
+	return ignite_tile(pos, fire_color)
 
 
 func _touches_water(pos: Vector2i) -> bool:
@@ -7024,30 +7157,35 @@ func tick_fire() -> void:
 		if float(source.get("temperature", 0.0)) < FIRE_IGNITION_TEMPERATURE:
 			continue
 		for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
-			changed = _try_ignite_tile(source_pos + offset, randf(), FIRE_SOURCE_IGNITION_CHANCE) or changed
+			changed = _try_ignite_tile(source_pos + offset, randf(), FIRE_SOURCE_IGNITION_CHANCE, fire_color_for_tile(source_pos).to_html(false)) or changed
 	var burning_snapshot: Array = burning_tiles.keys()
 	for raw_pos in burning_snapshot:
 		var pos := raw_pos as Vector2i
 		if not _is_in_active_simulation(pos):
 			continue
 		var block := get_block(pos.x, pos.y)
-		var is_tnt := str(block.get("name", "")) == TNT_BLOCK_NAME
-		if not tiles.has(pos) or (not is_tnt and not is_flammable(block)) or _touches_water(pos) or is_one_use_cache_at(pos.x, pos.y):
+		var explosion_profile := explosive_effects_for_block(block)
+		var is_explosive := not explosion_profile.is_empty()
+		if not tiles.has(pos) or (not is_explosive and not is_flammable(block)) or _touches_water(pos) or is_one_use_cache_at(pos.x, pos.y):
 			burning_tiles.erase(pos)
+			burning_tile_colors.erase(pos)
 			changed = true
 			continue
-		if not is_tnt:
+		if not is_explosive:
 			for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
-				changed = _try_ignite_tile(pos + offset, randf(), FIRE_SPREAD_CHANCE) or changed
+				changed = _try_ignite_tile(pos + offset, randf(), FIRE_SPREAD_CHANCE, fire_color_for_tile(pos).to_html(false)) or changed
 		var steps_left := int(burning_tiles.get(pos, 1)) - 1
 		if steps_left <= 0:
 			burning_tiles.erase(pos)
-			if is_tnt:
+			burning_tile_colors.erase(pos)
+			if is_explosive:
+				explosion_profile["event_seed"] = randi()
 				set_block(pos.x, pos.y, 0)
 				changed_tile_positions[pos] = true
-				for affected_pos: Vector2i in _explode_tnt(pos):
+				for affected_pos: Vector2i in _explode_tnt(pos, explosion_profile):
 					changed_tile_positions[affected_pos] = true
 				tnt_exploded.emit(pos)
+				explosion_occurred.emit(pos, explosion_profile)
 			else:
 				tree_growth.erase(pos)
 				set_block(pos.x, pos.y, 0)
@@ -7068,11 +7206,11 @@ func tick_fire() -> void:
 		var fire_transition_positions: Dictionary = {}
 		for raw_pos in burning_before.keys():
 			var before_pos := raw_pos as Vector2i
-			if not burning_tiles.has(before_pos):
+			if not burning_tiles.has(before_pos) or int(burning_before[before_pos]) != int(burning_tiles.get(before_pos, 0)):
 				fire_transition_positions[before_pos] = true
 		for raw_pos in burning_tiles.keys():
 			var after_pos := raw_pos as Vector2i
-			if not burning_before.has(after_pos):
+			if not burning_before.has(after_pos) or int(burning_before.get(after_pos, 0)) != int(burning_tiles.get(after_pos, 0)):
 				fire_transition_positions[after_pos] = true
 		for raw_pos in changed_tile_positions.keys():
 			fire_transition_positions[raw_pos as Vector2i] = true
@@ -7089,11 +7227,27 @@ func tick_fire() -> void:
 			)
 
 
-func _explode_tnt(center: Vector2i) -> Array[Vector2i]:
+func _explode_tnt(center: Vector2i, profile: Dictionary = {}) -> Array[Vector2i]:
 	var affected: Array[Vector2i] = []
-	for y_offset in range(-TNT_EXPLOSION_RADIUS, TNT_EXPLOSION_RADIUS + 1):
-		for x_offset in range(-TNT_EXPLOSION_RADIUS, TNT_EXPLOSION_RADIUS + 1):
-			if x_offset * x_offset + y_offset * y_offset > TNT_EXPLOSION_RADIUS * TNT_EXPLOSION_RADIUS:
+	var resolved_profile := profile
+	if resolved_profile.is_empty():
+		resolved_profile = explosive_effects_for_block(get_block(center.x, center.y))
+	if resolved_profile.is_empty():
+		resolved_profile = explosive_effects_for_block(BlockDefs.BLOCKS.get(TNT_BLOCK_NAME, {}))
+	var radius := clampi(int(resolved_profile.get("blast_radius_blocks", TNT_EXPLOSION_RADIUS)), 1, 8)
+	var shape := str(resolved_profile.get("blast_shape", "circle"))
+	var randomness := clampf(float(resolved_profile.get("blast_randomness", 0.0)), 0.0, 1.0)
+	var leaves_fire := bool(resolved_profile.get("leaves_fire", false))
+	var fire_chance := clampf(float(resolved_profile.get("fire_chance", 0.0)), 0.0, 1.0)
+	var fire_color := str(resolved_profile.get("fire_color", DEFAULT_FIRE_COLOR))
+	var blast_rng := RandomNumberGenerator.new()
+	blast_rng.seed = int(resolved_profile.get("event_seed", randi()))
+	for y_offset in range(-radius, radius + 1):
+		for x_offset in range(-radius, radius + 1):
+			if not _blast_offset_inside(x_offset, y_offset, radius, shape):
+				continue
+			var normalized_edge := clampf(float(maxi(absi(x_offset), absi(y_offset))) / float(radius), 0.0, 1.0)
+			if randomness > 0.0 and blast_rng.randf() < randomness * normalized_edge:
 				continue
 			var pos := center + Vector2i(x_offset, y_offset)
 			if not in_bounds(pos.x, pos.y):
@@ -7106,7 +7260,7 @@ func _explode_tnt(center: Vector2i) -> Array[Vector2i]:
 			var block := get_block(pos.x, pos.y)
 			if int(block.get("id", 0)) == 0:
 				continue
-			if str(block.get("name", "")) == TNT_BLOCK_NAME:
+			if not explosive_effects_for_block(block).is_empty():
 				if _start_tnt_fuse(pos, TNT_CHAIN_FUSE_STEPS):
 					affected.append(pos)
 				continue
@@ -7119,6 +7273,10 @@ func _explode_tnt(center: Vector2i) -> Array[Vector2i]:
 			var definition: Dictionary = block.get("definition", {}) if block.get("definition", {}) is Dictionary else {}
 			var tags: Array = definition.get("tags", []) if definition.get("tags", []) is Array else []
 			if "indestructible" in tags or "spawn_protected" in tags:
+				continue
+			if leaves_fire and is_flammable(block) and randf() < fire_chance:
+				if ignite_tile(pos, fire_color):
+					affected.append(pos)
 				continue
 			tree_growth.erase(pos)
 			plant_growth.erase(pos)
@@ -7154,7 +7312,10 @@ func _explode_tnt(center: Vector2i) -> Array[Vector2i]:
 	if local_defeated:
 		player_defeated.emit()
 	_tnt_explosion_sequence += 1
-	tnt_explosion_occurred.emit(center, "%s:%d" % [world_id, _tnt_explosion_sequence])
+	var event_id := "%s:%d" % [world_id, _tnt_explosion_sequence]
+	resolved_profile["event_id"] = event_id
+	resolved_profile["event_seed"] = int(resolved_profile.get("event_seed", event_id.hash()))
+	tnt_explosion_occurred.emit(center, event_id)
 	return affected
 
 
@@ -7174,6 +7335,18 @@ func _tnt_player_damage(blast_center: Vector2, target: Dictionary) -> int:
 		return 0
 	var falloff := 1.0 - distance / radius
 	return clampi(ceili(float(TNT_EXPLOSION_MAX_PLAYER_DAMAGE) * falloff), 1, TNT_EXPLOSION_MAX_PLAYER_DAMAGE)
+
+
+func _blast_offset_inside(x: int, y: int, radius: int, shape: String) -> bool:
+	match shape:
+		"diamond":
+			return absi(x) + absi(y) <= radius
+		"cross":
+			return x == 0 or y == 0
+		"square":
+			return maxi(absi(x), absi(y)) <= radius
+		_:
+			return x * x + y * y <= radius * radius
 
 
 func _propagate_tile_light(area: Rect2i, values: Dictionary, queue: Array[Vector2i], falloff: float) -> void:
@@ -7447,6 +7620,7 @@ func set_block(x: int, y: int, id: int, level: int = -1, falling: bool = false) 
 	var static_visual_changed := block_identity_changed and (bool(old_block.get("solid", false)) or bool(new_block.get("solid", false)))
 	if id == 0 or old_id != id:
 		burning_tiles.erase(key)
+		burning_tile_colors.erase(key)
 	var previous_count := block_count
 	if id == 0:
 		if had_block:
@@ -8194,6 +8368,9 @@ func tick_granular() -> void:
 		if burning_tiles.has(pos):
 			burning_tiles[target] = burning_tiles[pos]
 			burning_tiles.erase(pos)
+			if burning_tile_colors.has(pos):
+				burning_tile_colors[target] = burning_tile_colors[pos]
+				burning_tile_colors.erase(pos)
 		changed_positions[pos] = true
 		changed_positions[target] = true
 	if not changed_positions.is_empty():
@@ -12102,7 +12279,7 @@ func item_max_durability(block_name: String) -> int:
 	var entry: Dictionary = BlockDefs.BLOCKS.get(block_name, {})
 	var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
 	var category := str(definition.get("category", ""))
-	if not entry.get("item", false) or (equipment_slot_for_item(block_name).is_empty() and category != "fire_tool"):
+	if not entry.get("item", false) or (equipment_slot_for_item(block_name).is_empty() and category not in ["fire_tool", "incendiary"]):
 		return 0
 	var durability: Dictionary = definition.get("durability", {}) if definition.get("durability", {}) is Dictionary else {}
 	if int(durability.get("max_uses", 0)) > 0:
