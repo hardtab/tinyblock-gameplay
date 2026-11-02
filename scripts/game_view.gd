@@ -21,6 +21,7 @@ signal remote_player_hit_by_arrow(player_id: String, damage: int)
 # remote_player_hit_by_arrow signal above for older scene/test handlers, while
 # this signal carries the shooter identity needed by the host protocol.
 signal authoritative_player_hit_by_arrow(target_player_id: String, attacker_player_id: String, damage: int)
+signal tnt_explosion_visual_requested(position: Vector2i, event_id: String)
 signal block_mined(block_name: String)
 signal block_placed(block_name: String)
 signal harvest_blocked(block_name: String, required_tier: int, active_tier: int)
@@ -75,6 +76,8 @@ const REMOTE_CREATURE_INTERPOLATION_SPEED := 14.0
 const REMOTE_CREATURE_TELEPORT_DISTANCE := 8.0
 const TUTORIAL_GATHER_CACHE_MSEC := 250
 const TIDEGLASS_REVEAL_GLOW_MSEC := 520
+const TNT_EXPLOSION_EFFECT_MSEC := 760
+const TNT_EXPLOSION_EXPAND_MSEC := 180
 const BOW_FULL_DRAW_SECONDS := 1.0
 const BOW_MIN_DRAW_SECONDS := 0.12
 const ARROW_MIN_SPEED := 250.0
@@ -179,6 +182,9 @@ var remote_emoji_reactions: Dictionary = {}
 var suppress_inventory_ui_updates := false
 var remote_creature_targets: Dictionary = {}
 var _tideglass_reveal_glow: Dictionary = {}
+var _tnt_explosion_effects: Array[Dictionary] = []
+var _seen_tnt_explosion_ids: Dictionary = {}
+var _seen_tnt_explosion_order: Array[String] = []
 var _remote_player_render_positions: Dictionary = {}
 var _remote_player_render_revisions: Dictionary = {}
 var desktop_web_rendering := false
@@ -272,6 +278,8 @@ func _bind_sim_signals() -> void:
 		sim.tideglass_bridge_cell_crystallized.connect(_on_tideglass_bridge_cell_crystallized)
 	if not sim.tnt_exploded.is_connected(_on_tnt_exploded):
 		sim.tnt_exploded.connect(_on_tnt_exploded)
+	if not sim.tnt_explosion_occurred.is_connected(_on_tnt_explosion_occurred):
+		sim.tnt_explosion_occurred.connect(_on_tnt_explosion_occurred)
 
 
 func _on_player_defeated() -> void:
@@ -318,6 +326,40 @@ func _try_ignite_with_lighter(position: Vector2i) -> void:
 	_emit_world_sound_event("lighter_ignite", position)
 
 
+func _on_tnt_explosion_occurred(position: Vector2i, event_id: String) -> void:
+	show_tnt_explosion(position, event_id)
+	tnt_explosion_visual_requested.emit(position, event_id)
+
+
+func show_tnt_explosion(position: Vector2i, event_id: String) -> void:
+	var resolved_id := event_id.strip_edges()
+	if resolved_id.is_empty():
+		resolved_id = "%d:%d:%d" % [position.x, position.y, Time.get_ticks_msec()]
+	if _seen_tnt_explosion_ids.has(resolved_id):
+		return
+	_seen_tnt_explosion_ids[resolved_id] = true
+	_seen_tnt_explosion_order.append(resolved_id)
+	while _seen_tnt_explosion_order.size() > 128:
+		_seen_tnt_explosion_ids.erase(_seen_tnt_explosion_order.pop_front())
+	_tnt_explosion_effects.append({
+		"position": position,
+		"event_id": resolved_id,
+		"started_msec": Time.get_ticks_msec(),
+	})
+	while _tnt_explosion_effects.size() > 12:
+		_tnt_explosion_effects.pop_front()
+	if is_instance_valid(_reaction_layer):
+		_reaction_layer.queue_redraw()
+
+
+func clear_tnt_explosion_effects() -> void:
+	_tnt_explosion_effects.clear()
+	_seen_tnt_explosion_ids.clear()
+	_seen_tnt_explosion_order.clear()
+	if is_instance_valid(_reaction_layer):
+		_reaction_layer.queue_redraw()
+
+
 func start_new_world(mode: String = WorldSim.WORLD_MODE_SKYBLOCK, access_mode: String = WorldSim.ACCESS_MODE_OFFLINE, keep_inventory_on_death: bool = false, prefer_starter_biome: bool = false, world_seed: int = 0, duel_explosives_enabled: bool = false) -> bool:
 	if mode == WorldSim.WORLD_MODE_PROCEDURAL:
 		sim.create_procedural_world(world_seed, prefer_starter_biome)
@@ -352,6 +394,7 @@ func continue_world(state: Dictionary) -> bool:
 
 func _finish_world_start() -> void:
 	_avatar_trail.clear()
+	clear_tnt_explosion_effects()
 	_avatar_trail_world_id = sim.world_id
 	remote_mining.clear()
 	_remote_player_render_positions.clear()
@@ -2955,6 +2998,7 @@ func clear_emoji_reactions() -> void:
 func _draw_reaction_layer() -> void:
 	var draw_cam := _render_camera_pos()
 	_reaction_layer.draw_set_transform(-draw_cam, 0.0, Vector2(zoom, zoom))
+	_draw_tnt_explosion_effects(_reaction_layer)
 	_draw_tideglass_reveal_glow(_reaction_layer)
 	_draw_emoji_bubble(
 		_reaction_layer,
@@ -2970,6 +3014,92 @@ func _draw_reaction_layer() -> void:
 			render_position + Vector2(10.0, -18.0),
 			remote_emoji_reactions.get(player_id, {}),
 		)
+
+
+func _draw_tnt_explosion_effects(canvas: Node2D) -> void:
+	var now := Time.get_ticks_msec()
+	var expired_indexes: Array[int] = []
+	for index in _tnt_explosion_effects.size():
+		var effect: Dictionary = _tnt_explosion_effects[index]
+		var age_msec := now - int(effect.get("started_msec", now))
+		if age_msec >= TNT_EXPLOSION_EFFECT_MSEC:
+			expired_indexes.append(index)
+			continue
+		var expansion := clampf(float(age_msec) / float(TNT_EXPLOSION_EXPAND_MSEC), 0.0, 1.0)
+		var eased_expansion := 1.0 - pow(1.0 - expansion, 2.4)
+		var fade_progress := clampf(
+			float(age_msec - TNT_EXPLOSION_EXPAND_MSEC) / float(TNT_EXPLOSION_EFFECT_MSEC - TNT_EXPLOSION_EXPAND_MSEC),
+			0.0,
+			1.0,
+		)
+		var alpha := pow(1.0 - fade_progress, 0.9)
+		var tile := float(BlockDefs.TILE)
+		var blast_radius := float(WorldSim.TNT_EXPLOSION_RADIUS) * tile * 0.82
+		var pos := effect.get("position", Vector2i.ZERO) as Vector2i
+		var center := Vector2((float(pos.x) + 0.5) * tile, (float(pos.y) + 0.5) * tile)
+		var radius := lerpf(tile * 0.22, blast_radius, eased_expansion)
+		var seed_value := fposmod(float(str(effect.get("event_id", "")).hash()), 10000.0) / 10000.0
+		var angle_offset := seed_value * TAU
+		canvas.draw_circle(center, radius * 0.62, Color(1.0, 0.16, 0.015, alpha * 0.34))
+		canvas.draw_circle(center, radius * 0.38, Color(1.0, 0.52, 0.055, alpha * 0.56))
+		for puff_index in 7:
+			var puff_variation := fposmod(seed_value * 997.0 + float(puff_index * 41), 100.0) / 100.0
+			var puff_angle := angle_offset + TAU * float((puff_index * 3) % 7) / 7.0 + (puff_variation - 0.5) * 0.28
+			var puff_direction := Vector2(cos(puff_angle), sin(puff_angle))
+			var puff_center := center + puff_direction * radius * (0.56 + puff_variation * 0.23)
+			var puff_size := tile * (0.23 + puff_variation * 0.16)
+			for block_index in 3:
+				var block_variation := fposmod(puff_variation * 100.0 + float(block_index * 29), 100.0) / 100.0
+				var block_offset := Vector2(
+					(block_variation - 0.5) * puff_size * 1.6,
+					(0.5 - fposmod(block_variation * 1.73, 1.0)) * puff_size * 1.2,
+				)
+				var block_dimensions := Vector2(puff_size * (0.72 + block_variation * 0.55), puff_size * (0.55 + puff_variation * 0.62))
+				var block_rect := Rect2((puff_center + block_offset - block_dimensions * 0.5).round(), block_dimensions.round())
+				canvas.draw_rect(block_rect, Color(0.12, 0.15, 0.18, alpha * (0.2 + block_variation * 0.15)))
+		for flame_index in 9:
+			var flame_variation := fposmod(seed_value * 997.0 + float(flame_index * 31), 100.0) / 100.0
+			var angle := angle_offset + TAU * float(flame_index) / 9.0 + (flame_variation - 0.5) * 0.34
+			var direction := Vector2(cos(angle), sin(angle))
+			var perpendicular := Vector2(-direction.y, direction.x)
+			var flame_length := radius * (0.48 + flame_variation * 0.43)
+			var flame_width := radius * (0.045 + flame_variation * 0.05)
+			var flame := PackedVector2Array([
+				center + direction * flame_length,
+				center + direction * radius * (0.24 + flame_variation * 0.12) + perpendicular * flame_width,
+				center + direction * radius * 0.12,
+				center + direction * radius * (0.2 + flame_variation * 0.08) - perpendicular * flame_width,
+			])
+			var flame_color := Color(1.0, 0.2 + flame_variation * 0.16, 0.015, alpha * 0.56)
+			canvas.draw_colored_polygon(flame, flame_color)
+		for arc_index in 4:
+			var arc_variation := fposmod(seed_value * 997.0 + float(arc_index * 23), 100.0) / 100.0
+			var arc_start := angle_offset + TAU * float(arc_index) / 4.0 + (arc_variation - 0.5) * 0.7
+			var arc_end := arc_start + lerpf(0.22 * PI, 0.48 * PI, arc_variation)
+			var arc_radius := radius * (0.8 + arc_variation * 0.18)
+			var arc_width := tile * (0.12 + arc_variation * 0.1)
+			canvas.draw_arc(center, arc_radius, arc_start, arc_end, 24, Color(1.0, 0.7 + arc_variation * 0.22, 0.18, alpha * 0.84), arc_width)
+		canvas.draw_circle(center, radius * 0.28, Color(1.0, 0.76, 0.16, alpha * 0.72))
+		canvas.draw_circle(center, radius * 0.12, Color(1.0, 0.97, 0.68, alpha * 0.84))
+		for spark_index in 22:
+			var spark_variation := fposmod(seed_value * 991.0 + float(spark_index * 17), 100.0) / 100.0
+			var angle := angle_offset + TAU * float(spark_index) / 22.0 + (spark_variation - 0.5) * 0.22
+			var direction := Vector2(cos(angle), sin(angle))
+			var perpendicular := Vector2(-direction.y, direction.x)
+			var distance := lerpf(radius * 0.35, radius * (0.94 + spark_variation * 0.38), eased_expansion)
+			var spark_center := center + direction * distance
+			var spark_length := lerpf(tile * 0.54, tile * 0.2, fade_progress) * (0.68 + spark_variation * 0.7)
+			var spark_width := lerpf(tile * 0.13, tile * 0.06, fade_progress) * (0.7 + spark_variation * 0.6)
+			var spark := PackedVector2Array([
+				spark_center + direction * spark_length,
+				spark_center + perpendicular * spark_width,
+				spark_center - direction * spark_length * 0.46,
+				spark_center - perpendicular * spark_width,
+			])
+			var spark_color := Color(1.0, 0.38 + spark_variation * 0.44, 0.035, alpha * 0.94)
+			canvas.draw_colored_polygon(spark, spark_color)
+	for index in range(expired_indexes.size() - 1, -1, -1):
+		_tnt_explosion_effects.remove_at(expired_indexes[index])
 
 
 func _draw_tideglass_reveal_glow(canvas: Node2D) -> void:

@@ -20,6 +20,8 @@ signal tile_changed(x: int, y: int, block_id: int, fluid_level: int, falling: bo
 signal tnt_exploded(position: Vector2i)
 signal plant_changed(anchor_x: int, anchor_y: int)
 signal remote_player_attacked_by_creature(player_id: String, damage: int, knockback_x: float, knockback_y: float)
+signal remote_players_damaged_by_explosion(damage_by_player: Dictionary)
+signal tnt_explosion_occurred(position: Vector2i, event_id: String)
 
 const SAVE_SCHEMA_VERSION := 1
 const CORE_CONTENT_PREFIX := "core."
@@ -134,6 +136,9 @@ var keep_inventory_on_death := false
 var multiplayer_player_states: Dictionary = {}
 # Transient host-only player snapshots used by authoritative creature AI.
 var multiplayer_player_targets: Dictionary = {}
+var local_player_damage_enabled := true
+var last_player_death_cause := ""
+var _tnt_explosion_sequence := 0
 var world_time_tick: int = 0
 var one_block_position := Vector2i(ISLAND_CX, ISLAND_CY)
 var one_block_mined: int = 0
@@ -176,7 +181,8 @@ const FIRE_TICK_EVERY := 12
 const FIRE_BURN_STEPS := 24
 const TNT_FUSE_STEPS := 4
 const TNT_CHAIN_FUSE_STEPS := 2
-const TNT_EXPLOSION_RADIUS := 2
+const TNT_EXPLOSION_RADIUS := 4
+const TNT_EXPLOSION_MAX_PLAYER_DAMAGE := 3
 const LIGHTER_ITEM_NAME := "lighter"
 const TNT_BLOCK_NAME := "tnt"
 const FIRE_SOURCE_IGNITION_CHANCE := 0.22
@@ -6310,6 +6316,7 @@ func reset_player() -> void:
 	player["climbing"] = false
 	player["climb_col"] = -1
 	player["health"] = MAX_PLAYER_HEALTH
+	last_player_death_cause = ""
 	player["nourishment"] = maxi(50, int(player.get("nourishment", MAX_NOURISHMENT)))
 	_nourishment_drain_elapsed = 0.0
 	_nourishment_recovery_elapsed = 0.0
@@ -6519,6 +6526,7 @@ func restore_multiplayer_player_position(state: Dictionary) -> bool:
 		player["vy"] = 0.0
 		player["on_ground"] = bool(state.get("on_ground", false)) and candidate.is_equal_approx(requested)
 		player["health"] = clampi(int(state.get("health", MAX_PLAYER_HEALTH)), 1, MAX_PLAYER_HEALTH)
+		last_player_death_cause = ""
 		player["nourishment"] = clampi(int(state.get("nourishment", player.get("nourishment", MAX_NOURISHMENT))), 0, MAX_NOURISHMENT)
 		player["jump_coyote"] = 0.0
 		player["tree_ghost"] = false
@@ -6532,6 +6540,7 @@ func restore_multiplayer_player_position(state: Dictionary) -> bool:
 
 func revive_player_in_place() -> void:
 	player["health"] = MAX_PLAYER_HEALTH
+	last_player_death_cause = ""
 	player["nourishment"] = maxi(50, int(player.get("nourishment", MAX_NOURISHMENT)))
 	player["vx"] = 0.0
 	player["vy"] = 0.0
@@ -7115,7 +7124,56 @@ func _explode_tnt(center: Vector2i) -> Array[Vector2i]:
 			plant_growth.erase(pos)
 			set_block(pos.x, pos.y, 0)
 			affected.append(pos)
+	var blast_center := Vector2(
+		(float(center.x) + 0.5) * float(BlockDefs.TILE),
+		(float(center.y) + 0.5) * float(BlockDefs.TILE),
+	)
+	var local_damage := 0
+	var local_defeated := false
+	if local_player_damage_enabled:
+		local_damage = _tnt_player_damage(blast_center, player)
+		if local_damage > 0:
+			player["health"] = maxi(0, int(player.get("health", MAX_PLAYER_HEALTH)) - local_damage)
+			Sfx.hurt()
+			if int(player["health"]) <= 0:
+				last_player_death_cause = "explosion"
+				local_defeated = true
+	var remote_damage: Dictionary = {}
+	for raw_player_id in multiplayer_player_targets:
+		var player_id := str(raw_player_id)
+		var target: Variant = multiplayer_player_targets[raw_player_id]
+		if player_id.is_empty() or not target is Dictionary:
+			continue
+		var damage := _tnt_player_damage(blast_center, target as Dictionary)
+		if damage > 0:
+			remote_damage[player_id] = damage
+	if not remote_damage.is_empty():
+		remote_players_damaged_by_explosion.emit(remote_damage)
+	# Let the host apply all remote health changes before local defeat handling.
+	# This keeps a single blast atomic when it downs both duel players.
+	if local_defeated:
+		player_defeated.emit()
+	_tnt_explosion_sequence += 1
+	tnt_explosion_occurred.emit(center, "%s:%d" % [world_id, _tnt_explosion_sequence])
 	return affected
+
+
+func _tnt_player_damage(blast_center: Vector2, target: Dictionary) -> int:
+	if int(target.get("health", MAX_PLAYER_HEALTH)) <= 0:
+		return 0
+	var target_position := Vector2(float(target.get("x", 0.0)), float(target.get("y", 0.0)))
+	var target_size := Vector2(maxf(1.0, float(target.get("w", 20.0))), maxf(1.0, float(target.get("h", 28.0))))
+	var target_rect := Rect2(target_position, target_size)
+	var closest := Vector2(
+		clampf(blast_center.x, target_rect.position.x, target_rect.end.x),
+		clampf(blast_center.y, target_rect.position.y, target_rect.end.y),
+	)
+	var distance := closest.distance_to(blast_center)
+	var radius := float(TNT_EXPLOSION_RADIUS * BlockDefs.TILE)
+	if distance > radius:
+		return 0
+	var falloff := 1.0 - distance / radius
+	return clampi(ceili(float(TNT_EXPLOSION_MAX_PLAYER_DAMAGE) * falloff), 1, TNT_EXPLOSION_MAX_PLAYER_DAMAGE)
 
 
 func _propagate_tile_light(area: Rect2i, values: Dictionary, queue: Array[Vector2i], falloff: float) -> void:
