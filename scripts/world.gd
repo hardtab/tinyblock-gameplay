@@ -17,6 +17,7 @@ signal lighting_changed
 signal one_block_phase_changed(phase_number: int)
 signal challenge_milestone_reached(distance: int)
 signal tile_changed(x: int, y: int, block_id: int, fluid_level: int, falling: bool)
+signal tnt_exploded(position: Vector2i)
 signal plant_changed(anchor_x: int, anchor_y: int)
 signal remote_player_attacked_by_creature(player_id: String, damage: int, knockback_x: float, knockback_y: float)
 
@@ -5900,8 +5901,20 @@ func deserialize_state(state: Dictionary) -> bool:
 		return false
 	for slot_name in ["hand", "feet"]:
 		var equipment_name := _block_name_for_content_id(str((raw_equipment as Dictionary).get(slot_name, "")))
-		if not equipment_name.is_empty() and loaded_inventory.has(equipment_name) and equipment_slot_for_item(equipment_name) == slot_name:
+		if equipment_name.is_empty() or not loaded_inventory.has(equipment_name):
+			continue
+		var expected_slot := equipment_slot_for_item(equipment_name)
+		if expected_slot == slot_name:
 			loaded_equipment[slot_name] = equipment_name
+		var equipment_entry: Dictionary = BlockDefs.BLOCKS.get(equipment_name, {})
+		var equipment_definition: Dictionary = equipment_entry.get("definition", {}) if equipment_entry.get("definition", {}) is Dictionary else {}
+		if expected_slot.is_empty() and str(equipment_definition.get("category", "")) == "fire_tool" and not loaded_hotbar.has(equipment_name):
+			# Items that used to occupy equipment but are now hotbar tools stay
+			# accessible after loading an older save.
+			for index in loaded_hotbar.size():
+				if loaded_hotbar[index].is_empty():
+					loaded_hotbar[index] = equipment_name
+					break
 	# Old saves only knew the hotbar. Migrate their first tool and boots into the
 	# independent slots so existing players immediately retain both bonuses.
 	for hotbar_name: String in loaded_hotbar:
@@ -7025,6 +7038,7 @@ func tick_fire() -> void:
 				changed_tile_positions[pos] = true
 				for affected_pos: Vector2i in _explode_tnt(pos):
 					changed_tile_positions[affected_pos] = true
+				tnt_exploded.emit(pos)
 			else:
 				tree_growth.erase(pos)
 				set_block(pos.x, pos.y, 0)
@@ -12022,14 +12036,15 @@ func equipment_slot_for_item(block_name: String) -> String:
 	var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
 	match str(definition.get("category", "")):
 		"mobility_tool": return "feet"
-		"mining_tool", "weapon", "hybrid", "fire_tool": return "hand"
+		"mining_tool", "weapon", "hybrid": return "hand"
 		_: return ""
 
 
 func item_max_durability(block_name: String) -> int:
 	var entry: Dictionary = BlockDefs.BLOCKS.get(block_name, {})
 	var definition: Dictionary = entry.get("definition", {}) if entry.get("definition", {}) is Dictionary else {}
-	if not entry.get("item", false) or equipment_slot_for_item(block_name).is_empty():
+	var category := str(definition.get("category", ""))
+	if not entry.get("item", false) or (equipment_slot_for_item(block_name).is_empty() and category != "fire_tool"):
 		return 0
 	var durability: Dictionary = definition.get("durability", {}) if definition.get("durability", {}) is Dictionary else {}
 	if int(durability.get("max_uses", 0)) > 0:

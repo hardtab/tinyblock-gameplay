@@ -270,6 +270,8 @@ func _bind_sim_signals() -> void:
 		sim.challenge_milestone_reached.connect(_on_challenge_milestone_reached)
 	if not sim.tideglass_bridge_cell_crystallized.is_connected(_on_tideglass_bridge_cell_crystallized):
 		sim.tideglass_bridge_cell_crystallized.connect(_on_tideglass_bridge_cell_crystallized)
+	if not sim.tnt_exploded.is_connected(_on_tnt_exploded):
+		sim.tnt_exploded.connect(_on_tnt_exploded)
 
 
 func _on_player_defeated() -> void:
@@ -289,6 +291,31 @@ func _on_tideglass_bridge_cell_crystallized(position: Vector2i, step_index: int,
 	Sfx.tideglass_crystallize(step_index, total_steps)
 	if is_instance_valid(_reaction_layer):
 		_reaction_layer.queue_redraw()
+
+
+func _on_tnt_exploded(position: Vector2i) -> void:
+	Sfx.tnt_explosion()
+	_emit_world_sound_event("tnt_explosion", position)
+
+
+func _emit_world_sound_event(event_name: String, position: Vector2i) -> void:
+	if not MultiplayerClient.is_host():
+		return
+	multiplayer_action_requested.emit("world_action_event", {
+		"sound": event_name,
+		"x": position.x,
+		"y": position.y,
+	})
+
+
+func _try_ignite_with_lighter(position: Vector2i) -> void:
+	if multiplayer_guest:
+		multiplayer_action_requested.emit("ignite_with_lighter", {"x": position.x, "y": position.y})
+		return
+	if not sim.ignite_with_lighter(position.x, position.y):
+		return
+	Sfx.lighter_ignite()
+	_emit_world_sound_event("lighter_ignite", position)
 
 
 func start_new_world(mode: String = WorldSim.WORLD_MODE_SKYBLOCK, access_mode: String = WorldSim.ACCESS_MODE_OFFLINE, keep_inventory_on_death: bool = false, prefer_starter_biome: bool = false, world_seed: int = 0, duel_explosives_enabled: bool = false) -> bool:
@@ -770,10 +797,7 @@ func try_keyboard_place() -> void:
 	_last_place_msec = now
 	var placed_name := str(sim.selected)
 	if placed_name == "lighter":
-		if multiplayer_guest:
-			multiplayer_action_requested.emit("ignite_with_lighter", {"x": tile.x, "y": tile.y})
-		else:
-			sim.ignite_with_lighter(tile.x, tile.y)
+		_try_ignite_with_lighter(tile)
 		return
 	if multiplayer_guest:
 		var valid_request := sim.can_place_block(tile.x, tile.y)
@@ -829,10 +853,7 @@ func try_place_at_screen(screen_pos: Vector2) -> void:
 		return
 	var placed_name := str(sim.selected)
 	if placed_name == "lighter":
-		if multiplayer_guest:
-			multiplayer_action_requested.emit("ignite_with_lighter", {"x": tile.x, "y": tile.y})
-		else:
-			sim.ignite_with_lighter(tile.x, tile.y)
+		_try_ignite_with_lighter(tile)
 		return
 	if multiplayer_guest:
 		var valid_request := sim.can_place_block(tile.x, tile.y)

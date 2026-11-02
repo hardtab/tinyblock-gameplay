@@ -83,6 +83,61 @@ func _make_thunder() -> AudioStreamWAV:
 	return stream
 
 
+func _make_lighter_ignite() -> AudioStreamWAV:
+	var sample_rate := 22050
+	var duration := 0.19
+	var count := int(sample_rate * duration)
+	var data := PackedByteArray()
+	data.resize(count * 2)
+	var noise_seed := 918273
+	for i in count:
+		var t := float(i) / float(sample_rate)
+		noise_seed = posmod(noise_seed * 1664525 + 1013904223, 2147483647)
+		var noise := float(noise_seed) / 1073741823.5 - 1.0
+		var strike := noise * exp(-250.0 * t) * 0.72
+		var scrape_time := maxf(0.0, t - 0.018)
+		var scrape := noise * exp(-28.0 * scrape_time) * (0.42 if t >= 0.018 else 0.0)
+		var flame_time := maxf(0.0, t - 0.07)
+		var flame := sin(TAU * 510.0 * flame_time) * exp(-18.0 * flame_time) * (0.22 if t >= 0.07 else 0.0)
+		var sample := int(clamp((strike + scrape + flame) * 0.22 * 32767.0, -32768.0, 32767.0))
+		data[i * 2] = sample & 0xFF
+		data[i * 2 + 1] = (sample >> 8) & 0xFF
+	var stream := AudioStreamWAV.new()
+	stream.format = AudioStreamWAV.FORMAT_16_BITS
+	stream.mix_rate = sample_rate
+	stream.stereo = false
+	stream.data = data
+	return stream
+
+
+func _make_tnt_explosion() -> AudioStreamWAV:
+	var sample_rate := 22050
+	var duration := 0.68
+	var count := int(sample_rate * duration)
+	var data := PackedByteArray()
+	data.resize(count * 2)
+	var noise_seed := 492017
+	var low_noise := 0.0
+	for i in count:
+		var t := float(i) / float(sample_rate)
+		noise_seed = posmod(noise_seed * 1664525 + 1013904223, 2147483647)
+		var white := float(noise_seed) / 1073741823.5 - 1.0
+		low_noise = low_noise * 0.94 + white * 0.06
+		var crack := white * exp(-34.0 * t)
+		var body_envelope := exp(-4.7 * t) * minf(1.0, t * 30.0)
+		var rumble := (low_noise * 2.2 + sin(TAU * 47.0 * t) * 0.32 + sin(TAU * 73.0 * t) * 0.18) * body_envelope
+		var debris := signf(sin(TAU * lerpf(760.0, 210.0, t / duration) * t)) * exp(-8.0 * t) * 0.12
+		var sample := int(clamp((crack * 0.9 + rumble + debris) * 0.24 * 32767.0, -32768.0, 32767.0))
+		data[i * 2] = sample & 0xFF
+		data[i * 2 + 1] = (sample >> 8) & 0xFF
+	var stream := AudioStreamWAV.new()
+	stream.format = AudioStreamWAV.FORMAT_16_BITS
+	stream.mix_rate = sample_rate
+	stream.stereo = false
+	stream.data = data
+	return stream
+
+
 func _make_chest_open() -> AudioStreamWAV:
 	var sample_rate := 22050
 	var duration := 0.24
@@ -226,6 +281,8 @@ func play_proximity_event(event_name: String, block_name: String = "", distance_
 		"craft": _burst([280.0, 360.0], 0.07, 3, 0.035, gain)
 		"chest_open": _play_stream(_make_chest_open(), gain)
 		"tool_break": _play_stream(_make_tool_break(), gain)
+		"lighter_ignite": _play_stream(_make_lighter_ignite(), gain)
+		"tnt_explosion": _play_stream(_make_tnt_explosion(), gain)
 
 
 func _play_stream(stream: AudioStream, gain: float = 1.0) -> void:
@@ -290,6 +347,18 @@ func chest_open() -> void:
 	add_child(player)
 	player.finished.connect(player.queue_free)
 	player.play()
+
+
+func lighter_ignite() -> void:
+	if not _enabled:
+		return
+	_play_stream(_make_lighter_ignite())
+
+
+func tnt_explosion() -> void:
+	if not _enabled:
+		return
+	_play_stream(_make_tnt_explosion())
 
 
 func tool_break() -> void:
