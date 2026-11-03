@@ -251,6 +251,9 @@ func decide(observation: Dictionary) -> Dictionary:
 	# follow target before choosing this tick's action.
 	_sync_follow_route_failures(observation)
 	_sync_flee_route_failures(observation)
+	var explosive_evasion := _explosive_evasion_action(observation, legal)
+	if not explosive_evasion.is_empty():
+		return explosive_evasion
 
 	# Immediate survival has priority over social or gathering behaviour.
 	var threats: Array = _as_array(observation.get("threats", []))
@@ -931,6 +934,111 @@ func _decision(goal: String, action: String, target: Dictionary, commit_for_ms: 
 	if target.has("block"):
 		decision["block"] = str(target.get("block", ""))
 	return Contract.normalize_decision(decision)
+
+
+func _explosive_evasion_action(observation: Dictionary, legal: PackedStringArray) -> Dictionary:
+	var self_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+	var explosives := _active_explosives(observation)
+	if explosives.is_empty():
+		return {}
+	var current_risk := _explosive_risk(self_state, explosives)
+	if current_risk <= 0:
+		return {}
+	var best_safe: Dictionary = {}
+	var best_safe_steps := 2147483647
+	var best_partial: Dictionary = {}
+	var best_partial_risk := current_risk
+	var best_partial_steps := 2147483647
+	for raw_waypoint in _as_array(observation.get("safe_exploration_waypoints", [])):
+		if not raw_waypoint is Dictionary:
+			continue
+		var waypoint := raw_waypoint as Dictionary
+		if not bool(waypoint.get("reachable", false)):
+			continue
+		var support: Array = waypoint.get("support_tile", []) if waypoint.get("support_tile", []) is Array else []
+		if support.size() < 2:
+			continue
+		var route_steps := maxi(1, int(waypoint.get("route_steps", 1)))
+		if route_steps > 32:
+			continue
+		var candidate_state := self_state.duplicate(true)
+		var position := Contract.target_position(waypoint)
+		candidate_state["x"] = position.x
+		candidate_state["y"] = position.y
+		if _explosive_candidate_touches_fire(candidate_state, observation):
+			continue
+		var risk := _explosive_risk(candidate_state, explosives)
+		if risk <= 0:
+			if route_steps < best_safe_steps:
+				best_safe_steps = route_steps
+				best_safe = waypoint.duplicate(true)
+		elif risk < best_partial_risk:
+			best_partial_risk = risk
+			best_partial_steps = route_steps
+			best_partial = waypoint.duplicate(true)
+		elif risk == best_partial_risk and risk < current_risk and route_steps < best_partial_steps:
+			best_partial_steps = route_steps
+			best_partial = waypoint.duplicate(true)
+	var escape_waypoint := best_safe if not best_safe.is_empty() else best_partial
+	if not escape_waypoint.is_empty() and Contract.ACTION_MOVE_TO in legal:
+		var support_tile: Array = escape_waypoint.get("support_tile", []) if escape_waypoint.get("support_tile", []) is Array else []
+		var tile_x := int(support_tile[0])
+		var tile_y := int(support_tile[1])
+		var target := escape_waypoint.duplicate(true)
+		target["id"] = "explosive-escape:%d:%d" % [tile_x, tile_y]
+		target["support_tile"] = [tile_x, tile_y]
+		return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_MOVE_TO, target, 3000, 1.0)
+	if Contract.ACTION_WAIT in legal:
+		# A host-known safe step is preferable, but never invent a route across
+		# missing terrain or a cliff. Re-evaluate as soon as the next observation
+		# arrives so the fuse does not leave the bot committed to a long wait.
+		return _decision(Contract.GOAL_SURVIVE, Contract.ACTION_WAIT, {}, 250, 0.99)
+	return {}
+
+
+func _active_explosives(observation: Dictionary) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		if int(tile.get("fire_steps", 0)) <= 0:
+			continue
+		var profile: Dictionary = tile.get("explosive_profile", {}) if tile.get("explosive_profile", {}) is Dictionary else {}
+		if profile.is_empty():
+			continue
+		var explosive := tile.duplicate(true)
+		explosive["explosive_profile"] = profile.duplicate(true)
+		explosive["id"] = "explosive:%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]
+		result.append(explosive)
+	return result
+
+
+func _explosive_risk(player_state: Dictionary, explosives: Array[Dictionary]) -> int:
+	var risk := 0
+	for explosive in explosives:
+		var profile: Dictionary = explosive.get("explosive_profile", {}) if explosive.get("explosive_profile", {}) is Dictionary else {}
+		risk += Perception.explosive_player_damage(player_state, explosive, profile)
+	return risk
+
+
+func _explosive_candidate_touches_fire(player_state: Dictionary, observation: Dictionary) -> bool:
+	var position := Contract.target_position(player_state)
+	var size := Vector2(maxf(1.0, float(player_state.get("w", 20.0))), maxf(1.0, float(player_state.get("h", 28.0))))
+	var avatar_rect := Rect2(position, size)
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		if int(tile.get("fire_steps", 0)) <= 0:
+			continue
+		var tile_rect := Rect2(
+			Vector2(float(int(tile.get("x", 0))) * ROUTE_TILE, float(int(tile.get("y", 0))) * ROUTE_TILE),
+			Vector2(ROUTE_TILE, ROUTE_TILE),
+		)
+		if avatar_rect.intersects(tile_rect):
+			return true
+	return false
 
 
 func _as_array(value: Variant) -> Array:

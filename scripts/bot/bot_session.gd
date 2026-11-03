@@ -159,6 +159,8 @@ var _structural_memory_path := DEFAULT_STRUCTURAL_MEMORY_PATH
 var _structural_memory_cells: Dictionary = {}
 var _opened_generated_chest_cells: Dictionary = {}
 var _terrain_tiles: Dictionary = {}
+## Host-authoritative fire and fuse countdowns keyed by world tile.
+var _terrain_fire_steps: Dictionary = {}
 ## Only host-reported level zero is a collectible water/lava source. A tile
 ## name alone cannot distinguish it from a temporary flow.
 var _terrain_fluid_levels: Dictionary = {}
@@ -449,6 +451,7 @@ func join_session(record: Dictionary) -> void:
 	_opened_generated_chest_cells.clear()
 	_action_loop_blocked_until.clear()
 	_terrain_tiles.clear()
+	_terrain_fire_steps.clear()
 	_terrain_fluid_levels.clear()
 	_invalidate_jump_landing_cache()
 	_terrain_known_chunks.clear()
@@ -3147,6 +3150,7 @@ func _terrain_climbable_tile(tile: Vector2i) -> bool:
 
 func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 	_terrain_tiles.clear()
+	_terrain_fire_steps.clear()
 	_terrain_fluid_levels.clear()
 	_invalidate_jump_landing_cache()
 	_terrain_observed_cells.clear()
@@ -3170,6 +3174,22 @@ func _rebuild_terrain_index(raw_tiles: Variant) -> void:
 			if bool(tile.get("preserves_support_on_mine", false)):
 				_support_preserving_mine_tiles[key] = true
 	_physics_route_replan_msec = 0
+
+
+func _rebuild_burning_tile_index(raw_burning: Variant) -> void:
+	_terrain_fire_steps.clear()
+	if not raw_burning is Array:
+		return
+	for raw_entry in raw_burning:
+		if not raw_entry is Dictionary:
+			continue
+		var entry := raw_entry as Dictionary
+		var tile_x := int(entry.get("x", WorldSim.COORD_LIMIT + 1))
+		var tile_y := int(entry.get("y", WorldSim.COORD_LIMIT + 1))
+		var steps := maxi(0, int(entry.get("steps", 0)))
+		if absi(tile_x) > WorldSim.COORD_LIMIT or absi(tile_y) > WorldSim.COORD_LIMIT or steps <= 0:
+			continue
+		_terrain_fire_steps["%d:%d" % [tile_x, tile_y]] = steps
 
 
 func _rebuild_fluid_levels(raw_fluids: Variant) -> void:
@@ -3403,11 +3423,14 @@ func _merge_streamed_chunk_terrain(state: Dictionary) -> bool:
 	var chunk_x := int(state.get("chunk_x", WorldSim.COORD_LIMIT))
 	var raw_tiles: Variant = state.get("tiles", null)
 	var raw_fluids: Variant = state.get("fluids", null)
+	var has_burning_payload := state.has("burning_tiles")
+	var raw_burning: Variant = state.get("burning_tiles", [])
 	if (
 		absi(chunk_x) > WorldSim.COORD_LIMIT / WorldSim.CHUNK_WIDTH
 		or not state.get("chunk", null) is Dictionary
 		or not raw_tiles is Array
 		or not raw_fluids is Array
+		or (has_burning_payload and not raw_burning is Array)
 	):
 		return false
 	var defs := get_node_or_null("/root/BlockDefs")
@@ -3433,6 +3456,23 @@ func _merge_streamed_chunk_terrain(state: Dictionary) -> bool:
 		):
 			return false
 		resolved_tiles.append({"x": tile_x, "y": tile_y, "block_name": block_name, "content_id": str(tile.get("content_id", ""))})
+	var resolved_burning: Array[Dictionary] = []
+	if has_burning_payload:
+		for raw_entry in raw_burning:
+			if not raw_entry is Dictionary:
+				return false
+			var entry := raw_entry as Dictionary
+			var tile_x := int(entry.get("x", WorldSim.COORD_LIMIT + 1))
+			var tile_y := int(entry.get("y", WorldSim.COORD_LIMIT + 1))
+			var steps := maxi(0, int(entry.get("steps", 0)))
+			if (
+				absi(tile_x) > WorldSim.COORD_LIMIT
+				or absi(tile_y) > WorldSim.COORD_LIMIT
+				or floori(float(tile_x) / float(WorldSim.CHUNK_WIDTH)) != chunk_x
+			):
+				return false
+			if steps > 0:
+				resolved_burning.append({"x": tile_x, "y": tile_y, "steps": steps})
 	# Containers ride on the same authoritative chunk payload. Validate them
 	# before any mutation so a malformed coordinate cannot corrupt the cached
 	# container index; an absent field means "not streamed" and leaves the
@@ -3462,6 +3502,8 @@ func _merge_streamed_chunk_terrain(state: Dictionary) -> bool:
 	# horizontal bounds so old/absent cells cannot survive a procedural update.
 	_erase_chunk_index_keys(_terrain_tiles, chunk_x)
 	_erase_chunk_index_keys(_terrain_fluid_levels, chunk_x)
+	if has_burning_payload:
+		_erase_chunk_index_keys(_terrain_fire_steps, chunk_x)
 	_erase_chunk_index_keys(_terrain_observed_cells, chunk_x)
 	_erase_chunk_index_keys(_support_preserving_mine_tiles, chunk_x)
 	_erase_chunk_index_keys(_plant_tiles, chunk_x)
@@ -3476,6 +3518,8 @@ func _merge_streamed_chunk_terrain(state: Dictionary) -> bool:
 		var key := "%d:%d" % [int(fluid.get("x", WorldSim.COORD_LIMIT + 1)), int(fluid.get("y", WorldSim.COORD_LIMIT + 1))]
 		if str(_terrain_tiles.get(key, "")) in ["water", "lava", "core.water", "core.lava"]:
 			_terrain_fluid_levels[key] = int(fluid.get("level", -1))
+	for entry in resolved_burning:
+		_terrain_fire_steps["%d:%d" % [int(entry["x"]), int(entry["y"])]] = int(entry["steps"])
 	_terrain_known_chunks[chunk_x] = true
 	var plant_entries: Array = state.get("plant_growth", []) if state.get("plant_growth", []) is Array else []
 	for raw_plant in plant_entries:
@@ -3626,11 +3670,18 @@ func _apply_tile_batch(payload: Dictionary) -> void:
 		if int(tile.get("block_id", 1)) == 0 or name == "air":
 			_terrain_tiles.erase(key)
 			_terrain_fluid_levels.erase(key)
+			_terrain_fire_steps.erase(key)
 			_support_preserving_mine_tiles.erase(key)
 			_forget_protected_build_cell(key)
 			_opened_generated_chest_cells.erase(key)
 		elif not name.is_empty():
 			_terrain_tiles[key] = name
+			if tile.has("fire_steps"):
+				var fire_steps := maxi(0, int(tile.get("fire_steps", 0)))
+				if fire_steps > 0:
+					_terrain_fire_steps[key] = fire_steps
+				else:
+					_terrain_fire_steps.erase(key)
 			if _structural_memory_cells.has(key) and _normalized_block_name(str((_structural_memory_cells[key] as Dictionary).get("block", ""))) != _normalized_block_name(name):
 				_forget_protected_build_cell(key)
 			elif _protected_build_cells.has(key) and _normalized_block_name(str((_protected_build_cells[key] as Dictionary).get("block", ""))) != _normalized_block_name(name):
@@ -5158,8 +5209,17 @@ func _apply_world_snapshot(snapshot: Dictionary) -> void:
 	elif str(snapshot_generation.get("mode", "")).to_lower() == "challenge_run":
 		var challenge_state: Dictionary = _world_snapshot.get("challenge", {}) if _world_snapshot.get("challenge", {}) is Dictionary else {}
 		_live_challenge_best_distance = maxi(_live_challenge_best_distance, maxi(0, int(challenge_state.get("best_distance", 0))))
+	# Discover profiles are world-scoped. Register the snapshot definitions
+	# before resolving block content IDs or active fuse entries.
+	var block_defs := get_node_or_null("/root/BlockDefs")
+	var generated_definitions: Variant = _world_snapshot.get("generated_definitions", [])
+	if block_defs != null and block_defs.has_method("register_generated_block") and generated_definitions is Array:
+		for raw_definition in generated_definitions:
+			if raw_definition is Dictionary:
+				block_defs.call("register_generated_block", raw_definition)
 	_rebuild_known_chunk_index(snapshot_generation.get("chunks", []))
 	_rebuild_terrain_index(_world_snapshot.get("tiles", []))
+	_rebuild_burning_tile_index(_world_snapshot.get("burning_tiles", []))
 	_rebuild_fluid_levels(_world_snapshot.get("fluids", []))
 	_rebuild_plant_index(_world_snapshot.get("plant_growth", _world_snapshot.get("plants", [])))
 	_seed_tree_growth_resources(_world_snapshot.get("tree_growth", []))
@@ -7061,8 +7121,22 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 			continue
 		var block_name := str(_terrain_tiles[key])
 		var block := _block_entry(block_name)
+		var fire_steps := int(_terrain_fire_steps.get(key, 0))
+		var definition: Dictionary = block.get("definition", {}) if block.get("definition", {}) is Dictionary else {}
+		var effects: Dictionary = definition.get("effects", {}) if definition.get("effects", {}) is Dictionary else {}
+		var explosive_profile: Dictionary = effects.get("explosive", {}) if effects.get("explosive", {}) is Dictionary else {}
+		var gravity_mode := str(explosive_profile.get("gravity_mode", "static"))
+		var below_key := "%d:%d" % [tile_x, tile_y + 1]
+		var below_block := _block_entry(str(_terrain_tiles.get(below_key, "")))
+		var explosive_falling := (
+			fire_steps > 0
+			and not explosive_profile.is_empty()
+			and gravity_mode in ["on_ignite", "always"]
+			and _terrain_cell_is_known(tile_x, tile_y + 1)
+			and not bool(below_block.get("solid", false))
+		)
 		var regenerates_on_mine := _is_regenerating_block_tile(tile_x, tile_y)
-		result.append({
+		var terrain_entry := {
 			"x": tile_x,
 			"y": tile_y,
 			"block_name": block_name,
@@ -7075,7 +7149,12 @@ func _terrain_observation(self_state: Dictionary) -> Array:
 			"hardness": float(block.get("hardness", 0.0)),
 			"preserves_support_on_mine": bool(_support_preserving_mine_tiles.get(key, false)) or regenerates_on_mine,
 			"regenerates_on_mine": regenerates_on_mine,
-		})
+			"fire_steps": fire_steps,
+			"falling": explosive_falling,
+		}
+		if fire_steps > 0 and not explosive_profile.is_empty():
+			terrain_entry["explosive_profile"] = explosive_profile.duplicate(true)
+		result.append(terrain_entry)
 	return result
 
 

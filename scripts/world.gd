@@ -5053,6 +5053,16 @@ func serialize_chunk_state(chunk_x: int) -> Dictionary:
 			continue
 		var source: Dictionary = containers[pos]
 		container_entries.append({"x": pos.x, "y": pos.y, "data": source.duplicate(true)})
+	var burning_entries: Array[Dictionary] = []
+	for pos: Vector2i in burning_tiles.keys():
+		if _chunk_x_for_tile(pos.x) != chunk_x:
+			continue
+		burning_entries.append({
+			"x": pos.x,
+			"y": pos.y,
+			"steps": int(burning_tiles[pos]),
+			"fire_color": str(burning_tile_colors.get(pos, DEFAULT_FIRE_COLOR)),
+		})
 	var definitions: Array[Dictionary] = []
 	for raw_content_id in used_content_ids.keys():
 		var content_id := str(raw_content_id)
@@ -5074,6 +5084,7 @@ func serialize_chunk_state(chunk_x: int) -> Dictionary:
 		"tree_growth": tree_entries,
 		"plant_growth": plant_entries,
 		"containers": container_entries,
+		"burning_tiles": burning_entries,
 		"generated_definitions": definitions,
 		"biome_definitions": streamed_biomes,
 	}
@@ -5086,6 +5097,10 @@ func apply_chunk_state(state: Dictionary) -> bool:
 	var raw_tiles = state.get("tiles", null)
 	var raw_fluids = state.get("fluids", null)
 	if not raw_tiles is Array or not raw_fluids is Array:
+		return false
+	var has_burning_payload := state.has("burning_tiles")
+	var raw_burning: Variant = state.get("burning_tiles", [])
+	if has_burning_payload and not raw_burning is Array:
 		return false
 	for raw_definition in state.get("generated_definitions", []):
 		if raw_definition is Dictionary and BlockDefs.register_generated_block(raw_definition) != "":
@@ -5111,9 +5126,30 @@ func apply_chunk_state(state: Dictionary) -> bool:
 		if not in_bounds(pos.x, pos.y) or _chunk_x_for_tile(pos.x) != chunk_x:
 			return false
 		incoming_fluids[pos] = {"level": clampi(int(entry.get("level", 0)), 0, BlockDefs.MAX_FLUID_LEVEL - 1), "falling": bool(entry.get("falling", false))}
+	var incoming_burning: Dictionary = {}
+	if has_burning_payload:
+		for raw_entry in raw_burning:
+			if not raw_entry is Dictionary:
+				return false
+			var entry := raw_entry as Dictionary
+			var pos := Vector2i(int(entry.get("x", COORD_LIMIT + 1)), int(entry.get("y", COORD_LIMIT + 1)))
+			var steps := maxi(0, int(entry.get("steps", 0)))
+			if not in_bounds(pos.x, pos.y) or _chunk_x_for_tile(pos.x) != chunk_x:
+				return false
+			if steps > 0:
+				incoming_burning[pos] = {
+					"steps": clampi(steps, 1, 80),
+					"fire_color": str(entry.get("fire_color", DEFAULT_FIRE_COLOR)),
+				}
 	_suspend_state_changed = true
 	for pos: Vector2i in (chunk_tiles.get(chunk_x, {}) as Dictionary).keys():
 		_erase_generated_tile(pos)
+	if has_burning_payload:
+		for raw_pos in burning_tiles.keys():
+			var pos := raw_pos as Vector2i
+			if _chunk_x_for_tile(pos.x) == chunk_x:
+				burning_tiles.erase(pos)
+				burning_tile_colors.erase(pos)
 	for raw_anchor in plant_growth.keys():
 		var anchor := raw_anchor as Vector2i
 		var data: Dictionary = plant_growth[anchor]
@@ -5134,6 +5170,16 @@ func apply_chunk_state(state: Dictionary) -> bool:
 		_set_generated_block(pos.x, pos.y, str(entry["block_name"]), int(fluid.get("level", -1)))
 		if not fluid.is_empty():
 			fluid_falling[pos] = bool(fluid.get("falling", false))
+	for raw_pos in incoming_burning:
+		var pos := raw_pos as Vector2i
+		var entry: Dictionary = incoming_burning[pos]
+		var block := get_block(pos.x, pos.y)
+		var profile := explosive_effects_for_block(block)
+		if bool(block.get("flammability", 0.0) > 0.0) or not profile.is_empty():
+			burning_tiles[pos] = int(entry.get("steps", 0))
+			var fire_color := str(entry.get("fire_color", DEFAULT_FIRE_COLOR))
+			if Color.html_is_valid(fire_color):
+				burning_tile_colors[pos] = fire_color
 	for raw_entry in state.get("tree_growth", []):
 		if raw_entry is Dictionary:
 			var pos := Vector2i(int(raw_entry.get("x", 0)), int(raw_entry.get("y", 0)))

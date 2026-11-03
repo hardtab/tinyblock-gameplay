@@ -86,6 +86,9 @@ func tick(observation: Dictionary, delta: float, now_msec: int) -> void:
 		# A held mine may have committed for longer than the decision interval.
 		# Once an opponent interrupts it, decide how to fight on this tick.
 		_next_decision_msec = now_msec
+	if _explosive_should_preempt_action(observation):
+		executor.cancel("explosive_preempted")
+		_next_decision_msec = now_msec
 	if _hostile_creature_should_preempt_travel(observation, now_msec):
 		executor.cancel("hostile_creature_preempted")
 		# Cancelling must actually re-open the decision loop this tick: the leg
@@ -149,6 +152,38 @@ func _combat_should_preempt_mining(observation: Dictionary) -> bool:
 	if bool(target.get("combat_route", false)):
 		return false
 	return _player_combat_focus_active(observation)
+
+
+## A fresh host tile batch can reveal a fuse while an attack, follow, or gather
+## action is still committed. Let the survival policy replace it immediately;
+## keep an already selected escape leg if it still lowers explosive risk.
+func _explosive_should_preempt_action(observation: Dictionary) -> bool:
+	if executor == null or not executor.is_busy():
+		return false
+	if Perception.active_explosive_threat(observation).is_empty():
+		return false
+	var current_action := executor.current_action()
+	if current_action == Contract.ACTION_WAIT:
+		return false
+	var current: Dictionary = executor.current_decision if executor.current_decision is Dictionary else {}
+	var target: Dictionary = current.get("target", {}) if current.get("target", {}) is Dictionary else {}
+	if str(current.get("target_id", "")).begins_with("explosive-escape:"):
+		if (
+			provider != null
+			and provider.has_method("_active_explosives")
+			and provider.has_method("_explosive_risk")
+		):
+			var explosives: Array = provider.call("_active_explosives", observation)
+			var current_state: Dictionary = observation.get("self", {}) if observation.get("self", {}) is Dictionary else {}
+			var current_risk := int(provider.call("_explosive_risk", current_state, explosives))
+			var target_state := current_state.duplicate(true)
+			var target_position := Contract.target_position(target)
+			target_state["x"] = target_position.x
+			target_state["y"] = target_position.y
+			var target_risk := int(provider.call("_explosive_risk", target_state, explosives))
+			if target_risk < current_risk:
+				return false
+	return true
 
 
 ## A long ordinary travel leg must not hide a hostile that is already in strike

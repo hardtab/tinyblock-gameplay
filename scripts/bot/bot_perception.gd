@@ -92,6 +92,93 @@ static func _within_host_mine_reach(self_state: Dictionary, resource: Dictionary
 	return player_center.distance_to(Contract.target_position(resource)) < HOST_MINE_REACH
 
 
+## Return the active fuse with the greatest damage at the avatar's current pose.
+## BotSession supplies only host-authoritative fire_steps and the registered
+## block definition, so arbitrary Discover explosives use the same path as core TNT.
+static func active_explosive_threat(observation: Dictionary) -> Dictionary:
+	var self_state: Dictionary = _dictionary(observation.get("self", {}))
+	var best: Dictionary = {}
+	var best_damage := 0
+	for raw_tile in _as_array(observation.get("terrain_tiles", [])):
+		if not raw_tile is Dictionary:
+			continue
+		var tile := raw_tile as Dictionary
+		if int(tile.get("fire_steps", 0)) <= 0:
+			continue
+		var profile: Dictionary = tile.get("explosive_profile", {}) if tile.get("explosive_profile", {}) is Dictionary else {}
+		if profile.is_empty():
+			continue
+		var damage := explosive_player_damage(self_state, tile, profile)
+		if damage <= best_damage:
+			continue
+		best_damage = damage
+		best = tile.duplicate(true)
+		best["explosive_profile"] = profile.duplicate(true)
+		best["id"] = "explosive:%d:%d" % [int(tile.get("x", 0)), int(tile.get("y", 0))]
+		best["damage"] = damage
+	return best
+
+
+## Mirrors WorldSim._tnt_player_damage. blast_randomness changes terrain
+## destruction but not player damage, so the full configured shape is used.
+static func explosive_player_damage(target: Dictionary, explosive_tile: Dictionary, profile: Dictionary) -> int:
+	if int(target.get("health", 1)) <= 0:
+		return 0
+	var tx := int(explosive_tile.get("x", 0))
+	var ty := int(explosive_tile.get("y", 0))
+	var blast_center := Vector2((float(tx) + 0.5) * BlockDefs.TILE, (float(ty) + 0.5) * BlockDefs.TILE)
+	var target_position := Contract.target_position(target)
+	var target_size := Vector2(maxf(1.0, float(target.get("w", 20.0))), maxf(1.0, float(target.get("h", 28.0))))
+	var target_rect := Rect2(target_position, target_size)
+	var closest := Vector2(
+		clampf(blast_center.x, target_rect.position.x, target_rect.end.x),
+		clampf(blast_center.y, target_rect.position.y, target_rect.end.y),
+	)
+	var offset := (closest - blast_center).abs()
+	var shape := str(profile.get("blast_shape", "circle"))
+	var radius := float(clampi(int(profile.get("blast_radius_blocks", 4)), 1, 8) * BlockDefs.TILE)
+	var distance := offset.length()
+	match shape:
+		"diamond":
+			distance = offset.x + offset.y
+		"square":
+			distance = maxf(offset.x, offset.y)
+		"cross":
+			var half_tile := float(BlockDefs.TILE) * 0.5
+			var horizontal_arm := offset.x <= radius and offset.y <= half_tile
+			var vertical_arm := offset.y <= radius and offset.x <= half_tile
+			if not horizontal_arm and not vertical_arm:
+				distance = INF
+			elif horizontal_arm and vertical_arm:
+				distance = minf(offset.x, offset.y)
+			elif horizontal_arm:
+				distance = offset.x
+			else:
+				distance = offset.y
+		_:
+			pass
+	if distance <= radius:
+		return clampi(ceili(3.0 * (1.0 - distance / radius)), 1, 3)
+	# An unsupported, lit granular charge can fall before its fuse expires.
+	# Treat a charge already above the avatar as a possible future blast along
+	# the downward path when its horizontal profile can reach the avatar.
+	if not bool(explosive_tile.get("falling", false)) or blast_center.y >= target_rect.position.y:
+		return 0
+	if blast_center.y + radius + float(BlockDefs.TILE) < target_rect.position.y:
+		return 0
+	var horizontal_gap := maxf(
+		maxf(target_rect.position.x - blast_center.x, blast_center.x - target_rect.end.x),
+		0.0,
+	)
+	if shape == "cross":
+		return 3 if horizontal_gap <= float(BlockDefs.TILE) * 0.5 else 0
+	return 3 if horizontal_gap <= radius else 0
+
+
+static func explosive_zone_clear(target: Dictionary, explosive_tile: Dictionary, profile: Dictionary) -> bool:
+	return explosive_player_damage(target, explosive_tile, profile) == 0
+
+
 static func count_live_humans(roster: Variant, own_player_id: String, excluded_ids: Array = [], dedicated_server: bool = false) -> int:
 	var count := 0
 	if roster is Dictionary:
