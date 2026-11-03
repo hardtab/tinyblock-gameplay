@@ -27,6 +27,19 @@ const RTC_MAX_FUTURE_CANDIDATE_BYTES_PER_PEER := 16 * 1024
 const RTC_MAX_CANDIDATE_TEXT_LENGTH := 2048
 const RTC_MAX_CANDIDATE_MEDIA_LENGTH := 64
 const RTC_MAX_CONNECTION_ID_LENGTH := 128
+const MANAGED_JOIN_DIAGNOSTIC_STAGES: Array[String] = ["api", "ws", "signaling", "rtc", "unknown"]
+const MANAGED_JOIN_DIAGNOSTIC_REASONS: Array[String] = [
+	"pending",
+	"request_failed",
+	"invalid_response",
+	"start_failed",
+	"handshake_failed",
+	"connection_lost",
+	"response_timeout",
+	"p2p_unavailable",
+	"connected",
+	"unknown",
+]
 const RTC_CANDIDATE_BATCH_CAPABILITY := "rtc_candidate_batch_v1"
 const RTC_CANDIDATE_BATCH_MAX_CANDIDATES := 8
 const RTC_CANDIDATE_BATCH_MAX_BODY_BYTES := 24 * 1024
@@ -116,6 +129,9 @@ var _rtc_diagnostic_liveness_counters: Dictionary = {}
 var _rtc_diagnostic_liveness_snapshot_msec := 0
 var rtc_diagnostics_enabled := false
 var last_rtc_silence_diagnostics: Dictionary = {}
+var _managed_join_diagnostics_enabled := false
+var _managed_join_diagnostic_stage := "unknown"
+var _managed_join_diagnostic_reason := "unknown"
 var _rtc_reconnect_attempt := 0
 var _rtc_reconnect_left := -1.0
 var _rtc_reconnect_connect_left := 0.0
@@ -148,6 +164,36 @@ static func duel_snapshot_request_supports_explosives(payload: Variant) -> bool:
 	if not payload is Dictionary:
 		return false
 	return supports_duel_explosives((payload as Dictionary).get("capabilities", {}))
+
+
+func begin_managed_join_diagnostics() -> void:
+	_managed_join_diagnostics_enabled = true
+	_managed_join_diagnostic_stage = "api"
+	_managed_join_diagnostic_reason = "pending"
+
+
+func end_managed_join_diagnostics() -> void:
+	_managed_join_diagnostics_enabled = false
+
+
+func set_managed_join_diagnostic(stage: String, reason: String) -> void:
+	if not _managed_join_diagnostics_enabled:
+		return
+	_managed_join_diagnostic_stage = stage if MANAGED_JOIN_DIAGNOSTIC_STAGES.has(stage) else "unknown"
+	_managed_join_diagnostic_reason = reason if MANAGED_JOIN_DIAGNOSTIC_REASONS.has(reason) else "unknown"
+
+
+func managed_join_diagnostic_summary() -> String:
+	if not _managed_join_diagnostics_enabled:
+		return ""
+	return "%s/%s" % [_managed_join_diagnostic_stage, _managed_join_diagnostic_reason]
+
+
+func mark_managed_join_response_timeout() -> void:
+	set_managed_join_diagnostic(
+		"signaling" if _was_open else "ws",
+		"response_timeout",
+	)
 
 
 func _ready() -> void:
@@ -283,6 +329,7 @@ func send_voice_frame(audio: PackedByteArray, sequence: int) -> bool:
 
 func connect_with_ticket(websocket_url: String, ticket: String, code: String = "", allow_websocket_fallback: bool = false, protocol_version: int = PROTOCOL_VERSION) -> Error:
 	disconnect_from_session()
+	set_managed_join_diagnostic("ws", "pending")
 	last_websocket_close_code = -1
 	last_websocket_close_was_clean = false
 	last_rtc_silence_diagnostics.clear()
@@ -301,6 +348,7 @@ func connect_with_ticket(websocket_url: String, ticket: String, code: String = "
 	_rtc_highest_offer_generations.clear()
 	_rtc_highest_offer_connection_ids.clear()
 	if websocket_url.is_empty() or ticket.is_empty():
+		set_managed_join_diagnostic("ws", "invalid_response")
 		return ERR_INVALID_PARAMETER
 	join_code = code
 	session_protocol_version = protocol_version
@@ -310,6 +358,7 @@ func connect_with_ticket(websocket_url: String, ticket: String, code: String = "
 	var error := socket.connect_to_url("%s%sticket=%s" % [websocket_url, separator, ticket.uri_encode()])
 	if error != OK:
 		socket = null
+		set_managed_join_diagnostic("ws", "start_failed")
 	return error
 
 
@@ -400,6 +449,7 @@ func _poll_websocket(delta: float) -> void:
 	if state == WebSocketPeer.STATE_OPEN:
 		if not _was_open:
 			_was_open = true
+			set_managed_join_diagnostic("signaling", "pending")
 			_send_ws({
 				"kind": "control",
 				"type": "hello",
@@ -417,6 +467,15 @@ func _poll_websocket(delta: float) -> void:
 		while socket != null and socket.get_available_packet_count() > 0:
 			_handle_ws_packet(socket.get_packet())
 	elif state == WebSocketPeer.STATE_CLOSED:
+		var diagnostic_stage := "ws"
+		var diagnostic_reason := "handshake_failed"
+		if _was_open:
+			diagnostic_stage = "signaling"
+			diagnostic_reason = "connection_lost"
+			if _ws_connected_received:
+				diagnostic_stage = "rtc"
+				diagnostic_reason = "connection_lost"
+		set_managed_join_diagnostic(diagnostic_stage, diagnostic_reason)
 		var reason := socket.get_close_reason()
 		last_websocket_close_code = socket.get_close_code()
 		last_websocket_close_was_clean = last_websocket_close_code != -1
@@ -464,6 +523,7 @@ func _poll_rtc(delta: float) -> void:
 				if is_guest() and remote_id == _guest_host_id:
 					_reset_rtc_reconnect_state()
 					_set_transport_mode("p2p")
+					set_managed_join_diagnostic("rtc", "connected")
 					_emit_guest_connected_message()
 			while channel.get_available_packet_count() > 0:
 				_handle_rtc_packet(remote_id, channel.get_packet())
@@ -504,8 +564,10 @@ func _poll_rtc(delta: float) -> void:
 		if _guest_connect_time_left <= 0.0:
 			if websocket_fallback_enabled:
 				_set_transport_mode("websocket")
+				set_managed_join_diagnostic("rtc", "connected")
 				_emit_guest_connected_message()
 			else:
+				set_managed_join_diagnostic("rtc", "response_timeout")
 				_schedule_rtc_reconnect("initial_connect_timeout")
 	if not open_game_peers.is_empty():
 		_rtc_ping_left -= delta
@@ -669,6 +731,7 @@ func _handle_connected(message: Dictionary) -> void:
 		message.get("server_capabilities", null),
 	)
 	role = str(message.get("role", ""))
+	set_managed_join_diagnostic("rtc" if role == "guest" else "signaling", "pending" if role == "guest" else "connected")
 	player_id = str(message.get("player_id", ""))
 	session_id = str(message.get("session_id", ""))
 	# Session metadata is normally established by the authenticated HTTP create/
@@ -725,6 +788,7 @@ func _emit_guest_connected_message() -> void:
 	if _connected_message_emitted or _guest_connected_message.is_empty():
 		return
 	_connected_message_emitted = true
+	set_managed_join_diagnostic("rtc", "connected")
 	message_received.emit(_guest_connected_message)
 
 
@@ -1234,6 +1298,7 @@ static func _rtc_reconnect_delay_with_jitter(attempt: int, jitter_sample: float)
 func _fail_p2p_connection() -> void:
 	if socket == null:
 		return
+	set_managed_join_diagnostic("rtc", "p2p_unavailable")
 	print("Multiplayer P2P connection failed; WebSocket fallback is disabled")
 	var active_socket := socket
 	socket = null
