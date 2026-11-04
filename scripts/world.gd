@@ -22,6 +22,7 @@ signal explosion_occurred(position: Vector2i, profile: Dictionary)
 signal plant_changed(anchor_x: int, anchor_y: int)
 signal remote_player_attacked_by_creature(player_id: String, damage: int, knockback_x: float, knockback_y: float)
 signal remote_players_damaged_by_explosion(damage_by_player: Dictionary)
+signal remote_players_knocked_back_by_explosion(event_id: String, knockback_by_player: Dictionary)
 signal tnt_explosion_occurred(position: Vector2i, event_id: String)
 
 const SAVE_SCHEMA_VERSION := 1
@@ -7320,6 +7321,7 @@ func _explode_tnt(center: Vector2i, profile: Dictionary = {}) -> Array[Vector2i]
 	var fire_color := str(resolved_profile.get("fire_color", DEFAULT_FIRE_COLOR))
 	var blast_rng := RandomNumberGenerator.new()
 	blast_rng.seed = int(resolved_profile.get("event_seed", randi()))
+	var falling_block_positions: Array[Vector2i] = []
 	for y_offset in range(-radius, radius + 1):
 		for x_offset in range(-radius, radius + 1):
 			if not _blast_offset_inside(x_offset, y_offset, radius, shape):
@@ -7341,6 +7343,8 @@ func _explode_tnt(center: Vector2i, profile: Dictionary = {}) -> Array[Vector2i]
 			if not explosive_effects_for_block(block).is_empty():
 				if _start_tnt_fuse(pos, TNT_CHAIN_FUSE_STEPS):
 					affected.append(pos)
+				if _block_is_currently_falling(pos, block):
+					falling_block_positions.append(pos)
 				continue
 			if bool(block.get("container", false)) or bool(block.get("fluid", false)) or bool(block.get("item", false)):
 				continue
@@ -7356,10 +7360,18 @@ func _explode_tnt(center: Vector2i, profile: Dictionary = {}) -> Array[Vector2i]
 				if ignite_tile(pos, fire_color):
 					affected.append(pos)
 				continue
+			if _block_is_currently_falling(pos, block):
+				falling_block_positions.append(pos)
+				continue
 			tree_growth.erase(pos)
 			plant_growth.erase(pos)
 			set_block(pos.x, pos.y, 0)
 			affected.append(pos)
+	_apply_explosion_granular_knockback(center, falling_block_positions)
+	_tnt_explosion_sequence += 1
+	var event_id := "%s:%d" % [world_id, _tnt_explosion_sequence]
+	resolved_profile["event_id"] = event_id
+	resolved_profile["event_seed"] = int(resolved_profile.get("event_seed", event_id.hash()))
 	var blast_center := Vector2(
 		(float(center.x) + 0.5) * float(BlockDefs.TILE),
 		(float(center.y) + 0.5) * float(BlockDefs.TILE),
@@ -7369,12 +7381,14 @@ func _explode_tnt(center: Vector2i, profile: Dictionary = {}) -> Array[Vector2i]
 	if local_player_damage_enabled:
 		local_damage = _tnt_player_damage(blast_center, player, resolved_profile)
 		if local_damage > 0:
+			_apply_player_explosion_knockback(player, _tnt_player_knockback(blast_center, player, resolved_profile))
 			player["health"] = maxi(0, int(player.get("health", MAX_PLAYER_HEALTH)) - local_damage)
 			Sfx.hurt()
 			if int(player["health"]) <= 0:
 				last_player_death_cause = "explosion"
 				local_defeated = true
 	var remote_damage: Dictionary = {}
+	var remote_knockback: Dictionary = {}
 	for raw_player_id in multiplayer_player_targets:
 		var player_id := str(raw_player_id)
 		var target: Variant = multiplayer_player_targets[raw_player_id]
@@ -7383,17 +7397,17 @@ func _explode_tnt(center: Vector2i, profile: Dictionary = {}) -> Array[Vector2i]
 		var damage := _tnt_player_damage(blast_center, target as Dictionary, resolved_profile)
 		if damage > 0:
 			remote_damage[player_id] = damage
+			if damage < int((target as Dictionary).get("health", MAX_PLAYER_HEALTH)):
+				remote_knockback[player_id] = _tnt_player_knockback(blast_center, target as Dictionary, resolved_profile)
 	if not remote_damage.is_empty():
 		remote_players_damaged_by_explosion.emit(remote_damage)
 	_damage_creatures_from_explosion(blast_center, resolved_profile)
+	if not remote_knockback.is_empty():
+		remote_players_knocked_back_by_explosion.emit(event_id, remote_knockback)
 	# Let the host apply all remote health changes before local defeat handling.
 	# This keeps a single blast atomic when it downs both duel players.
 	if local_defeated:
 		player_defeated.emit()
-	_tnt_explosion_sequence += 1
-	var event_id := "%s:%d" % [world_id, _tnt_explosion_sequence]
-	resolved_profile["event_id"] = event_id
-	resolved_profile["event_seed"] = int(resolved_profile.get("event_seed", event_id.hash()))
 	tnt_explosion_occurred.emit(center, event_id)
 	return affected
 
@@ -7401,6 +7415,15 @@ func _explode_tnt(center: Vector2i, profile: Dictionary = {}) -> Array[Vector2i]
 func _tnt_player_damage(blast_center: Vector2, target: Dictionary, profile: Dictionary = {}) -> int:
 	if int(target.get("health", MAX_PLAYER_HEALTH)) <= 0:
 		return 0
+	var distance := _tnt_player_blast_distance(blast_center, target, profile)
+	if distance < 0.0:
+		return 0
+	var radius := float(clampi(int(profile.get("blast_radius_blocks", TNT_EXPLOSION_RADIUS)), 1, 8) * BlockDefs.TILE)
+	var falloff := 1.0 - distance / radius
+	return clampi(ceili(float(TNT_EXPLOSION_MAX_PLAYER_DAMAGE) * falloff), 1, TNT_EXPLOSION_MAX_PLAYER_DAMAGE)
+
+
+func _tnt_player_blast_distance(blast_center: Vector2, target: Dictionary, profile: Dictionary = {}) -> float:
 	var target_position := Vector2(float(target.get("x", 0.0)), float(target.get("y", 0.0)))
 	var target_size := Vector2(maxf(1.0, float(target.get("w", 20.0))), maxf(1.0, float(target.get("h", 28.0))))
 	var target_rect := Rect2(target_position, target_size)
@@ -7423,17 +7446,118 @@ func _tnt_player_damage(blast_center: Vector2, target: Dictionary, profile: Dict
 			var horizontal_arm := offset.x <= radius and offset.y <= half_tile
 			var vertical_arm := offset.y <= radius and offset.x <= half_tile
 			if not horizontal_arm and not vertical_arm:
-				return 0
+				return -1.0
 			if horizontal_arm and vertical_arm:
 				distance = minf(offset.x, offset.y)
 			elif horizontal_arm:
 				distance = offset.x
 			else:
 				distance = offset.y
-	if distance > radius:
-		return 0
-	var falloff := 1.0 - distance / radius
-	return clampi(ceili(float(TNT_EXPLOSION_MAX_PLAYER_DAMAGE) * falloff), 1, TNT_EXPLOSION_MAX_PLAYER_DAMAGE)
+	return distance if distance <= radius else -1.0
+
+
+func _tnt_player_knockback(blast_center: Vector2, target: Dictionary, profile: Dictionary = {}) -> Vector2:
+	if int(target.get("health", MAX_PLAYER_HEALTH)) <= 0:
+		return Vector2.ZERO
+	var distance := _tnt_player_blast_distance(blast_center, target, profile)
+	if distance < 0.0:
+		return Vector2.ZERO
+	var radius := float(clampi(int(profile.get("blast_radius_blocks", TNT_EXPLOSION_RADIUS)), 1, 8) * BlockDefs.TILE)
+	var falloff := 1.0 - clampf(distance / radius, 0.0, 1.0)
+	var strength := lerpf(2.0, 6.0, falloff)
+	var target_center := Vector2(
+		float(target.get("x", 0.0)) + maxf(1.0, float(target.get("w", 20.0))) * 0.5,
+		float(target.get("y", 0.0)) + maxf(1.0, float(target.get("h", 28.0))) * 0.5,
+	)
+	var outward := target_center - blast_center
+	if outward.length_squared() < 0.0001:
+		outward = Vector2.UP
+	var impulse := outward.normalized() * strength
+	impulse.y -= strength * 0.4
+	return impulse
+
+
+func _apply_player_explosion_knockback(target: Dictionary, impulse: Vector2) -> void:
+	if impulse.is_zero_approx():
+		return
+	target["_blast_knockback_vx"] = clampf(float(target.get("_blast_knockback_vx", 0.0)) + impulse.x, -12.0, 12.0)
+	target["vy"] = clampf(float(target.get("vy", 0.0)) + impulse.y, -18.0, 18.0)
+	target["climbing"] = false
+	if impulse.y < 0.0:
+		target["on_ground"] = false
+
+
+func _block_is_currently_falling(pos: Vector2i, block: Dictionary) -> bool:
+	if not _block_falls_when_unsupported(pos, block):
+		return false
+	var below := Vector2i(pos.x, pos.y + 1)
+	if not in_bounds(below.x, below.y):
+		return false
+	var below_block := get_block(below.x, below.y)
+	if bool(below_block.get("solid", false)) and not bool(below_block.get("fluid", false)):
+		return false
+	return _granular_target_clear(below) or _granular_target_is_water(below)
+
+
+func _apply_explosion_granular_knockback(center: Vector2i, falling_positions: Array[Vector2i]) -> void:
+	var candidates: Array[Vector2i] = []
+	var unique_positions: Dictionary = {}
+	for pos: Vector2i in falling_positions:
+		if unique_positions.has(pos):
+			continue
+		unique_positions[pos] = true
+		var block := get_block(pos.x, pos.y)
+		if int(block.get("id", 0)) == 0 or not _block_is_currently_falling(pos, block):
+			continue
+		candidates.append(pos)
+	# Moving the outermost cell first allows a column of unsupported sand or a
+	# primed falling charge to move outward one cell at a time without ever
+	# overwriting another block's source cell.
+	candidates.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		var a_distance := a.distance_squared_to(center)
+		var b_distance := b.distance_squared_to(center)
+		if a_distance != b_distance:
+			return a_distance > b_distance
+		if a.y != b.y:
+			return a.y < b.y
+		return a.x < b.x
+	)
+	for pos: Vector2i in candidates:
+		if block_id(pos.x, pos.y) == 0:
+			continue
+		var id := block_id(pos.x, pos.y)
+		var dx := pos.x - center.x
+		var dy := pos.y - center.y
+		var offset := Vector2i.ZERO
+		if dx != 0 and (dy == 0 or absi(dx) >= absi(dy)):
+			offset.x = signi(dx)
+		elif dy != 0:
+			offset.y = signi(dy)
+		else:
+			continue
+		var target := pos + offset
+		if not in_bounds(target.x, target.y) or not _granular_target_clear(target):
+			continue
+		var fuse_steps := int(burning_tiles.get(pos, 0))
+		var fire_color := str(burning_tile_colors.get(pos, ""))
+		var container_state: Variant = containers.get(pos, null)
+		set_block(pos.x, pos.y, 0)
+		if not set_block(target.x, target.y, id):
+			set_block(pos.x, pos.y, id)
+			if fuse_steps > 0:
+				burning_tiles[pos] = fuse_steps
+				burning_tile_colors[pos] = fire_color
+			continue
+		if fuse_steps > 0:
+			burning_tiles[target] = fuse_steps
+			if not fire_color.is_empty():
+				burning_tile_colors[target] = fire_color
+		if container_state is Dictionary:
+			containers[target] = container_state.duplicate(true)
+		# set_block emitted before fuse metadata was transferred. Re-emit the
+		# target so authoritative tile batches carry the same fuse and fire color.
+		if not _suspend_state_changed:
+			tile_changed.emit(target.x, target.y, id, -1, false)
 
 
 func _damage_creatures_from_explosion(blast_center: Vector2, profile: Dictionary = {}) -> Array[String]:
@@ -7462,8 +7586,24 @@ func _damage_creatures_from_explosion(blast_center: Vector2, profile: Dictionary
 			"health": int(creature.get("health", 1)),
 		}
 		var damage := _tnt_player_damage(blast_center, target, profile)
-		if damage > 0 and hit_creature(creature_id, damage):
-			damaged_ids.append(creature_id)
+		if damage <= 0 or not hit_creature(creature_id, damage):
+			continue
+		damaged_ids.append(creature_id)
+		if not creatures.has(creature_id):
+			continue
+		var impulse := _tnt_player_knockback(blast_center, target, profile)
+		var surviving_creature: Dictionary = creatures[creature_id]
+		var conversion := 60.0 / float(BlockDefs.TILE)
+		surviving_creature["_blast_knockback_vx"] = clampf(
+			float(surviving_creature.get("_blast_knockback_vx", 0.0)) + impulse.x * conversion,
+			-24.0,
+			24.0,
+		)
+		surviving_creature["_blast_knockback_vy"] = clampf(
+			float(surviving_creature.get("_blast_knockback_vy", 0.0)) + impulse.y * conversion,
+			-24.0,
+			24.0,
+		)
 	return damaged_ids
 
 
@@ -10359,6 +10499,7 @@ func _tick_creature(creature: Dictionary) -> void:
 			if desired.length() < 0.05 and "shagot" not in creature_tags:
 				desired = _creature_wander_desired(creature, definition)
 			_move_ground_creature(creature, definition, desired.x)
+	_apply_creature_blast_knockback(creature, definition)
 	if hunting_prey and creatures.has(prey_id):
 		var prey_after_move: Dictionary = creatures[prey_id]
 		var prey_position := Vector2(float(prey_after_move.get("x", 0.0)), float(prey_after_move.get("y", 0.0)))
@@ -10371,6 +10512,39 @@ func _tick_creature(creature: Dictionary) -> void:
 		if nearby and int(creature.get("voice_cooldown", 0)) <= 0:
 			Sfx.shagot_voice(social_role)
 			creature["voice_cooldown"] = randi_range(60 * 7, 60 * 15)
+
+
+func _apply_creature_blast_knockback(creature: Dictionary, definition: Dictionary) -> void:
+	var impulse_x := clampf(float(creature.get("_blast_knockback_vx", 0.0)), -24.0, 24.0)
+	var impulse_y := clampf(float(creature.get("_blast_knockback_vy", 0.0)), -24.0, 24.0)
+	if absf(impulse_x) < 0.05 and absf(impulse_y) < 0.05:
+		creature.erase("_blast_knockback_vx")
+		creature.erase("_blast_knockback_vy")
+		return
+	var current := Vector2(float(creature.get("x", 0.0)), float(creature.get("y", 0.0)))
+	if absf(impulse_x) >= 0.05:
+		var next_x := current + Vector2(impulse_x / 60.0, 0.0)
+		if _creature_position_matches(next_x, definition):
+			creature["x"] = next_x.x
+		else:
+			impulse_x = 0.0
+		current = Vector2(float(creature.get("x", current.x)), float(creature.get("y", current.y)))
+	if absf(impulse_y) >= 0.05:
+		var next_y := current + Vector2(0.0, impulse_y / 60.0)
+		if _creature_position_matches(next_y, definition):
+			creature["y"] = next_y.y
+		else:
+			impulse_y = 0.0
+	impulse_x *= 0.72
+	impulse_y *= 0.72
+	if absf(impulse_x) < 0.05:
+		creature.erase("_blast_knockback_vx")
+	else:
+		creature["_blast_knockback_vx"] = impulse_x
+	if absf(impulse_y) < 0.05:
+		creature.erase("_blast_knockback_vy")
+	else:
+		creature["_blast_knockback_vy"] = impulse_y
 
 
 func _shagot_follower_count(player_id: String, excluded_creature_id: String = "") -> int:
@@ -12186,6 +12360,7 @@ func move_player(move_left: bool, move_right: bool, jump: bool, delta: float = 1
 	var max_fall := lerpf(6.5, 4.5, fluid_viscosity) if in_fluid else 12.0
 
 	var target_vx := 0.0
+	var blast_knockback_x := clampf(float(player.get("_blast_knockback_vx", 0.0)), -12.0, 12.0)
 	if move_left:
 		target_vx = -move_speed
 		player["facing"] = -1
@@ -12193,14 +12368,14 @@ func move_player(move_left: bool, move_right: bool, jump: bool, delta: float = 1
 		target_vx = move_speed
 		player["facing"] = 1
 	if in_fluid:
-		player["vx"] = target_vx
+		player["vx"] = target_vx + blast_knockback_x
 		var flow_x: float = get_fluid_flow_x_at_player()
 		var current: float = float(fluid.get("current_strength", lerpf(0.2, 0.1, fluid_viscosity)))
 		player["vx"] += flow_x * current
 	elif support != null:
-		player["vx"] = lerpf(float(player["vx"]), target_vx, clampf(float(surface["friction"]) * step, 0.0, 1.0))
+		player["vx"] = lerpf(float(player["vx"]), target_vx, clampf(float(surface["friction"]) * step, 0.0, 1.0)) + blast_knockback_x
 	else:
-		player["vx"] = target_vx
+		player["vx"] = target_vx + blast_knockback_x
 
 	var was_on_ground: bool = player["on_ground"]
 	var grounded: bool = support != null and player["vy"] >= -0.05
@@ -12315,6 +12490,11 @@ func move_player(move_left: bool, move_right: bool, jump: bool, delta: float = 1
 		player["tree_ghost"] = false
 	elif player["climbing"]:
 		player["tree_ghost"] = true
+	var remaining_blast_knockback_x := blast_knockback_x * pow(0.72, maxf(0.0, step))
+	if absf(remaining_blast_knockback_x) < 0.05:
+		player.erase("_blast_knockback_vx")
+	else:
+		player["_blast_knockback_vx"] = remaining_blast_knockback_x
 	_wear_equipped_footwear(minf(absf(float(player["x"]) - movement_origin_x) / float(BlockDefs.TILE), 1.0), jumped_this_step)
 	_update_challenge_progress()
 
