@@ -188,6 +188,7 @@ const TNT_EXPLOSION_RADIUS := 4
 const TNT_EXPLOSION_MAX_PLAYER_DAMAGE := 3
 const DEFAULT_FIRE_COLOR := "#ff6b24"
 const LIGHTER_ITEM_NAME := "lighter"
+const DUEL_LIGHTER_VARIANT_NAMES: Array[String] = ["lighter", "blue_flame_starter", "prism_lighter"]
 const TNT_BLOCK_NAME := "tnt"
 const FIRE_SOURCE_IGNITION_CHANCE := 0.22
 const FIRE_SPREAD_CHANCE := 0.14
@@ -845,16 +846,18 @@ func _duel_chest_contents(rng: RandomNumberGenerator, include_explosives: bool =
 		"cobblestone": rng.randi_range(32, 40),
 		"prepared_meal": rng.randi_range(1, 3),
 	}
-	# System explosives and a reusable lighter are a supported-client Duel
-	# feature. Callers must opt in only after the joining peer advertises the
-	# capability; the default-off path preserves the legacy chest loadout.
+	# System explosives and a randomly selected visual lighter variant are a
+	# supported-client Duel feature. Both mirrored chests share this one roll.
+	# Callers opt in only after the joining peer advertises the capability; the
+	# default-off path preserves the legacy chest loadout.
 	if include_explosives:
 		var explosive_names: Array[String] = ["tnt", "ember_charge", "shaped_charge"]
 		_shuffle_with_rng(explosive_names, rng)
 		var explosive_type_count := rng.randi_range(1, explosive_names.size())
 		for index in explosive_type_count:
 			contents[explosive_names[index]] = 1
-		contents["lighter"] = 1
+		var lighter_variant := DUEL_LIGHTER_VARIANT_NAMES[rng.randi_range(0, DUEL_LIGHTER_VARIANT_NAMES.size() - 1)]
+		contents[lighter_variant] = 1
 	return contents
 
 
