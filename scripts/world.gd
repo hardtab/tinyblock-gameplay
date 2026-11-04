@@ -7346,7 +7346,7 @@ func _explode_tnt(center: Vector2i, profile: Dictionary = {}) -> Array[Vector2i]
 				continue
 			if is_one_use_cache_at(pos.x, pos.y) or is_death_cache_at(pos.x, pos.y) or mine_preserves_support(pos.x, pos.y):
 				continue
-			if bool(block.get("indestructible", false)) or int(block.get("hardness", 0)) > 24:
+			if bool(block.get("blast_resistant", false)) or bool(block.get("indestructible", false)) or int(block.get("hardness", 0)) > 24:
 				continue
 			var definition: Dictionary = block.get("definition", {}) if block.get("definition", {}) is Dictionary else {}
 			var tags: Array = definition.get("tags", []) if definition.get("tags", []) is Array else []

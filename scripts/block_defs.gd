@@ -343,6 +343,7 @@ var BLOCKS := {
 	},
 	"aegisite_seal": {
 		"id": 49, "content_id": "core.aegisite_seal", "solid": true, "generated": true,
+		"blast_resistant": true,
 		"pattern": "runes", "visual_seed": 49049,
 		"base": "#171a2a", "mid": "#34304f", "dark": "#090b13", "light": "#8ee7d0",
 		"hardness": 110, "harvest_tier": 6, "movement_speed_multiplier": 1.0, "friction": 0.94, "bounce": 0.01,
