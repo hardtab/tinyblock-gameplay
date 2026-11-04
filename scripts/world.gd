@@ -440,7 +440,8 @@ const STRUCTURE_TREE_SCAN_HEIGHT := 12
 const CHEST_SLOT_COUNT := 12
 const CHEST_EMPTY_CHANCE := 0.25
 const CHEST_BLOCK_LOOT_CHANCE := 0.50
-const CHEST_RARE_ITEM_DROP_CHANCE := 0.05
+const CHEST_RARE_LIGHTER_DROP_CHANCE := 0.05
+const CHEST_RARE_TNT_DROP_CHANCE := 0.10
 const UNDERGROUND_WATER_CHANCE := 0.07
 const UNDERGROUND_WATER_MAX_TILES := 3
 const RIFT_CAVE_CHANCE := 0.040
@@ -12903,9 +12904,9 @@ func _common_chest_gear_pool() -> Array[String]:
 
 func _rare_chest_bonus_contents(lighter_roll: float, tnt_roll: float) -> Dictionary:
 	var contents: Dictionary = {}
-	if lighter_roll < CHEST_RARE_ITEM_DROP_CHANCE:
+	if lighter_roll < CHEST_RARE_LIGHTER_DROP_CHANCE:
 		contents["lighter"] = 1
-	if tnt_roll < CHEST_RARE_ITEM_DROP_CHANCE:
+	if tnt_roll < CHEST_RARE_TNT_DROP_CHANCE:
 		contents["tnt"] = 1
 	return contents
 
