@@ -8478,7 +8478,10 @@ func tick_granular() -> void:
 				continue
 			target = water_exit as Vector2i
 		if not _granular_target_clear(target) and not _granular_target_is_water(target):
-			if not block.get("settles_diagonally", false):
+			# Explosives with an active gravity mode behave like sand when their
+			# vertical path is blocked, even though their entity definitions do not
+			# use the granular-material physics flag.
+			if not block.get("settles_diagonally", false) and explosive_effects_for_block(block).is_empty():
 				continue
 			var directions := [-1, 1] if posmod(granular_tick / GRANULAR_TICK_EVERY + pos.x, 2) == 0 else [1, -1]
 			var found := false
