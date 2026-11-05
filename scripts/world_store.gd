@@ -143,6 +143,27 @@ func save_world(state: Dictionary) -> bool:
 	return true
 
 
+func save_chunked_snapshot(state: Dictionary, tile_chunks: Dictionary, fluid_chunks: Dictionary) -> bool:
+	if int(state.get("schema_version", -1)) != SAVE_SCHEMA_VERSION:
+		return false
+	var complete_state := state.duplicate(false)
+	var tiles: Array = []
+	for chunk_x in tile_chunks:
+		var entries: Variant = tile_chunks[chunk_x]
+		if not entries is Array:
+			return false
+		tiles.append_array(entries)
+	var fluids: Array = []
+	for chunk_x in fluid_chunks:
+		var entries: Variant = fluid_chunks[chunk_x]
+		if not entries is Array:
+			return false
+		fluids.append_array(entries)
+	complete_state["tiles"] = tiles
+	complete_state["fluids"] = fluids
+	return save_world(complete_state)
+
+
 func save_current(state: Dictionary) -> bool:
 	return save_world(state)
 

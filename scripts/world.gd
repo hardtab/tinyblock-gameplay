@@ -127,6 +127,17 @@ var world_definition_ids: Dictionary = {}
 var generated_chunks: Dictionary = {}
 var chunk_tiles: Dictionary = {}
 var chunk_tiles_by_id: Dictionary = {}
+# Per-chunk position arrays let autosave serialize dense worlds across several
+# frames without calling Dictionary.keys() for the whole world. `chunk_tiles`
+# stores each position's array index, so deletions use swap-remove and the cache
+# stays bounded to live tiles. A chunk revision invalidates only its in-progress
+# piece when blocks change.
+var _save_chunk_tile_positions: Dictionary = {}
+var _save_chunk_order: Array[int] = []
+var _save_chunk_revisions: Dictionary = {}
+var _save_chunk_index_epoch := 0
+var _active_save_snapshot: Dictionary = {}
+var _save_snapshot_sequence := 0
 var block_id_counts: Dictionary = {}
 var chunk_tick: int = 0
 var default_spawn := Vector2i(ISLAND_CX + 3, ISLAND_CY)
@@ -552,6 +563,7 @@ func create_island() -> void:
 	world_definition_ids.clear()
 	generated_chunks.clear()
 	chunk_tiles.clear()
+	_clear_save_chunk_tile_index()
 	chunk_tiles_by_id.clear()
 	block_id_counts.clear()
 	chunk_tick = 0
@@ -651,6 +663,7 @@ func create_procedural_world(seed: int = 0, prefer_starter_biome: bool = false) 
 	catalog_revision = _latest_registered_catalog_revision()
 	generated_chunks.clear()
 	chunk_tiles.clear()
+	_clear_save_chunk_tile_index()
 	chunk_tiles_by_id.clear()
 	block_id_counts.clear()
 	chunk_tick = 0
@@ -720,6 +733,7 @@ func create_floating_islands_world(seed: int = 0) -> void:
 	burning_tile_colors.clear()
 	generated_chunks.clear()
 	chunk_tiles.clear()
+	_clear_save_chunk_tile_index()
 	chunk_tiles_by_id.clear()
 	block_id_counts.clear()
 	block_count = 0
@@ -761,6 +775,7 @@ func create_duel_world(seed: int = 0, include_explosives: bool = false) -> void:
 	burning_tile_colors.clear()
 	generated_chunks.clear()
 	chunk_tiles.clear()
+	_clear_save_chunk_tile_index()
 	chunk_tiles_by_id.clear()
 	block_id_counts.clear()
 	block_count = 0
@@ -1049,6 +1064,7 @@ func create_one_block_world(seed: int = 0) -> void:
 	burning_tile_colors.clear()
 	generated_chunks.clear()
 	chunk_tiles.clear()
+	_clear_save_chunk_tile_index()
 	chunk_tiles_by_id.clear()
 	block_id_counts.clear()
 	block_count = 0
@@ -1080,6 +1096,7 @@ func create_challenge_world(seed: int = 0) -> void:
 	burning_tile_colors.clear()
 	generated_chunks.clear()
 	chunk_tiles.clear()
+	_clear_save_chunk_tile_index()
 	chunk_tiles_by_id.clear()
 	block_id_counts.clear()
 	block_count = 0
@@ -3776,6 +3793,8 @@ func _set_generated_block(x: int, y: int, block_name: String, level: int = -1) -
 	var pos := Vector2i(x, y)
 	var id := int(BlockDefs.BLOCKS[block_name]["id"])
 	var old_id := block_id(x, y)
+	var old_level := int(fluid_level.get(pos, -1))
+	var old_falling := bool(fluid_falling.get(pos, false))
 	if old_id != id and BlockDefs.get_block_by_id(old_id).get("container", false):
 		containers.erase(pos)
 	if not tiles.has(pos):
@@ -3793,6 +3812,10 @@ func _set_generated_block(x: int, y: int, block_name: String, level: int = -1) -
 	else:
 		fluid_level.erase(pos)
 		fluid_falling.erase(pos)
+	var new_level := int(fluid_level.get(pos, -1))
+	var new_falling := bool(fluid_falling.get(pos, false))
+	if old_id != id or old_level != new_level or old_falling != new_falling:
+		_mark_save_chunk_changed(pos)
 
 
 func _erase_generated_tile(pos: Vector2i) -> void:
@@ -3807,17 +3830,45 @@ func _erase_generated_tile(pos: Vector2i) -> void:
 	_unindex_tile(pos, old_id)
 	block_count = maxi(0, block_count - 1)
 	_decrement_block_id(old_id)
+	_mark_save_chunk_changed(pos)
 
 
 func _chunk_x_for_tile(tile_x: int) -> int:
 	return floori(float(tile_x) / float(CHUNK_WIDTH))
 
 
+func _clear_save_chunk_tile_index() -> void:
+	_save_chunk_tile_positions.clear()
+	_save_chunk_order.clear()
+	_save_chunk_revisions.clear()
+	_save_chunk_index_epoch += 1
+	_active_save_snapshot = {}
+
+
+func _mark_save_chunk_changed(pos: Vector2i) -> void:
+	var chunk_x := _chunk_x_for_tile(pos.x)
+	_save_chunk_revisions[chunk_x] = int(_save_chunk_revisions.get(chunk_x, 0)) + 1
+	if _active_save_snapshot.is_empty():
+		return
+	var pending_chunks: Array = _active_save_snapshot.get("pending_chunks", [])
+	var queued_chunks: Dictionary = _active_save_snapshot.get("queued_chunks", {})
+	if not queued_chunks.has(chunk_x):
+		queued_chunks[chunk_x] = true
+		pending_chunks.append(chunk_x)
+
+
 func _index_tile(pos: Vector2i, id: int = -1) -> void:
 	var chunk_x := _chunk_x_for_tile(pos.x)
 	if not chunk_tiles.has(chunk_x):
 		chunk_tiles[chunk_x] = {}
-	(chunk_tiles[chunk_x] as Dictionary)[pos] = true
+	if not _save_chunk_tile_positions.has(chunk_x):
+		_save_chunk_tile_positions[chunk_x] = []
+		_save_chunk_order.append(chunk_x)
+	var save_positions: Array = _save_chunk_tile_positions[chunk_x]
+	var chunk_positions: Dictionary = chunk_tiles[chunk_x]
+	if not chunk_positions.has(pos):
+		chunk_positions[pos] = save_positions.size()
+		save_positions.append(pos)
 	var block_id_value := block_id(pos.x, pos.y) if id < 0 else id
 	if block_id_value == 0:
 		return
@@ -3832,8 +3883,19 @@ func _index_tile(pos: Vector2i, id: int = -1) -> void:
 func _unindex_tile(pos: Vector2i, id: int = -1) -> void:
 	var chunk_x := _chunk_x_for_tile(pos.x)
 	if chunk_tiles.has(chunk_x):
-		(chunk_tiles[chunk_x] as Dictionary).erase(pos)
-		if (chunk_tiles[chunk_x] as Dictionary).is_empty():
+		var positions_by_chunk: Dictionary = chunk_tiles[chunk_x]
+		if positions_by_chunk.has(pos):
+			var save_positions: Array = _save_chunk_tile_positions.get(chunk_x, [])
+			var remove_index := int(positions_by_chunk[pos])
+			var last_index := save_positions.size() - 1
+			if remove_index >= 0 and remove_index <= last_index:
+				if remove_index != last_index:
+					var swapped_pos := save_positions[last_index] as Vector2i
+					save_positions[remove_index] = swapped_pos
+					positions_by_chunk[swapped_pos] = remove_index
+				save_positions.pop_back()
+			positions_by_chunk.erase(pos)
+		if positions_by_chunk.is_empty():
 			chunk_tiles.erase(chunk_x)
 	var block_id_value := block_id(pos.x, pos.y) if id < 0 else id
 	if block_id_value == 0 or not chunk_tiles_by_id.has(chunk_x):
@@ -3849,12 +3911,182 @@ func _unindex_tile(pos: Vector2i, id: int = -1) -> void:
 
 func _rebuild_chunk_tile_index() -> void:
 	chunk_tiles.clear()
+	_clear_save_chunk_tile_index()
 	chunk_tiles_by_id.clear()
 	block_id_counts.clear()
 	for pos: Vector2i in tiles.keys():
 		var id := int(tiles[pos])
 		_index_tile(pos, id)
 		_increment_block_id(id)
+
+
+func begin_save_snapshot() -> Dictionary:
+	_save_snapshot_sequence += 1
+	var snapshot := {
+		"world_id": world_id,
+		"epoch": _save_chunk_index_epoch,
+		"snapshot_id": _save_snapshot_sequence,
+		"initial_chunk_count": _save_chunk_order.size(),
+		"chunk_cursor": 0,
+		"pending_chunks": [],
+		"pending_cursor": 0,
+		"queued_chunks": {},
+		"captured_revisions": {},
+		"tiles_by_chunk": {},
+		"fluids_by_chunk": {},
+		"current_chunk_x": 2147483647,
+		"current_revision": -1,
+		"current_position_count": 0,
+		"current_position_index": 0,
+		"current_tile_entries": [],
+		"current_fluid_entries": [],
+		"complete": false,
+	}
+	_active_save_snapshot = snapshot
+	return snapshot
+
+
+func cancel_save_snapshot(snapshot: Dictionary) -> void:
+	if int(snapshot.get("snapshot_id", -1)) == int(_active_save_snapshot.get("snapshot_id", -2)):
+		_active_save_snapshot = {}
+
+
+func finish_save_snapshot(snapshot: Dictionary) -> void:
+	cancel_save_snapshot(snapshot)
+
+
+func save_snapshot_is_valid(snapshot: Dictionary) -> bool:
+	return (
+		str(snapshot.get("world_id", "")) == world_id
+		and int(snapshot.get("epoch", -1)) == _save_chunk_index_epoch
+		and int(snapshot.get("snapshot_id", -1)) == int(_active_save_snapshot.get("snapshot_id", -2))
+	)
+
+
+func save_snapshot_matches_current_world(snapshot: Dictionary) -> bool:
+	return (
+		save_snapshot_is_valid(snapshot)
+		and bool(snapshot.get("complete", false))
+		and int(snapshot.get("chunk_cursor", 0)) >= int(snapshot.get("initial_chunk_count", 0))
+		and int(snapshot.get("pending_cursor", 0)) >= (snapshot.get("pending_chunks", []) as Array).size()
+		and int(snapshot.get("current_chunk_x", 2147483647)) == 2147483647
+	)
+
+
+func advance_save_snapshot(snapshot: Dictionary, budget_usec: int = 2000) -> bool:
+	if not save_snapshot_is_valid(snapshot):
+		return false
+	var started_usec := Time.get_ticks_usec()
+	var budget := maxi(1, budget_usec)
+	var visited := 0
+	var pending_chunks: Array = snapshot.get("pending_chunks", [])
+	var pending_cursor := int(snapshot.get("pending_cursor", 0))
+	var chunk_cursor := int(snapshot.get("chunk_cursor", 0))
+	var initial_chunk_count := int(snapshot.get("initial_chunk_count", 0))
+	var queued_chunks: Dictionary = snapshot.get("queued_chunks", {})
+	var captured_revisions: Dictionary = snapshot.get("captured_revisions", {})
+	var tiles_by_chunk: Dictionary = snapshot.get("tiles_by_chunk", {})
+	var fluids_by_chunk: Dictionary = snapshot.get("fluids_by_chunk", {})
+	var sentinel := 2147483647
+	var selection_steps := 0
+
+	while true:
+		var current_chunk_x := int(snapshot.get("current_chunk_x", sentinel))
+		if current_chunk_x == sentinel:
+			var pending_chunk_x := sentinel
+			while pending_cursor < pending_chunks.size() or chunk_cursor < initial_chunk_count:
+				var chunk_x := sentinel
+				var from_pending := false
+				if pending_cursor < pending_chunks.size():
+					chunk_x = int(pending_chunks[pending_cursor])
+					pending_cursor += 1
+					from_pending = true
+				else:
+					chunk_x = _save_chunk_order[chunk_cursor]
+					chunk_cursor += 1
+				selection_steps += 1
+				if selection_steps % 32 == 0 and Time.get_ticks_usec() - started_usec >= budget:
+					if from_pending:
+						pending_cursor -= 1
+					else:
+						chunk_cursor -= 1
+					snapshot["pending_cursor"] = pending_cursor
+					snapshot["chunk_cursor"] = chunk_cursor
+					return false
+				if not _save_chunk_tile_positions.has(chunk_x):
+					queued_chunks.erase(chunk_x)
+					continue
+				if captured_revisions.has(chunk_x) and int(captured_revisions[chunk_x]) == int(_save_chunk_revisions.get(chunk_x, 0)):
+					queued_chunks.erase(chunk_x)
+					continue
+				pending_chunk_x = chunk_x
+				break
+			snapshot["pending_cursor"] = pending_cursor
+			snapshot["chunk_cursor"] = chunk_cursor
+			if pending_chunk_x == sentinel:
+				snapshot["complete"] = true
+				return true
+			current_chunk_x = pending_chunk_x
+			snapshot["current_chunk_x"] = current_chunk_x
+			snapshot["current_revision"] = int(_save_chunk_revisions.get(current_chunk_x, 0))
+			snapshot["current_position_count"] = (_save_chunk_tile_positions.get(current_chunk_x, []) as Array).size()
+			snapshot["current_position_index"] = 0
+			snapshot["current_tile_entries"] = []
+			snapshot["current_fluid_entries"] = []
+		elif int(snapshot.get("current_revision", -1)) != int(_save_chunk_revisions.get(current_chunk_x, 0)):
+			# A changed chunk is restarted from its current index. Other completed
+			# chunks remain valid and do not make the player wait for another full pass.
+			snapshot["current_revision"] = int(_save_chunk_revisions.get(current_chunk_x, 0))
+			snapshot["current_position_count"] = (_save_chunk_tile_positions.get(current_chunk_x, []) as Array).size()
+			snapshot["current_position_index"] = 0
+			snapshot["current_tile_entries"] = []
+			snapshot["current_fluid_entries"] = []
+
+		var positions: Array = _save_chunk_tile_positions.get(current_chunk_x, [])
+		var position_index := int(snapshot.get("current_position_index", 0))
+		var position_count := int(snapshot.get("current_position_count", 0))
+		var tile_entries: Array = snapshot.get("current_tile_entries", [])
+		var fluid_entries: Array = snapshot.get("current_fluid_entries", [])
+		while position_index < position_count:
+			var pos := positions[position_index] as Vector2i
+			position_index += 1
+			visited += 1
+			if tiles.has(pos):
+				var block_name := BlockDefs.get_block_name(int(tiles[pos]))
+				if not block_name.is_empty() and block_name != "air":
+					var tile_entry := {"x": pos.x, "y": pos.y, "content_id": _content_id_for_block_name(block_name)}
+					if mine_preserves_support(pos.x, pos.y):
+						tile_entry["preserves_support_on_mine"] = true
+					tile_entries.append(tile_entry)
+				if fluid_level.has(pos):
+					fluid_entries.append({
+						"x": pos.x,
+						"y": pos.y,
+						"level": int(fluid_level[pos]),
+						"falling": bool(fluid_falling.get(pos, false)),
+					})
+			if visited % 32 == 0 and Time.get_ticks_usec() - started_usec >= budget:
+				snapshot["current_position_index"] = position_index
+				snapshot["current_tile_entries"] = tile_entries
+				snapshot["current_fluid_entries"] = fluid_entries
+				return false
+
+		# No main-thread mutation can interleave this method. If the revision still
+		# matches, this chunk's arrays are now a stable immutable piece for the worker.
+		if int(snapshot.get("current_revision", -1)) == int(_save_chunk_revisions.get(current_chunk_x, 0)):
+			tiles_by_chunk[current_chunk_x] = tile_entries
+			fluids_by_chunk[current_chunk_x] = fluid_entries
+			captured_revisions[current_chunk_x] = int(snapshot["current_revision"])
+			queued_chunks.erase(current_chunk_x)
+		snapshot["tiles_by_chunk"] = tiles_by_chunk
+		snapshot["fluids_by_chunk"] = fluids_by_chunk
+		snapshot["captured_revisions"] = captured_revisions
+		snapshot["queued_chunks"] = queued_chunks
+		snapshot["current_chunk_x"] = sentinel
+		snapshot["current_position_index"] = 0
+		snapshot["current_tile_entries"] = []
+		snapshot["current_fluid_entries"] = []
+	return false
 
 
 func _increment_block_id(id: int) -> void:
@@ -5174,7 +5406,10 @@ func apply_chunk_state(state: Dictionary) -> bool:
 		var fluid: Dictionary = incoming_fluids.get(pos, {})
 		_set_generated_block(pos.x, pos.y, str(entry["block_name"]), int(fluid.get("level", -1)))
 		if not fluid.is_empty():
-			fluid_falling[pos] = bool(fluid.get("falling", false))
+			var falling := bool(fluid.get("falling", false))
+			if bool(fluid_falling.get(pos, false)) != falling:
+				fluid_falling[pos] = falling
+				_mark_save_chunk_changed(pos)
 	for raw_pos in incoming_burning:
 		var pos := raw_pos as Vector2i
 		var entry: Dictionary = incoming_burning[pos]
@@ -5218,34 +5453,34 @@ func apply_chunk_state(state: Dictionary) -> bool:
 	return true
 
 
-func serialize_state(stable_order: bool = true) -> Dictionary:
+func serialize_state(stable_order: bool = true, include_tile_state: bool = true) -> Dictionary:
 	var tile_entries: Array[Dictionary] = []
-	var positions: Array = tiles.keys()
-	if stable_order:
-		positions.sort_custom(func(a: Vector2i, b: Vector2i): return a.y < b.y or (a.y == b.y and a.x < b.x))
-	for pos: Vector2i in positions:
-		var block_name := BlockDefs.get_block_name(int(tiles[pos]))
-		if block_name == "air":
-			continue
-		var tile_entry := {
-			"x": pos.x,
-			"y": pos.y,
-			"content_id": _content_id_for_block_name(block_name),
-		}
-		if mine_preserves_support(pos.x, pos.y):
-			tile_entry["preserves_support_on_mine"] = true
-		tile_entries.append(tile_entry)
-
 	var fluid_entries: Array[Dictionary] = []
-	for pos: Vector2i in positions:
-		if not fluid_level.has(pos):
-			continue
-		fluid_entries.append({
-			"x": pos.x,
-			"y": pos.y,
-			"level": int(fluid_level[pos]),
-			"falling": bool(fluid_falling.get(pos, false)),
-		})
+	if include_tile_state:
+		var positions: Array = tiles.keys()
+		if stable_order:
+			positions.sort_custom(func(a: Vector2i, b: Vector2i): return a.y < b.y or (a.y == b.y and a.x < b.x))
+		for pos: Vector2i in positions:
+			var block_name := BlockDefs.get_block_name(int(tiles[pos]))
+			if block_name == "air":
+				continue
+			var tile_entry := {
+				"x": pos.x,
+				"y": pos.y,
+				"content_id": _content_id_for_block_name(block_name),
+			}
+			if mine_preserves_support(pos.x, pos.y):
+				tile_entry["preserves_support_on_mine"] = true
+			tile_entries.append(tile_entry)
+		for pos: Vector2i in positions:
+			if not fluid_level.has(pos):
+				continue
+			fluid_entries.append({
+				"x": pos.x,
+				"y": pos.y,
+				"level": int(fluid_level[pos]),
+				"falling": bool(fluid_falling.get(pos, false)),
+			})
 
 	var growth_entries: Array[Dictionary] = []
 	var growth_positions: Array = tree_growth.keys()
@@ -7921,6 +8156,10 @@ func set_block(x: int, y: int, id: int, level: int = -1, falling: bool = false) 
 		else:
 			fluid_level.erase(key)
 			fluid_falling.erase(key)
+	var new_level := int(fluid_level.get(key, -1))
+	var new_falling := bool(fluid_falling.get(key, false))
+	if old_id != id or old_level != new_level or old_falling != new_falling:
+		_mark_save_chunk_changed(key)
 	if block_count != previous_count:
 		block_count_changed.emit(block_count)
 	if not _suspend_state_changed:
@@ -7929,8 +8168,6 @@ func set_block(x: int, y: int, id: int, level: int = -1, falling: bool = false) 
 		if block_identity_changed:
 			lighting_changed.emit()
 		state_changed.emit()
-		var new_level := int(fluid_level.get(key, -1))
-		var new_falling := bool(fluid_falling.get(key, false))
 		if old_id != id or old_level != new_level or old_falling != new_falling:
 			tile_changed.emit(x, y, id, new_level, new_falling)
 	return true
@@ -8177,6 +8414,7 @@ func _set_fluid_state(pos: Vector2i, level: int, falling: bool) -> void:
 		return
 	fluid_level[pos] = level
 	fluid_falling[pos] = falling
+	_mark_save_chunk_changed(pos)
 	if not _suspend_state_changed:
 		state_changed.emit()
 		tile_changed.emit(pos.x, pos.y, id, level, falling)
@@ -8665,6 +8903,8 @@ func tick_granular() -> void:
 		changed_positions[pos] = true
 		changed_positions[target] = true
 	if not changed_positions.is_empty():
+		for raw_pos in changed_positions:
+			_mark_save_chunk_changed(raw_pos as Vector2i)
 		static_tiles_changed.emit()
 		lighting_changed.emit()
 		state_changed.emit()
