@@ -54,6 +54,8 @@ const RTC_SILENCE_RECOVERY_RECONNECT := "reconnecting"
 const RTC_SILENCE_RECOVERY_DROP_PEER := "drop_peer"
 const RTC_CHANNEL_ID := 1
 const RTC_VOICE_CHANNEL_ID := 2
+const RTC_CONTROL_CHANNEL_ID := 3
+const RTC_CONTROL_CHANNEL_CAPABILITY_VERSION := 1
 const VOICE_PACKET_MAGIC := 0x56
 const VOICE_PACKET_VERSION := 1
 const VOICE_MAX_PLAYER_ID_BYTES := 64
@@ -91,6 +93,9 @@ var _was_open := false
 var _known_players: Dictionary = {}
 var _rtc_peers: Dictionary = {}
 var _rtc_channels: Dictionary = {}
+var _rtc_control_channels: Dictionary = {}
+var _rtc_control_channel_capabilities: Dictionary = {}
+var _rtc_control_channel_probe_sent: Dictionary = {}
 var _rtc_voice_channels: Dictionary = {}
 var _rtc_remote_description_set: Dictionary = {}
 var _rtc_pending_candidates: Dictionary = {}
@@ -509,6 +514,10 @@ func _poll_rtc(delta: float) -> void:
 		var peer: WebRTCPeerConnection = _rtc_peers[raw_peer_id]
 		peer.poll()
 		_rtc_diag_record_peer_state(remote_id, peer)
+		var control_channel: WebRTCDataChannel = _rtc_control_channels.get(remote_id)
+		if control_channel != null and control_channel.get_ready_state() == WebRTCDataChannel.STATE_OPEN:
+			while control_channel.get_available_packet_count() > 0:
+				_handle_rtc_packet(remote_id, control_channel.get_packet(), true)
 		var channel: WebRTCDataChannel = _rtc_channels.get(remote_id)
 		if channel != null and channel.get_ready_state() == WebRTCDataChannel.STATE_OPEN:
 			if not _rtc_ready_peers.has(remote_id):
@@ -518,6 +527,10 @@ func _poll_rtc(delta: float) -> void:
 				_rtc_silence_probe_diagnostics.erase(remote_id)
 				print("Multiplayer P2P channel open: peer_key=%s" % remote_id.sha256_text().substr(0, 12))
 				_rtc_diag_event("game_channel_open", remote_id)
+				# Negotiate the optional stream before the host sends its initial
+				# world snapshot, which can occupy the ordered game stream for a
+				# while on large local worlds.
+				_begin_rtc_control_channel_negotiation(remote_id)
 				if is_host():
 					_activate_host_guest(remote_id, "game_channel_open")
 				if is_guest() and remote_id == _guest_host_id:
@@ -576,10 +589,10 @@ func _poll_rtc(delta: float) -> void:
 			for ping_peer_id in open_game_peers:
 				var ping_now := Time.get_ticks_msec()
 				var previous_ping_sent := int(_rtc_last_ping_sent_msec.get(ping_peer_id, 0))
-				var ping_channel: WebRTCDataChannel = _rtc_channels.get(ping_peer_id)
+				var ping_channel: WebRTCDataChannel = _rtc_liveness_channel(ping_peer_id)
 				var ping_connection_id := str(_rtc_connection_ids.get(ping_peer_id, ""))
 				var ping_generation := int(_rtc_offer_generations.get(ping_peer_id, -1))
-				var ping_put_ok := _send_rtc(ping_peer_id, {"kind": "control", "type": "p2p_ping", "payload": {"sent_msec": now}})
+				var ping_put_ok := _send_rtc_control(ping_peer_id, {"kind": "control", "type": "p2p_ping", "payload": {"sent_msec": now}})
 				_rtc_diag_record_liveness("ping_send", ping_peer_id, ping_connection_id, ping_generation, ping_put_ok)
 				_rtc_last_ping_put_ok[ping_peer_id] = ping_put_ok
 				if ping_put_ok:
@@ -606,7 +619,7 @@ func _poll_rtc(delta: float) -> void:
 					)
 					var probe_put_ok: bool = already_probed_this_frame
 					if not probe_put_ok:
-						probe_put_ok = _send_rtc(silent_peer_id, {"kind": "control", "type": "p2p_ping", "payload": {"sent_msec": now}})
+						probe_put_ok = _send_rtc_control(silent_peer_id, {"kind": "control", "type": "p2p_ping", "payload": {"sent_msec": now}})
 						_rtc_diag_record_liveness(
 							"ping_send",
 							silent_peer_id,
@@ -618,13 +631,17 @@ func _poll_rtc(delta: float) -> void:
 						if probe_put_ok:
 							_rtc_last_ping_sent_msec[silent_peer_id] = now
 					var probe_peer: WebRTCPeerConnection = _rtc_peers.get(silent_peer_id)
-					var probe_channel: WebRTCDataChannel = _rtc_channels.get(silent_peer_id)
+					var probe_channel: WebRTCDataChannel = _rtc_liveness_channel(silent_peer_id)
+					var game_channel: WebRTCDataChannel = _rtc_channels.get(silent_peer_id)
+					var control_channel: WebRTCDataChannel = _rtc_control_channels.get(silent_peer_id)
 					_rtc_silence_probe_diagnostics[silent_peer_id] = {
 						"poll_gap_ms": clampi(_rtc_last_poll_gap_msec, 0, 600000),
 						"last_seen_age_ms": clampi(now - last_seen, 0, 600000),
 						"last_ping_put_ok": probe_put_ok,
 						"connection_state": probe_peer.get_connection_state() if probe_peer != null else -1,
-						"game_channel_state": probe_channel.get_ready_state() if probe_channel != null else -1,
+						"game_channel_state": game_channel.get_ready_state() if game_channel != null else -1,
+						"control_channel_state": control_channel.get_ready_state() if control_channel != null else -1,
+						"liveness_channel_state": probe_channel.get_ready_state() if probe_channel != null else -1,
 					}
 					_rtc_silence_probe_deadline_msec[silent_peer_id] = now + int(RTC_PING_RESPONSE_GRACE_SECONDS * 1000.0)
 					_rtc_diag_event("silence_probe", silent_peer_id, str(_rtc_connection_ids.get(silent_peer_id, "")), int(_rtc_offer_generations.get(silent_peer_id, -1)), {
@@ -997,6 +1014,8 @@ func _rtc_diag_event(
 	entry["remote_description_set"] = bool(_rtc_remote_description_set.get(remote_id, false))
 	var channel: WebRTCDataChannel = _rtc_channels.get(remote_id)
 	entry["game_channel_state"] = channel.get_ready_state() if channel != null else -1
+	var control_channel: WebRTCDataChannel = _rtc_control_channels.get(remote_id)
+	entry["control_channel_state"] = control_channel.get_ready_state() if control_channel != null else -1
 	var pending: Variant = _rtc_pending_candidates.get(remote_id, [])
 	entry["pending_candidates"] = pending.size() if pending is Array else 0
 	if socket != null:
@@ -1131,11 +1150,13 @@ func _rtc_diag_record_peer_state(remote_id: String, peer: WebRTCPeerConnection) 
 	if not rtc_diagnostics_enabled or peer == null:
 		return
 	var channel: WebRTCDataChannel = _rtc_channels.get(remote_id)
-	var signature := "%d:%d:%d:%d" % [
+	var control_channel: WebRTCDataChannel = _rtc_control_channels.get(remote_id)
+	var signature := "%d:%d:%d:%d:%d" % [
 		peer.get_connection_state(),
 		peer.get_gathering_state(),
 		peer.get_signaling_state(),
 		channel.get_ready_state() if channel != null else -1,
+		control_channel.get_ready_state() if control_channel != null else -1,
 	]
 	if str(_rtc_observed_state_signatures.get(remote_id, "")) == signature:
 		return
@@ -1212,6 +1233,7 @@ func _recover_silent_rtc_peer(remote_id: String) -> void:
 	var last_seen := int(_rtc_last_seen_msec.get(remote_id, now))
 	var peer: WebRTCPeerConnection = _rtc_peers.get(remote_id)
 	var channel: WebRTCDataChannel = _rtc_channels.get(remote_id)
+	var control_channel: WebRTCDataChannel = _rtc_control_channels.get(remote_id)
 	var probe_metrics: Dictionary = _rtc_silence_probe_diagnostics.get(remote_id, {})
 	last_rtc_silence_diagnostics = {
 		"poll_gap_ms": clampi(int(probe_metrics.get("poll_gap_ms", _rtc_last_poll_gap_msec)), 0, 600000),
@@ -1221,10 +1243,12 @@ func _recover_silent_rtc_peer(remote_id: String) -> void:
 		"last_ping_put_ok": probe_metrics.get("last_ping_put_ok", _rtc_last_ping_put_ok.get(remote_id, false)) == true,
 		"connection_state": int(probe_metrics.get("connection_state", peer.get_connection_state() if peer != null else -1)),
 		"game_channel_state": int(probe_metrics.get("game_channel_state", channel.get_ready_state() if channel != null else -1)),
+		"control_channel_state": int(probe_metrics.get("control_channel_state", control_channel.get_ready_state() if control_channel != null else -1)),
+		"liveness_channel_state": int(probe_metrics.get("liveness_channel_state", _rtc_liveness_channel(remote_id).get_ready_state() if _rtc_liveness_channel(remote_id) != null else -1)),
 	}
 	if rtc_diagnostics_enabled:
 		print("Multiplayer P2P channel silent: peer_key=%s, recovery=%s" % [remote_id.sha256_text().substr(0, 12), recovery_mode])
-		print("Multiplayer P2P silence diagnostics: poll_gap_ms=%d last_seen_age_ms=%d last_ping_age_ms=%d probe_remaining_ms=%d last_ping_put_ok=%s connection_state=%d game_channel_state=%d" % [
+		print("Multiplayer P2P silence diagnostics: poll_gap_ms=%d last_seen_age_ms=%d last_ping_age_ms=%d probe_remaining_ms=%d last_ping_put_ok=%s connection_state=%d game_channel_state=%d control_channel_state=%d liveness_channel_state=%d" % [
 			last_rtc_silence_diagnostics["poll_gap_ms"],
 			last_rtc_silence_diagnostics["last_seen_age_ms"],
 			last_rtc_silence_diagnostics["last_ping_age_ms"],
@@ -1232,6 +1256,8 @@ func _recover_silent_rtc_peer(remote_id: String) -> void:
 			str(last_rtc_silence_diagnostics["last_ping_put_ok"]).to_lower(),
 			last_rtc_silence_diagnostics["connection_state"],
 			last_rtc_silence_diagnostics["game_channel_state"],
+			last_rtc_silence_diagnostics["control_channel_state"],
+			last_rtc_silence_diagnostics["liveness_channel_state"],
 		])
 	if role == "host" and not websocket_fallback_enabled:
 		_retire_host_guest(remote_id, "rtc_silence_timeout")
@@ -1368,11 +1394,21 @@ func _create_rtc_peer(remote_id: String, connection_id: String = "", offer_gener
 		channel.close()
 		peer.close()
 		return false
+	# Keep liveness traffic off the ordered game stream after the remote peer
+	# explicitly confirms support over the existing game stream. Older clients
+	# ignore that optional capability marker and stay on the original channel.
+	var control_channel := peer.create_data_channel("tinyblock-control", {
+		"negotiated": true,
+		"id": RTC_CONTROL_CHANNEL_ID,
+		"ordered": true,
+	})
 	var peer_instance_id := peer.get_instance_id()
 	peer.session_description_created.connect(_on_rtc_session_created.bind(remote_id, peer_instance_id, connection_id, offer_generation))
 	peer.ice_candidate_created.connect(_on_rtc_ice_candidate.bind(remote_id, peer_instance_id, connection_id, offer_generation))
 	_rtc_peers[remote_id] = peer
 	_rtc_channels[remote_id] = channel
+	if control_channel != null:
+		_rtc_control_channels[remote_id] = control_channel
 	_rtc_voice_channels[remote_id] = voice_channel
 	_rtc_remote_description_set[remote_id] = false
 	_rtc_pending_candidates[remote_id] = []
@@ -2049,18 +2085,38 @@ func _add_rtc_candidate(
 			_rtc_diag_event("remote_candidate_added", remote_id, connection_id, generation, candidate_diagnostics)
 
 
-func _handle_rtc_packet(remote_id: String, packet: PackedByteArray) -> void:
+func _handle_rtc_packet(remote_id: String, packet: PackedByteArray, control_channel_only: bool = false) -> void:
 	var parsed = JSON.parse_string(packet.get_string_from_utf8())
 	if not parsed is Dictionary:
 		return
 	var message := parsed as Dictionary
 	var kind := str(message.get("kind", ""))
 	var type := str(message.get("type", ""))
+	var payload_value: Variant = message.get("payload", {})
+	var payload: Dictionary = payload_value if payload_value is Dictionary else {}
+	if control_channel_only and (kind != "control" or type not in ["p2p_ping", "p2p_pong"]):
+		return
+	if kind == "control" and type in ["p2p_ping", "p2p_pong"]:
+		if control_channel_only:
+			_rtc_control_channel_capabilities[remote_id] = "supported"
+		elif (
+			type == "p2p_pong"
+			and not _rtc_control_channel_capabilities.has(remote_id)
+			and bool(_rtc_control_channel_probe_sent.get(remote_id, false))
+			and int(payload.get("rtc_control_channel_probe", 0)) == RTC_CONTROL_CHANNEL_CAPABILITY_VERSION
+		):
+			if int(payload.get("rtc_control_channel_ack", 0)) == RTC_CONTROL_CHANNEL_CAPABILITY_VERSION:
+				_rtc_control_channel_capabilities[remote_id] = "supported"
+			else:
+				# Older clients echo the ping payload but do not add this explicit
+				# acknowledgement. Never probe an unknown negotiated stream: older
+				# WebRTC peers can reject data sent on an unrecognized stream id.
+				_rtc_control_channel_capabilities[remote_id] = "legacy"
 	var now_msec := Time.get_ticks_msec()
 	var last_seen_age_msec := clampi(now_msec - int(_rtc_last_seen_msec.get(remote_id, now_msec)), 0, 600000)
 	var connection_id := str(_rtc_connection_ids.get(remote_id, ""))
 	var offer_generation := int(_rtc_offer_generations.get(remote_id, -1))
-	var channel: WebRTCDataChannel = _rtc_channels.get(remote_id)
+	var channel: WebRTCDataChannel = _rtc_liveness_channel(remote_id)
 	# A host must prove that its outbound path works. Guest commands and pings only
 	# prove the opposite direction, so only the pong to our own ping refreshes the
 	# host watchdog. A guest can use any valid inbound packet as proof that the
@@ -2075,7 +2131,15 @@ func _handle_rtc_packet(remote_id: String, packet: PackedByteArray) -> void:
 			"last_seen_age_ms": last_seen_age_msec,
 			"data_channel_buffered_bytes": channel.get_buffered_amount() if channel != null else -1,
 		})
-		var pong_sent := _send_rtc(remote_id, {"kind": "control", "type": "p2p_pong", "payload": message.get("payload", {})})
+		var pong_payload := payload.duplicate(true)
+		if (
+			not control_channel_only
+			and _rtc_control_channel_open(remote_id)
+			and int(payload.get("rtc_control_channel_probe", 0)) == RTC_CONTROL_CHANNEL_CAPABILITY_VERSION
+		):
+			pong_payload["rtc_control_channel_ack"] = RTC_CONTROL_CHANNEL_CAPABILITY_VERSION
+		var pong_message := {"kind": "control", "type": "p2p_pong", "payload": pong_payload}
+		var pong_sent := _send_rtc_control(remote_id, pong_message) if control_channel_only else _send_rtc(remote_id, pong_message)
 		_rtc_diag_record_liveness("pong_send", remote_id, connection_id, offer_generation, pong_sent)
 		_rtc_diag_liveness_sample("rtc_pong_sent", remote_id, connection_id, offer_generation, {
 			"rtc_send_ok": pong_sent,
@@ -2173,6 +2237,37 @@ func _rtc_channel_open(remote_id: String) -> bool:
 	return channel != null and channel.get_ready_state() == WebRTCDataChannel.STATE_OPEN
 
 
+func _rtc_control_channel_open(remote_id: String) -> bool:
+	if remote_id.is_empty() or not _rtc_control_channels.has(remote_id):
+		return false
+	var channel: WebRTCDataChannel = _rtc_control_channels[remote_id]
+	return channel != null and channel.get_ready_state() == WebRTCDataChannel.STATE_OPEN
+
+
+func _rtc_liveness_channel(remote_id: String) -> WebRTCDataChannel:
+	if _rtc_control_channel_open(remote_id) and str(_rtc_control_channel_capabilities.get(remote_id, "")) == "supported":
+		return _rtc_control_channels[remote_id]
+	return _rtc_channels.get(remote_id)
+
+
+func _begin_rtc_control_channel_negotiation(remote_id: String) -> void:
+	if (
+		remote_id.is_empty()
+		or _rtc_control_channel_capabilities.has(remote_id)
+		or not _rtc_control_channel_open(remote_id)
+	):
+		return
+	var now_msec := Time.get_ticks_msec()
+	var ping_sent := _send_rtc_control(remote_id, {
+		"kind": "control",
+		"type": "p2p_ping",
+		"payload": {"sent_msec": now_msec},
+	})
+	_rtc_last_ping_put_ok[remote_id] = ping_sent
+	if ping_sent:
+		_rtc_last_ping_sent_msec[remote_id] = now_msec
+
+
 func _rtc_voice_channel_open(remote_id: String) -> bool:
 	if remote_id.is_empty() or not _rtc_voice_channels.has(remote_id):
 		return false
@@ -2185,6 +2280,29 @@ func _send_rtc(remote_id: String, message: Dictionary) -> bool:
 		return false
 	var channel: WebRTCDataChannel = _rtc_channels[remote_id]
 	return channel.put_packet(JSON.stringify(message).to_utf8_buffer()) == OK
+
+
+func _send_rtc_control(remote_id: String, message: Dictionary) -> bool:
+	var capability := str(_rtc_control_channel_capabilities.get(remote_id, ""))
+	if _rtc_control_channel_open(remote_id) and capability == "supported":
+		var control_channel: WebRTCDataChannel = _rtc_control_channels[remote_id]
+		if control_channel.put_packet(JSON.stringify(message).to_utf8_buffer()) == OK:
+			return true
+	# Keep the capability probe on the already-known game stream. A local
+	# negotiated DataChannel may say OPEN even when an older remote never
+	# created its matching stream; writing to it can make that peer close.
+	var game_message := message.duplicate(true)
+	if capability.is_empty() and str(message.get("type", "")) == "p2p_ping" and _rtc_control_channel_open(remote_id):
+		var game_payload_value: Variant = game_message.get("payload", {})
+		var game_payload: Dictionary = game_payload_value.duplicate(true) if game_payload_value is Dictionary else {}
+		game_payload["rtc_control_channel_probe"] = RTC_CONTROL_CHANNEL_CAPABILITY_VERSION
+		game_message["payload"] = game_payload
+	var game_sent := _send_rtc(remote_id, game_message)
+	var sent_payload_value: Variant = game_message.get("payload", {})
+	var sent_payload: Dictionary = sent_payload_value if sent_payload_value is Dictionary else {}
+	if game_sent and int(sent_payload.get("rtc_control_channel_probe", 0)) == RTC_CONTROL_CHANNEL_CAPABILITY_VERSION:
+		_rtc_control_channel_probe_sent[remote_id] = true
+	return game_sent
 
 
 func _send_rtc_voice(remote_id: String, packet: PackedByteArray) -> bool:
@@ -2235,6 +2353,10 @@ func _close_rtc_peer(remote_id: String, close_reason: String = "unspecified") ->
 		var channel: WebRTCDataChannel = _rtc_channels[remote_id]
 		if channel != null:
 			channel.close()
+	if _rtc_control_channels.has(remote_id):
+		var control_channel: WebRTCDataChannel = _rtc_control_channels[remote_id]
+		if control_channel != null:
+			control_channel.close()
 	if _rtc_voice_channels.has(remote_id):
 		var voice_channel: WebRTCDataChannel = _rtc_voice_channels[remote_id]
 		if voice_channel != null:
@@ -2244,6 +2366,9 @@ func _close_rtc_peer(remote_id: String, close_reason: String = "unspecified") ->
 		if peer != null:
 			peer.close()
 	_rtc_channels.erase(remote_id)
+	_rtc_control_channels.erase(remote_id)
+	_rtc_control_channel_capabilities.erase(remote_id)
+	_rtc_control_channel_probe_sent.erase(remote_id)
 	_rtc_voice_channels.erase(remote_id)
 	_rtc_peers.erase(remote_id)
 	_rtc_remote_description_set.erase(remote_id)
@@ -2322,6 +2447,9 @@ func _close_rtc(close_reason: String = "session_closed") -> void:
 		_close_rtc_peer(str(raw_peer_id), close_reason)
 	_rtc_peers.clear()
 	_rtc_channels.clear()
+	_rtc_control_channels.clear()
+	_rtc_control_channel_capabilities.clear()
+	_rtc_control_channel_probe_sent.clear()
 	_rtc_voice_channels.clear()
 	_rtc_remote_description_set.clear()
 	_rtc_pending_candidates.clear()
